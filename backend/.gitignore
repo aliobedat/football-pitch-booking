@@ -1,0 +1,25 @@
+# Environment — never commit real credentials
+.env
+.env.*
+!.env.example
+
+# Compiled binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+cmd/api/api
+bin/
+
+# Test binaries and coverage
+*.test
+*.out
+coverage.html
+
+# Go build cache (if vendored locally)
+vendor/
+
+# OS
+.DS_Store
+Thumbs.db

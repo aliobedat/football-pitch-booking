@@ -1,0 +1,20 @@
+# Claude Code project memory
+.claude/
+
+# Environment — top-level safety net
+.env
+.env.*
+*.env
+
+# OS
+.DS_Store
+.DS_Store?
+Thumbs.db
+ehthumbs.db
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
