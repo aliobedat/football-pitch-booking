@@ -72,7 +72,7 @@ func Load() *Config {
 
 	return &Config{
 		AppEnv:     getEnv("APP_ENV", "development"),
-		ServerPort: getEnv("SERVER_PORT", "8080"),
+		ServerPort: getEnv("PORT", getEnv("SERVER_PORT", "8080")),
 		BcryptCost: bcryptCost,
 		JWT: JWTConfig{
 			Secret:        jwtSecret,
