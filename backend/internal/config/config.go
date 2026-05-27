@@ -16,6 +16,10 @@ type Config struct {
 }
 
 type DBConfig struct {
+	// URL takes full precedence when set. Passed directly to pgx so that
+	// URL-encoded passwords and connection parameters are handled natively.
+	// Falls back to the individual fields below when empty.
+	URL      string
 	Host     string
 	Port     string
 	User     string
@@ -27,12 +31,15 @@ type DBConfig struct {
 
 // JWTConfig holds all JWT-related configuration.
 type JWTConfig struct {
-	Secret         string
-	AccessExpiry   time.Duration
-	RefreshExpiry  time.Duration
+	Secret        string
+	AccessExpiry  time.Duration
+	RefreshExpiry time.Duration
 }
 
 func (d DBConfig) DSN() string {
+	if d.URL != "" {
+		return d.URL
+	}
 	return fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		d.Host, d.Port, d.User, d.Password, d.Name,
@@ -72,15 +79,22 @@ func Load() *Config {
 			AccessExpiry:  accessExpiry,
 			RefreshExpiry: refreshExpiry,
 		},
-		DB: DBConfig{
-			Host:     mustGetEnv("DB_HOST"),
-			Port:     getEnv("DB_PORT", "5432"),
-			User:     mustGetEnv("DB_USER"),
-			Password: mustGetEnv("DB_PASSWORD"),
-			Name:     mustGetEnv("DB_NAME"),
-			MaxConns: int32(maxConns),
-			MinConns: int32(minConns),
-		},
+		DB: loadDBConfig(int32(maxConns), int32(minConns)),
+	}
+}
+
+func loadDBConfig(maxConns, minConns int32) DBConfig {
+	if url := getEnv("DATABASE_URL", ""); url != "" {
+		return DBConfig{URL: url, MaxConns: maxConns, MinConns: minConns}
+	}
+	return DBConfig{
+		Host:     mustGetEnv("DB_HOST"),
+		Port:     getEnv("DB_PORT", "5432"),
+		User:     mustGetEnv("DB_USER"),
+		Password: mustGetEnv("DB_PASSWORD"),
+		Name:     mustGetEnv("DB_NAME"),
+		MaxConns: maxConns,
+		MinConns: minConns,
 	}
 }
 
