@@ -28,7 +28,7 @@ type BookingModel struct {
 
 func (m *BookingModel) Insert(b *Booking) error {
 	query := `
-		INSERT INTO bookings (pitch_id, user_id, start_time, end_time, total_price)
+		INSERT INTO bookings (pitch_id, player_id, start_time, end_time, total_price)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING id, status, created_at`
 

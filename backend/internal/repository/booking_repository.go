@@ -92,12 +92,12 @@ func (r *bookingRepo) CreateBooking(
 
 	// تم التعديل ليتوافق مع user_id و start_time و end_time
 	err = tx.QueryRow(ctx, `
-		INSERT INTO bookings (pitch_id, user_id, start_time, end_time, total_price)
+		INSERT INTO bookings (pitch_id, player_id, start_time, end_time, total_price)
 		VALUES ($1, $2, $3, $4, $5)
 		RETURNING
 			id,
 			pitch_id,
-			user_id,
+			player_id,
 			start_time,
 			end_time,
 			status,
@@ -180,10 +180,10 @@ func (r *bookingRepo) GetBookedSlots(
 func (r *bookingRepo) GetUserBookings(ctx context.Context, userID int64) ([]models.Booking, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT b.id, b.pitch_id, COALESCE(p.name, '') AS pitch_name,
-		       b.user_id, b.start_time, b.end_time, b.status, b.total_price, b.created_at
+		       b.player_id, b.start_time, b.end_time, b.status, b.total_price, b.created_at
 		FROM bookings b
 		LEFT JOIN pitches p ON p.id = b.pitch_id
-		WHERE b.user_id = $1
+		WHERE b.player_id = $1
 		ORDER BY b.created_at DESC
 	`, userID)
 	if err != nil {
@@ -218,13 +218,13 @@ func (r *bookingRepo) GetAllBookings(ctx context.Context, ownerID int64) ([]mode
 		SELECT
 			b.id,
 			b.pitch_id,    COALESCE(p.name,      '') AS pitch_name,
-			b.user_id,     COALESCE(u.full_name,  '') AS user_name,
+			b.player_id,   COALESCE(u.full_name,  '') AS user_name,
 			               COALESCE(u.email,      '') AS user_email,
 			b.start_time, b.end_time,
 			b.status, b.total_price, b.created_at
 		FROM bookings b
 		INNER JOIN pitches p ON p.id = b.pitch_id AND p.owner_id = $1
-		LEFT JOIN  users   u ON u.id = b.user_id
+		LEFT JOIN  users   u ON u.id = b.player_id
 		ORDER BY b.created_at DESC
 	`, ownerID)
 	if err != nil {
@@ -276,7 +276,7 @@ func (r *bookingRepo) UpdateBookingStatus(
 		RETURNING
 			id,
 			pitch_id,
-			user_id,
+			player_id,
 			start_time,
 			end_time,
 			status,
