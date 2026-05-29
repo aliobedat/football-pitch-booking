@@ -20,8 +20,8 @@ interface Props {
   pricePerHour: number;
 }
 
-type SlotState = 'available' | 'booked' | 'selected-start' | 'selected-end'
-               | 'in-range'  | 'hover-range' | 'disabled';
+type SlotState = 'available' | 'booked' | 'selected-start' | 'in-range'
+               | 'hover-range' | 'disabled';
 type Phase = 'idle' | 'picking-end' | 'done';
 
 // ─── Constants & helpers ──────────────────────────────────────────────────────
@@ -38,17 +38,15 @@ function genTimes(fromMins: number, toMins: number): string[] {
   return out;
 }
 
-// 30 slot labels: 07:00 → 21:30  (each is a 30-min period; "21:30" ends at 22:00)
-const SLOTS = genTimes(7 * 60, 21 * 60 + 30);
+// 31 time labels: 07:00 → 22:00
+// Each label is BOTH a possible start AND an exact end boundary.
+// e.g. clicking "08:30" as start + "09:30" as end → 1-hour booking 08:30–09:30.
+// The slot "22:00" can only appear as an end boundary, never as a start.
+const SLOTS = genTimes(7 * 60, 22 * 60);
 
 function toMins(t: string): number {
   const [h, m] = t.split(':').map(Number);
   return h * 60 + m;
-}
-
-function addMins(t: string, mins: number): string {
-  const total = toMins(t) + mins;
-  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
 }
 
 function durationLabel(totalMins: number): string {
@@ -80,6 +78,8 @@ function buildDateTime(day: Date, timeStr: string): Date {
   return d;
 }
 
+// True if the 30-min period [slot, slot+30min) overlaps any existing booking.
+// "22:00" is a boundary marker — its period 22:00–22:30 never overlaps real bookings.
 function isSlotBooked(slot: string, booked: BookedSlot[], day: Date): boolean {
   const slotStart = buildDateTime(day, slot).getTime();
   const slotEnd   = slotStart + 30 * 60 * 1000;
@@ -104,12 +104,9 @@ function slotClasses(state: SlotState): string {
       return `${base} bg-white/[0.03] border-white/[0.07] text-white/45 cursor-pointer ` +
              'hover:bg-emerald-500/10 hover:border-emerald-500/30 hover:text-emerald-300';
     case 'booked':
-      return `${base} bg-red-950/20 border-red-900/[0.12] text-red-500/25 cursor-not-allowed line-through ` +
-             'decoration-red-500/20 opacity-60';
+      return `${base} bg-red-950/20 border-red-900/[0.12] text-red-500/25 cursor-not-allowed ` +
+             'line-through decoration-red-500/20 opacity-60';
     case 'selected-start':
-      return `${base} bg-emerald-500/25 border-emerald-400/60 text-emerald-300 cursor-pointer ` +
-             'shadow-[0_0_12px_rgba(52,211,153,0.14)]';
-    case 'selected-end':
       return `${base} bg-emerald-500/25 border-emerald-400/60 text-emerald-300 cursor-pointer ` +
              'shadow-[0_0_12px_rgba(52,211,153,0.14)]';
     case 'in-range':
@@ -131,6 +128,8 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const [selDay,       setSelDay]       = useState<Date>(DAYS[0]);
   const [booked,       setBooked]       = useState<BookedSlot[]>([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
+  // startSlot: the clicked start label, e.g. "08:30"
+  // endSlot:   the exact end boundary, e.g. "09:30" → booking is 08:30–09:30
   const [startSlot,    setStartSlot]    = useState<string | null>(null);
   const [endSlot,      setEndSlot]      = useState<string | null>(null);
   const [hoverSlot,    setHoverSlot]    = useState<string | null>(null);
@@ -140,7 +139,6 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
 
   const phase: Phase = !startSlot ? 'idle' : !endSlot ? 'picking-end' : 'done';
 
-  // Fetch booked slots whenever the selected day changes
   useEffect(() => {
     setLoadingSlots(true);
     setStartSlot(null);
@@ -161,105 +159,138 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     setApiError(null);
   }
 
-  // ── Pre-compute booked slot set ───────────────────────────────────────────
+  // ── Pre-computed values ───────────────────────────────────────────────────
 
+  // Set of slot labels whose 30-min period overlaps an existing booking
   const bookedSet = useMemo(
     () => new Set(SLOTS.filter(s => isSlotBooked(s, booked, selDay))),
     [booked, selDay],
   );
 
-  const startIdx = startSlot ? SLOTS.indexOf(startSlot) : -1;
+  const startIdx  = startSlot ? SLOTS.indexOf(startSlot) : -1;
+  const startMins = startSlot ? toMins(startSlot) : -1;
 
-  // Index of the first booked slot after startSlot (blocks end-time extension past it)
-  const nextBookedIdx = useMemo(() => {
-    if (startIdx < 0) return SLOTS.length;
-    for (let i = startIdx + 1; i < SLOTS.length; i++) {
-      if (bookedSet.has(SLOTS[i])) return i;
+  // Minutes of the first booked period that starts AFTER startSlot.
+  // Valid end times must be <= this value (so the new booking doesn't overlap it).
+  const nextBookedStartMins = useMemo(() => {
+    if (startMins < 0) return 22 * 60;
+    // iterate only the 30 period slots (i < 30), not the "22:00" boundary
+    for (let i = 0; i < 30; i++) {
+      const m = toMins(SLOTS[i]);
+      if (m > startMins && bookedSet.has(SLOTS[i])) return m;
     }
-    return SLOTS.length;
-  }, [startIdx, bookedSet]);
+    return 22 * 60;
+  }, [startMins, bookedSet]);
 
   // ── State map for every slot ──────────────────────────────────────────────
 
   const slotStateMap = useMemo<Map<string, SlotState>>(() => {
     const map = new Map<string, SlotState>();
-    const activeEnd    = endSlot ?? (phase === 'picking-end' ? hoverSlot : null);
-    const activeEndIdx = activeEnd ? SLOTS.indexOf(activeEnd) : -1;
+    // Use confirmed endSlot, or hoverSlot when still picking
+    const activeEnd     = endSlot ?? (phase === 'picking-end' ? hoverSlot : null);
+    const activeEndMins = activeEnd ? toMins(activeEnd) : -1;
 
     for (let i = 0; i < SLOTS.length; i++) {
-      const s = SLOTS[i];
+      const s     = SLOTS[i];
+      const sMins = toMins(s);
 
-      if (bookedSet.has(s))                          { map.set(s, 'booked');         continue; }
-      if (phase === 'idle')                          { map.set(s, 'available');       continue; }
-      if (i === startIdx)                            { map.set(s, 'selected-start');  continue; }
-      if (i < startIdx || i >= nextBookedIdx)        { map.set(s, 'disabled');        continue; }
-      if (endSlot && i === SLOTS.indexOf(endSlot))   { map.set(s, 'selected-end');   continue; }
+      // Already occupied by an existing booking
+      if (bookedSet.has(s)) { map.set(s, 'booked'); continue; }
 
-      if (activeEndIdx > startIdx && i > startIdx && i < activeEndIdx) {
+      // ── Idle phase ──────────────────────────────────────────────────────
+      if (phase === 'idle') {
+        // A slot is only a valid START if a 1-hour end can fit before 22:00
+        // i.e. startTime + 60min ≤ 22:00 → startTime ≤ 21:00
+        map.set(s, sMins <= 21 * 60 ? 'available' : 'disabled');
+        continue;
+      }
+
+      // ── Picking-end / done ──────────────────────────────────────────────
+
+      // The selected start slot itself
+      if (i === startIdx) { map.set(s, 'selected-start'); continue; }
+
+      // Slots consumed by the active selection (strictly between start and end boundary)
+      // These are highlighted regardless of the disabled checks below.
+      if (activeEndMins > 0 && sMins > startMins && sMins < activeEndMins) {
         map.set(s, endSlot ? 'in-range' : 'hover-range');
         continue;
       }
 
+      // Before the start: locked
+      if (sMins < startMins) { map.set(s, 'disabled'); continue; }
+
+      // Within the 1-hour minimum gap — can't be an end time
+      // (startMins < sMins < startMins+60 → booking would be < 60 min)
+      if (sMins > startMins && sMins < startMins + 60) { map.set(s, 'disabled'); continue; }
+
+      // Past the next booked slot — can't extend the booking here
+      if (sMins > nextBookedStartMins) { map.set(s, 'disabled'); continue; }
+
+      // Everything else is an available (clickable) end boundary.
+      // This includes the confirmed endSlot itself — it shows as 'available'
+      // (unlit) because it is the exclusive boundary, not a consumed period.
       map.set(s, 'available');
     }
 
     return map;
-  }, [phase, startIdx, nextBookedIdx, bookedSet, endSlot, hoverSlot]);
+  }, [phase, startIdx, startMins, nextBookedStartMins, bookedSet, endSlot, hoverSlot]);
 
   // ── Derived booking values ────────────────────────────────────────────────
 
-  const startTime    = startSlot;                              // "HH:MM"
-  const endTime      = endSlot ? addMins(endSlot, 30) : null;  // "HH:MM"
-  const durationMins = startTime && endTime ? toMins(endTime) - toMins(startTime) : 0;
-  const total        = durationMins > 0
-    ? Math.round((durationMins / 60) * pricePerHour * 100) / 100
-    : 0;
-  const canSubmit    = !!startTime && !!endTime && !submitting;
+  // endSlot IS the exact end time (no +30min offset)
+  const durationMins = startMins >= 0 && endSlot
+    ? toMins(endSlot) - startMins : 0;
+  const total = durationMins > 0
+    ? Math.round((durationMins / 60) * pricePerHour * 100) / 100 : 0;
+  const canSubmit = !!startSlot && !!endSlot && !submitting;
 
   // ── Slot interaction ──────────────────────────────────────────────────────
 
   function handleSlotClick(s: string) {
-    const state = slotStateMap.get(s);
     setApiError(null);
+    const sMins = toMins(s);
 
     if (phase === 'idle') {
-      if (state === 'available') setStartSlot(s);
+      // Only startable slots (available, not booked, sMins ≤ 21:00)
+      if (!bookedSet.has(s) && sMins <= 21 * 60) setStartSlot(s);
       return;
     }
 
     if (phase === 'picking-end') {
       if (s === startSlot) { resetSelection(); return; }
-      const idx = SLOTS.indexOf(s);
-      if (state === 'available' && idx > startIdx) {
+      // Valid end: startMins+60 ≤ sMins ≤ nextBookedStartMins
+      const isValidEnd = sMins >= startMins + 60 && sMins <= nextBookedStartMins;
+      if (isValidEnd) {
         setEndSlot(s);
         setHoverSlot(null);
       }
       return;
     }
-    // phase === 'done': interaction locked until reset
+    // phase === 'done': locked until reset button
   }
 
+  // Hover validity is checked directly (not from slotStateMap) to avoid
+  // stale-state race when the mouse moves between slots quickly.
   function handleSlotHover(s: string) {
     if (phase !== 'picking-end') { setHoverSlot(null); return; }
-    const state = slotStateMap.get(s);
-    const idx   = SLOTS.indexOf(s);
-    setHoverSlot(state === 'available' && idx > startIdx ? s : null);
+    const sMins = toMins(s);
+    const isValidEnd = sMins >= startMins + 60 && sMins <= nextBookedStartMins;
+    setHoverSlot(isValidEnd ? s : null);
   }
 
   // ── Submit ────────────────────────────────────────────────────────────────
 
   async function handleSubmit() {
-    if (!canSubmit || !startTime || !endTime) return;
-    const start = buildDateTime(selDay, startTime);
-    const end   = buildDateTime(selDay, endTime);
+    if (!canSubmit || !startSlot || !endSlot) return;
     setSubmitting(true);
     setApiError(null);
 
     try {
       await api.post('/bookings', {
         pitch_id:    pitchId,
-        start_time:  start.toISOString(),
-        end_time:    end.toISOString(),
+        start_time:  buildDateTime(selDay, startSlot).toISOString(),
+        end_time:    buildDateTime(selDay, endSlot).toISOString(),
         total_price: total,
       });
       setSuccess(true);
@@ -306,7 +337,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const phaseHint =
     phase === 'idle'        ? 'اختر وقت البداية'                  :
     phase === 'picking-end' ? 'اختر وقت الانتهاء (ساعة كحد أدنى)' :
-                              `${startTime} ← ${endTime}`;
+                              `${startSlot} ← ${endSlot}`;
 
   return (
     <div className="rounded-2xl bg-[#141715] border border-white/[0.07] overflow-hidden">
@@ -370,7 +401,8 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
             <div className="flex items-center justify-between min-h-[20px]">
               <p className={[
                 'text-[11px] transition-colors duration-200',
-                phase === 'picking-end' ? 'text-emerald-400/70' : 'text-white/35',
+                phase === 'picking-end' ? 'text-emerald-400/70' :
+                phase === 'done'        ? 'text-emerald-300 font-mono' : 'text-white/35',
               ].join(' ')}>
                 {phaseHint}
               </p>
