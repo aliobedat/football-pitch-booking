@@ -28,8 +28,10 @@ type SlotState = 'selected' | 'booked' | 'past' | 'available';
 // Constants
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Hourly slots 07:00 – 22:00  (16 slots → 4 × 4 grid)
-const SLOT_HOURS = Array.from({ length: 16 }, (_, i) => i + 7);
+// 30-minute slots 07:00 – 21:30  (30 slots → 6 rows × 5 cols)
+const SLOT_HALF_HOURS = Array.from({ length: 30 }, (_, i) =>
+  Math.round((7 + i * 0.5) * 10) / 10,
+);
 
 const AR_WEEKDAY = ['أحد', 'اثن', 'ثلا', 'أرب', 'خمي', 'جمع', 'سبت'];
 const AR_MONTH   = ['يناير','فبراير','مارس','أبريل','مايو','يونيو',
@@ -56,13 +58,23 @@ function toDateStr(d: Date): string {
 }
 
 function fmt(h: number): string {
-  return `${String(h).padStart(2, '0')}:00`;
+  const hours = Math.floor(h);
+  const mins  = h % 1 >= 0.5 ? '30' : '00';
+  return `${String(hours).padStart(2, '0')}:${mins}`;
 }
 
 function durationLabel(d: number): string {
-  if (d === 1) return 'ساعة واحدة';
-  if (d === 2) return 'ساعتان';
+  if (d === 0.5) return 'نصف ساعة';
+  if (d === 1)   return 'ساعة واحدة';
+  if (d === 1.5) return 'ساعة ونصف';
+  if (d === 2)   return 'ساعتان';
   return `${d} ساعات`;
+}
+
+function slotToDate(day: Date, h: number): Date {
+  const d = new Date(day);
+  d.setHours(Math.floor(h), h % 1 >= 0.5 ? 30 : 0, 0, 0);
+  return d;
 }
 
 // Computed once per module load — fresh for each new page visit in the browser
@@ -79,7 +91,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const [booked,  setBooked]  = useState<BookedSlot[]>([]);
   const [loading, setLoading] = useState(false);
 
-  // startH inclusive, endH exclusive  (endH = startH + 1 when single slot)
+  // startH inclusive, endH exclusive  (endH = startH + 0.5 when single slot)
   const [startH, setStartH] = useState<number | null>(null);
   const [endH,   setEndH]   = useState<number | null>(null);
 
@@ -103,14 +115,13 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
   // ── Slot state helpers ──────────────────────────────────────────────────────
 
   function slotBooked(h: number): boolean {
-    const s = new Date(selDay); s.setHours(h, 0, 0, 0);
-    const e = new Date(selDay); e.setHours(h + 1, 0, 0, 0);
+    const s = slotToDate(selDay, h);
+    const e = slotToDate(selDay, h + 0.5);
     return booked.some(b => new Date(b.start_time) < e && new Date(b.end_time) > s);
   }
 
   function slotPast(h: number): boolean {
-    const s = new Date(selDay); s.setHours(h, 0, 0, 0);
-    return s <= new Date();
+    return slotToDate(selDay, h) <= new Date();
   }
 
   function slotDisabled(h: number): boolean { return slotBooked(h) || slotPast(h); }
@@ -119,7 +130,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     if (slotBooked(h)) return 'booked';
     if (slotPast(h))   return 'past';
     if (startH !== null) {
-      const end = endH ?? startH + 1;
+      const end = endH ?? startH + 0.5;
       if (h >= startH && h < end) return 'selected';
     }
     return 'available';
@@ -138,29 +149,34 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     // Same slot → deselect
     if (h === startH) { setStartH(null); return; }
     // Earlier slot → reset start
-    if (h < startH)  { setStartH(h); setEndH(null); return; }
+    if (h < startH)   { setStartH(h); setEndH(null); return; }
 
-    // Later slot → extend if no blocked slots in between
-    const gap = Array.from({ length: h - startH - 1 }, (_, i) => startH + 1 + i);
+    // Later slot → extend if no blocked slots lie between start and h
+    const steps = Math.round((h - startH) / 0.5) - 1;
+    const gap = Array.from({ length: steps }, (_, i) =>
+      Math.round((startH + (i + 1) * 0.5) * 10) / 10,
+    );
     if (gap.some(slotDisabled)) {
       setStartH(h); setEndH(null); return;
     }
-    setEndH(h + 1); // exclusive
+    setEndH(Math.round((h + 0.5) * 10) / 10);
   }
 
   // ── Derived values ──────────────────────────────────────────────────────────
 
-  const effectiveEnd = startH !== null ? (endH ?? startH + 1) : null;
-  const duration     = startH !== null && effectiveEnd !== null ? effectiveEnd - startH : 0;
-  const total        = duration * pricePerHour;
+  const effectiveEnd = startH !== null ? (endH ?? startH + 0.5) : null;
+  const duration     = startH !== null && effectiveEnd !== null
+    ? Math.round((effectiveEnd - startH) * 10) / 10
+    : 0;
+  const total = Math.round(duration * pricePerHour * 100) / 100;
 
   // ── Submit ──────────────────────────────────────────────────────────────────
 
   async function handleSubmit() {
     if (startH === null || submitting) return;
 
-    const start = new Date(selDay); start.setHours(startH, 0, 0, 0);
-    const end   = new Date(selDay); end.setHours(effectiveEnd!, 0, 0, 0);
+    const start = slotToDate(selDay, startH);
+    const end   = slotToDate(selDay, effectiveEnd!);
 
     setSubmitting(true);
     setApiError(null);
@@ -280,8 +296,8 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
               <div className="w-5 h-5 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
             </div>
           ) : (
-            <div className="grid grid-cols-4 gap-1.5">
-              {SLOT_HOURS.map(h => {
+            <div className="grid grid-cols-5 gap-1.5">
+              {SLOT_HALF_HOURS.map(h => {
                 const state    = slotState(h);
                 const disabled = state === 'booked' || state === 'past';
                 return (
@@ -325,7 +341,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
               <p className="text-[10px] text-white/20">اضغط على وقت البداية</p>
             ) : endH === null ? (
               <p className="text-[10px] text-emerald-400/60">
-                يبدأ {fmt(startH)} · اضغط للانتهاء أو احجز ساعة واحدة
+                يبدأ {fmt(startH)} · اضغط وقت الانتهاء أو احجز 30 دقيقة
               </p>
             ) : (
               <p className="text-[10px] font-semibold text-emerald-400">
@@ -343,7 +359,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                 إجمالي الحجز
               </p>
               <p className="text-[11px] text-white/30">
-                {duration} {duration === 1 ? 'ساعة' : 'ساعات'} × {pricePerHour} دينار
+                {durationLabel(duration)} × {pricePerHour} دينار
               </p>
             </div>
             <div className="flex items-baseline gap-1">

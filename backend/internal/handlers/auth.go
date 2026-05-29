@@ -42,7 +42,6 @@ type registerRequest struct {
 	FullName string `json:"full_name" binding:"required"`
 	Email    string `json:"email"     binding:"required"`
 	Password string `json:"password"  binding:"required"`
-	Phone    string `json:"phone"`
 	Role     string `json:"role"      binding:"required"`
 }
 
@@ -78,7 +77,6 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	// ── Input validation ─────────────────────────────────────────────────────
 	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 	req.FullName = strings.TrimSpace(req.FullName)
-	req.Phone = strings.TrimSpace(req.Phone)
 
 	if validationErrs := validateRegistration(req); len(validationErrs) > 0 {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
@@ -102,7 +100,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 	user, err := h.userRepo.CreateUser(c.Request.Context(), repository.CreateUserParams{
 		FullName:     req.FullName,
 		Email:        req.Email,
-		Phone:        req.Phone,
+		Phone:        "",
 		PasswordHash: hash,
 		Role:         models.UserRole(req.Role),
 	})

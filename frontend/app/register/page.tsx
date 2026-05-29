@@ -37,7 +37,6 @@ interface FormValues {
   fullName: string;
   email:    string;
   password: string;
-  phone:    string;
   role:     Role;
 }
 
@@ -240,7 +239,6 @@ export default function RegisterPage() {
     fullName: '',
     email:    '',
     password: '',
-    phone:    '',
     role:     'player',
   });
   const [errors, setErrors]             = useState<FormErrors>({});
@@ -287,16 +285,12 @@ export default function RegisterPage() {
     setApiError(null);
 
     try {
-      // Build payload — only include phone when non-empty
-      const payload: Record<string, string> = {
+      const payload = {
         full_name: form.fullName.trim(),
         email:     form.email.trim().toLowerCase(),
         password:  form.password,
         role:      form.role,
       };
-      if (form.phone.trim()) {
-        payload.phone = form.phone.trim();
-      }
 
       const { data } = await api.post<{ message: string; data: AuthApiResponse }>(
         '/auth/register',
@@ -387,16 +381,6 @@ export default function RegisterPage() {
                 <PasswordStrength password={form.password} />
               )}
             </div>
-
-            <Input
-              label="رقم الهاتف (اختياري)"
-              type="tel"
-              placeholder="+962 7X XXX XXXX"
-              autoComplete="tel"
-              value={form.phone}
-              onChange={handleChange('phone')}
-              hint="يستخدم لإرسال إشعارات الحجوزات"
-            />
 
             {apiError && (
               <div

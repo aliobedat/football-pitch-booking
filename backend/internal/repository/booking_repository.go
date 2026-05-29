@@ -91,8 +91,8 @@ func (r *bookingRepo) CreateBooking(
 	var b models.Booking
 
 	err = tx.QueryRow(ctx, `
-		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price)
-		VALUES ($1, $2, tsrange($3::timestamp, $4::timestamp, '[)'), $5)
+		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status)
+		VALUES ($1, $2, tsrange($3::timestamp, $4::timestamp, '[)'), $5, 'confirmed')
 		RETURNING
 			id,
 			pitch_id,
