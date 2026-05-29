@@ -90,16 +90,15 @@ func (r *bookingRepo) CreateBooking(
 
 	var b models.Booking
 
-	// تم التعديل ليتوافق مع user_id و start_time و end_time
 	err = tx.QueryRow(ctx, `
-		INSERT INTO bookings (pitch_id, player_id, start_time, end_time, total_price)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price)
+		VALUES ($1, $2, tsrange($3::timestamp, $4::timestamp, '[)'), $5)
 		RETURNING
 			id,
 			pitch_id,
 			player_id,
-			start_time,
-			end_time,
+			lower(booking_range) AS start_time,
+			upper(booking_range) AS end_time,
 			status,
 			total_price,
 			created_at
@@ -142,14 +141,13 @@ func (r *bookingRepo) GetBookedSlots(
 	dayStart := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
 	dayEnd := dayStart.Add(24 * time.Hour)
 
-	// تم الاستغناء عن TSRANGE واستخدام المقارنة المباشرة للوقت
 	rows, err := r.db.Query(ctx, `
-		SELECT id, start_time, end_time, status
+		SELECT id, lower(booking_range) AS start_time, upper(booking_range) AS end_time, status
 		FROM bookings
 		WHERE pitch_id = $1
 		  AND status <> 'cancelled'
-		  AND start_time < $3 AND end_time > $2
-		ORDER BY start_time
+		  AND booking_range && tsrange($2::timestamp, $3::timestamp, '[)')
+		ORDER BY lower(booking_range)
 	`, pitchID, dayStart, dayEnd)
 
 	if err != nil {
@@ -180,7 +178,9 @@ func (r *bookingRepo) GetBookedSlots(
 func (r *bookingRepo) GetUserBookings(ctx context.Context, userID int64) ([]models.Booking, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT b.id, b.pitch_id, COALESCE(p.name, '') AS pitch_name,
-		       b.player_id, b.start_time, b.end_time, b.status, b.total_price, b.created_at
+		       b.player_id,
+		       lower(b.booking_range) AS start_time, upper(b.booking_range) AS end_time,
+		       b.status, b.total_price, b.created_at
 		FROM bookings b
 		LEFT JOIN pitches p ON p.id = b.pitch_id
 		WHERE b.player_id = $1
@@ -220,7 +220,7 @@ func (r *bookingRepo) GetAllBookings(ctx context.Context, ownerID int64) ([]mode
 			b.pitch_id,    COALESCE(p.name,      '') AS pitch_name,
 			b.player_id,   COALESCE(u.full_name,  '') AS user_name,
 			               COALESCE(u.email,      '') AS user_email,
-			b.start_time, b.end_time,
+			lower(b.booking_range) AS start_time, upper(b.booking_range) AS end_time,
 			b.status, b.total_price, b.created_at
 		FROM bookings b
 		INNER JOIN pitches p ON p.id = b.pitch_id AND p.owner_id = $1
@@ -277,8 +277,8 @@ func (r *bookingRepo) UpdateBookingStatus(
 			id,
 			pitch_id,
 			player_id,
-			start_time,
-			end_time,
+			lower(booking_range) AS start_time,
+			upper(booking_range) AS end_time,
 			status,
 			total_price,
 			created_at

@@ -28,8 +28,8 @@ type BookingModel struct {
 
 func (m *BookingModel) Insert(b *Booking) error {
 	query := `
-		INSERT INTO bookings (pitch_id, player_id, start_time, end_time, total_price)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price)
+		VALUES ($1, $2, tsrange($3::timestamp, $4::timestamp, '[)'), $5)
 		RETURNING id, status, created_at`
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
