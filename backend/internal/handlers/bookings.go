@@ -58,9 +58,9 @@ func (h *BookingHandler) CreateBooking(c *gin.Context) {
 		})
 		return
 	}
-	if req.EndTime.Sub(req.StartTime) < 30*time.Minute {
+	if req.EndTime.Sub(req.StartTime) < time.Hour {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
-			"error": "invalid_duration", "message": "minimum booking duration is 30 minutes",
+			"error": "invalid_duration", "message": "minimum booking duration is 1 hour",
 		})
 		return
 	}

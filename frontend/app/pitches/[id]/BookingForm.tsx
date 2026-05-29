@@ -1,8 +1,8 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import { CalendarDays, ArrowLeft, CheckCircle2 } from 'lucide-react';
+import { CalendarDays, Clock, CheckCircle2, ArrowLeft } from 'lucide-react';
 import axios from 'axios';
 import api from '@/lib/api';
 
@@ -22,24 +22,40 @@ interface Props {
   pricePerHour: number;
 }
 
-type SlotState = 'selected' | 'booked' | 'past' | 'available';
-
 // ─────────────────────────────────────────────────────────────────────────────
-// Constants
+// Constants & helpers
 // ─────────────────────────────────────────────────────────────────────────────
-
-// 30-minute slots 07:00 – 21:30  (30 slots → 6 rows × 5 cols)
-const SLOT_HALF_HOURS = Array.from({ length: 30 }, (_, i) =>
-  Math.round((7 + i * 0.5) * 10) / 10,
-);
 
 const AR_WEEKDAY = ['أحد', 'اثن', 'ثلا', 'أرب', 'خمي', 'جمع', 'سبت'];
 const AR_MONTH   = ['يناير','فبراير','مارس','أبريل','مايو','يونيو',
                     'يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
+// Returns "HH:MM" strings for every 30-min step in [fromMins, toMins].
+function genTimes(fromMins: number, toMins: number): string[] {
+  const out: string[] = [];
+  for (let m = fromMins; m <= toMins; m += 30) {
+    out.push(`${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`);
+  }
+  return out;
+}
+
+// Minimum booking = 1 hour  →  last valid start = 21:00 so booking ends by 22:00
+const START_TIMES = genTimes(7 * 60, 21 * 60);   // 07:00 – 21:00
+const ALL_TIMES   = genTimes(7 * 60, 22 * 60);   // 07:00 – 22:00  (end-time pool)
+
+function toMins(t: string): number {
+  const [h, m] = t.split(':').map(Number);
+  return h * 60 + m;
+}
+
+function durationLabel(totalMins: number): string {
+  const h = totalMins / 60;
+  if (h === 1)       return 'ساعة واحدة';
+  if (h === 1.5)     return 'ساعة ونصف';
+  if (h === 2)       return 'ساعتان';
+  if (h % 1 === 0)   return `${h} ساعات`;
+  return `${h} ساعة`;
+}
 
 function upcomingDays(): Date[] {
   return Array.from({ length: 7 }, (_, i) => {
@@ -51,33 +67,16 @@ function upcomingDays(): Date[] {
 }
 
 function toDateStr(d: Date): string {
-  const y   = d.getFullYear();
-  const m   = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-function fmt(h: number): string {
-  const hours = Math.floor(h);
-  const mins  = h % 1 >= 0.5 ? '30' : '00';
-  return `${String(hours).padStart(2, '0')}:${mins}`;
-}
-
-function durationLabel(d: number): string {
-  if (d === 0.5) return 'نصف ساعة';
-  if (d === 1)   return 'ساعة واحدة';
-  if (d === 1.5) return 'ساعة ونصف';
-  if (d === 2)   return 'ساعتان';
-  return `${d} ساعات`;
-}
-
-function slotToDate(day: Date, h: number): Date {
+function buildDateTime(day: Date, timeStr: string): Date {
+  const [h, m] = timeStr.split(':').map(Number);
   const d = new Date(day);
-  d.setHours(Math.floor(h), h % 1 >= 0.5 ? 30 : 0, 0, 0);
+  d.setHours(h, m, 0, 0);
   return d;
 }
 
-// Computed once per module load — fresh for each new page visit in the browser
 const DAYS = upcomingDays();
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -87,96 +86,67 @@ const DAYS = upcomingDays();
 export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const router = useRouter();
 
-  const [selDay,  setSelDay]  = useState<Date>(DAYS[0]);
-  const [booked,  setBooked]  = useState<BookedSlot[]>([]);
-  const [loading, setLoading] = useState(false);
-
-  // startH inclusive, endH exclusive  (endH = startH + 0.5 when single slot)
-  const [startH, setStartH] = useState<number | null>(null);
-  const [endH,   setEndH]   = useState<number | null>(null);
-
-  const [submitting, setSubmitting] = useState(false);
-  const [apiError,   setApiError]   = useState<string | null>(null);
-  const [success,    setSuccess]    = useState(false);
+  const [selDay,       setSelDay]       = useState<Date>(DAYS[0]);
+  const [booked,       setBooked]       = useState<BookedSlot[]>([]);
+  const [loadingSlots, setLoadingSlots] = useState(false);
+  const [startTime,    setStartTime]    = useState('');
+  const [endTime,      setEndTime]      = useState('');
+  const [submitting,   setSubmitting]   = useState(false);
+  const [apiError,     setApiError]     = useState<string | null>(null);
+  const [success,      setSuccess]      = useState(false);
 
   // Fetch booked slots whenever the selected day changes
   useEffect(() => {
-    setLoading(true);
-    setStartH(null);
-    setEndH(null);
+    setLoadingSlots(true);
+    setStartTime('');
+    setEndTime('');
     setApiError(null);
     api
       .get(`/pitches/${pitchId}/availability?date=${toDateStr(selDay)}`)
       .then(r  => setBooked(r.data.booked_slots ?? []))
       .catch(() => setBooked([]))
-      .finally(() => setLoading(false));
+      .finally(() => setLoadingSlots(false));
   }, [pitchId, selDay]);
 
-  // ── Slot state helpers ──────────────────────────────────────────────────────
-
-  function slotBooked(h: number): boolean {
-    const s = slotToDate(selDay, h);
-    const e = slotToDate(selDay, h + 0.5);
-    return booked.some(b => new Date(b.start_time) < e && new Date(b.end_time) > s);
-  }
-
-  function slotPast(h: number): boolean {
-    return slotToDate(selDay, h) <= new Date();
-  }
-
-  function slotDisabled(h: number): boolean { return slotBooked(h) || slotPast(h); }
-
-  function slotState(h: number): SlotState {
-    if (slotBooked(h)) return 'booked';
-    if (slotPast(h))   return 'past';
-    if (startH !== null) {
-      const end = endH ?? startH + 0.5;
-      if (h >= startH && h < end) return 'selected';
-    }
-    return 'available';
-  }
-
-  // ── Selection logic ─────────────────────────────────────────────────────────
-
-  function handleSlot(h: number) {
-    if (slotDisabled(h)) return;
+  // Reset end time whenever start changes
+  function handleStartChange(t: string) {
+    setStartTime(t);
+    setEndTime('');
     setApiError(null);
-
-    // No start yet, or a complete range already exists → begin fresh
-    if (startH === null || endH !== null) {
-      setStartH(h); setEndH(null); return;
-    }
-    // Same slot → deselect
-    if (h === startH) { setStartH(null); return; }
-    // Earlier slot → reset start
-    if (h < startH)   { setStartH(h); setEndH(null); return; }
-
-    // Later slot → extend if no blocked slots lie between start and h
-    const steps = Math.round((h - startH) / 0.5) - 1;
-    const gap = Array.from({ length: steps }, (_, i) =>
-      Math.round((startH + (i + 1) * 0.5) * 10) / 10,
-    );
-    if (gap.some(slotDisabled)) {
-      setStartH(h); setEndH(null); return;
-    }
-    setEndH(Math.round((h + 0.5) * 10) / 10);
   }
 
-  // ── Derived values ──────────────────────────────────────────────────────────
+  // End-time options: every time ≥ startTime + 60 min, up to 22:00
+  const validEndTimes = useMemo(() => {
+    if (!startTime) return [];
+    const minEnd = toMins(startTime) + 60;
+    return ALL_TIMES.filter(t => toMins(t) >= minEnd);
+  }, [startTime]);
 
-  const effectiveEnd = startH !== null ? (endH ?? startH + 0.5) : null;
-  const duration     = startH !== null && effectiveEnd !== null
-    ? Math.round((effectiveEnd - startH) * 10) / 10
+  // Duration (minutes) and total price
+  const durationMins = startTime && endTime ? toMins(endTime) - toMins(startTime) : 0;
+  const total        = durationMins > 0
+    ? Math.round((durationMins / 60) * pricePerHour * 100) / 100
     : 0;
-  const total = Math.round(duration * pricePerHour * 100) / 100;
 
-  // ── Submit ──────────────────────────────────────────────────────────────────
+  // True if the chosen range overlaps any existing booking
+  const hasConflict = useMemo(() => {
+    if (!startTime || !endTime) return false;
+    const selStart = buildDateTime(selDay, startTime);
+    const selEnd   = buildDateTime(selDay, endTime);
+    return booked.some(
+      b => new Date(b.start_time) < selEnd && new Date(b.end_time) > selStart,
+    );
+  }, [startTime, endTime, booked, selDay]);
+
+  const canSubmit = !!startTime && !!endTime && !hasConflict && !submitting;
+
+  // ── Submit ────────────────────────────────────────────────────────────────
 
   async function handleSubmit() {
-    if (startH === null || submitting) return;
+    if (!canSubmit) return;
 
-    const start = slotToDate(selDay, startH);
-    const end   = slotToDate(selDay, effectiveEnd!);
+    const start = buildDateTime(selDay, startTime);
+    const end   = buildDateTime(selDay, endTime);
 
     setSubmitting(true);
     setApiError(null);
@@ -194,10 +164,14 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
       if (axios.isAxiosError(err)) {
         const code = err.response?.data?.error as string | undefined;
         const msg  = err.response?.data?.message as string | undefined;
-        if      (code === 'slot_unavailable')                             setApiError('هذا الوقت محجوز بالفعل، اختر وقتاً آخر');
-        else if (err.response?.status === 401)                            setApiError('يجب تسجيل الدخول أولاً للقيام بالحجز');
-        else if (code === 'invalid_time' || code === 'invalid_duration')  setApiError(msg ?? 'الوقت المحدد غير صالح');
-        else                                                               setApiError(msg ?? 'حدث خطأ ما، يرجى المحاولة مرة أخرى');
+        if (code === 'slot_unavailable')
+          setApiError('هذا الوقت محجوز بالفعل، اختر وقتاً آخر');
+        else if (err.response?.status === 401)
+          setApiError('يجب تسجيل الدخول أولاً للقيام بالحجز');
+        else if (code === 'invalid_time' || code === 'invalid_duration')
+          setApiError(msg ?? 'الوقت المحدد غير صالح');
+        else
+          setApiError(msg ?? 'حدث خطأ ما، يرجى المحاولة مرة أخرى');
       } else {
         setApiError('تعذّر الاتصال بالخادم، تحقق من اتصالك');
       }
@@ -206,7 +180,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     }
   }
 
-  // ── Success screen ──────────────────────────────────────────────────────────
+  // ── Success screen ────────────────────────────────────────────────────────
 
   if (success) {
     return (
@@ -223,7 +197,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     );
   }
 
-  // ── Main form ───────────────────────────────────────────────────────────────
+  // ── Main form ─────────────────────────────────────────────────────────────
 
   return (
     <div className="rounded-2xl bg-[#141715] border border-white/[0.07] overflow-hidden">
@@ -246,7 +220,6 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
             <CalendarDays size={11} className="text-emerald-500" aria-hidden />
             التاريخ
           </p>
-
           <div className="flex gap-2 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none' }}>
             {DAYS.map((day, i) => {
               const active = toDateStr(day) === toDateStr(selDay);
@@ -285,81 +258,94 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
           </div>
         </div>
 
-        {/* ── Slot grid ──────────────────────────────────────────────────────── */}
-        <div>
-          <p className="text-[10px] font-bold text-white/30 tracking-widest uppercase mb-3">
-            الأوقات المتاحة
-          </p>
-
-          {loading ? (
-            <div className="h-28 flex items-center justify-center">
-              <div className="w-5 h-5 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
-            </div>
-          ) : (
-            <div className="grid grid-cols-5 gap-1.5">
-              {SLOT_HALF_HOURS.map(h => {
-                const state    = slotState(h);
-                const disabled = state === 'booked' || state === 'past';
-                return (
-                  <button
-                    key={h}
-                    type="button"
-                    disabled={disabled}
-                    onClick={() => handleSlot(h)}
-                    className={[
-                      'relative py-2.5 rounded-xl border text-[11px] font-mono font-bold tracking-wide',
-                      'transition-all duration-100',
-                      'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-emerald-500',
-                      state === 'selected'
-                        ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-300 scale-[1.04]'
-                        : state === 'booked'
-                        ? 'bg-red-500/[0.05] border-red-500/[0.10] text-red-400/25 cursor-not-allowed overflow-hidden'
-                        : state === 'past'
-                        ? 'bg-transparent border-white/[0.03] text-white/[0.12] cursor-not-allowed'
-                        : [
-                            'bg-white/[0.025] border-white/[0.06] text-white/50 cursor-pointer',
-                            'hover:bg-emerald-500/[0.07] hover:border-emerald-500/25 hover:text-emerald-300/80',
-                            'active:scale-[0.96]',
-                          ].join(' '),
-                    ].join(' ')}
-                  >
-                    {fmt(h)}
-                    {state === 'booked' && (
-                      <span aria-hidden className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                        <span className="block w-[65%] h-px bg-red-400/20 -rotate-6" />
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          {/* Selection hint */}
-          <div className="h-5 mt-2.5 flex items-center justify-center">
-            {startH === null ? (
-              <p className="text-[10px] text-white/20">اضغط على وقت البداية</p>
-            ) : endH === null ? (
-              <p className="text-[10px] text-emerald-400/60">
-                يبدأ {fmt(startH)} · اضغط وقت الانتهاء أو احجز 30 دقيقة
-              </p>
-            ) : (
-              <p className="text-[10px] font-semibold text-emerald-400">
-                {fmt(startH)} – {fmt(endH)} · {durationLabel(duration)}
-              </p>
-            )}
+        {/* ── Time dropdowns ──────────────────────────────────────────────────── */}
+        {loadingSlots ? (
+          <div className="h-20 flex items-center justify-center">
+            <div className="w-5 h-5 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
           </div>
-        </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-3">
+
+            {/* Start time */}
+            <div className="flex flex-col gap-1.5">
+              <label className="flex items-center gap-1.5 text-[10px] font-bold text-white/30 tracking-widest uppercase">
+                <Clock size={10} className="text-emerald-500" aria-hidden />
+                وقت البداية
+              </label>
+              <select
+                value={startTime}
+                onChange={e => handleStartChange(e.target.value)}
+                style={{ colorScheme: 'dark' }}
+                className={[
+                  'w-full rounded-xl border px-3 py-2.5 appearance-none',
+                  'bg-[#0d0f0e] text-[13px] font-mono font-bold',
+                  'focus:outline-none focus:ring-1 focus:ring-emerald-500',
+                  'transition-colors duration-150 cursor-pointer',
+                  startTime
+                    ? 'border-emerald-500/30 text-emerald-300'
+                    : 'border-white/[0.08] text-white/30',
+                ].join(' ')}
+              >
+                <option value="" disabled>— اختر —</option>
+                {START_TIMES.map(t => (
+                  <option key={t} value={t} className="bg-[#1a1c1b] text-[#f0efe8]">{t}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* End time */}
+            <div className="flex flex-col gap-1.5">
+              <label className="flex items-center gap-1.5 text-[10px] font-bold text-white/30 tracking-widest uppercase">
+                <Clock size={10} className="text-emerald-500" aria-hidden />
+                وقت الانتهاء
+              </label>
+              <select
+                value={endTime}
+                onChange={e => { setEndTime(e.target.value); setApiError(null); }}
+                disabled={!startTime}
+                style={{ colorScheme: 'dark' }}
+                className={[
+                  'w-full rounded-xl border px-3 py-2.5 appearance-none',
+                  'bg-[#0d0f0e] text-[13px] font-mono font-bold',
+                  'focus:outline-none focus:ring-1 focus:ring-emerald-500',
+                  'transition-colors duration-150',
+                  !startTime
+                    ? 'opacity-40 cursor-not-allowed border-white/[0.08] text-white/20'
+                    : 'cursor-pointer',
+                  endTime
+                    ? 'border-emerald-500/30 text-emerald-300'
+                    : 'border-white/[0.08] text-white/30',
+                ].join(' ')}
+              >
+                <option value="" disabled>— اختر —</option>
+                {validEndTimes.map(t => (
+                  <option key={t} value={t} className="bg-[#1a1c1b] text-[#f0efe8]">{t}</option>
+                ))}
+              </select>
+            </div>
+
+          </div>
+        )}
+
+        {/* ── Conflict warning ───────────────────────────────────────────────── */}
+        {hasConflict && (
+          <div
+            role="alert"
+            className="rounded-xl px-4 py-3 text-[11px] text-amber-400 bg-amber-500/[0.07] border border-amber-500/[0.18] leading-relaxed"
+          >
+            هذا الوقت متعارض مع حجز موجود مسبقاً. يرجى اختيار وقت آخر.
+          </div>
+        )}
 
         {/* ── Price summary ───────────────────────────────────────────────────── */}
-        {startH !== null && (
+        {startTime && endTime && !hasConflict && (
           <div className="flex items-center justify-between px-4 py-3.5 rounded-xl bg-[#0d0f0e] border border-white/[0.05]">
             <div>
               <p className="text-[9px] font-bold text-white/20 tracking-widest uppercase mb-0.5">
                 إجمالي الحجز
               </p>
               <p className="text-[11px] text-white/30">
-                {durationLabel(duration)} × {pricePerHour} دينار
+                {durationLabel(durationMins)} × {pricePerHour} دينار
               </p>
             </div>
             <div className="flex items-baseline gap-1">
@@ -371,7 +357,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
           </div>
         )}
 
-        {/* ── Error banner ─────────────────────────────────────────────────────── */}
+        {/* ── API error ───────────────────────────────────────────────────────── */}
         {apiError && (
           <div
             role="alert"
@@ -385,14 +371,14 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
         <button
           type="button"
           onClick={handleSubmit}
-          disabled={startH === null || submitting}
+          disabled={!canSubmit}
           className={[
             'flex items-center justify-center gap-2.5 w-full py-3.5 rounded-xl mb-1',
             'text-[13px] font-bold tracking-wide',
             'transition-all duration-200 active:scale-[0.98]',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500',
             'focus-visible:ring-offset-2 focus-visible:ring-offset-[#141715]',
-            startH !== null && !submitting
+            canSubmit
               ? [
                   'bg-gradient-to-r from-green-600 to-emerald-500 text-white',
                   'shadow-[0_4px_20px_rgba(16,185,129,0.22)]',
@@ -408,7 +394,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
             </>
           ) : (
             <>
-              {startH !== null && <ArrowLeft size={14} className="rotate-180" aria-hidden />}
+              {canSubmit && <ArrowLeft size={14} className="rotate-180" aria-hidden />}
               تأكيد الحجز
             </>
           )}
