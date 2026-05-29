@@ -20,6 +20,7 @@ var pitchHues = []string{
 
 // pitchColumns is the canonical SELECT list for all Pitch queries.
 // Column order must match the Scan call in scanPitch.
+// Columns that do not exist in the DB (description, image_url) are omitted.
 const pitchColumns = `
 	id,
 	COALESCE(owner_id, 0),
@@ -28,8 +29,6 @@ const pitchColumns = `
 	surface,
 	format,
 	price_per_hour,
-	COALESCE(description, ''),
-	COALESCE(image_url, ''),
 	rating,
 	review_count,
 	is_featured,
@@ -45,8 +44,6 @@ type Pitch struct {
 	Surface      string   `json:"surface"`
 	Format       string   `json:"format"`
 	PricePerHour int      `json:"pricePerHour"`
-	Description  string   `json:"description,omitempty"`
-	ImageURL     string   `json:"image_url,omitempty"`
 	Rating       float64  `json:"rating"`
 	ReviewCount  int      `json:"reviewCount"`
 	IsFeatured   bool     `json:"isFeatured"`
@@ -55,13 +52,11 @@ type Pitch struct {
 }
 
 type CreatePitchRequest struct {
-	Name         string `json:"name"          binding:"required"`
-	Neighborhood string `json:"neighborhood"  binding:"required"`
-	Surface      string `json:"surface"       binding:"required"`
-	Format       string `json:"format"        binding:"required"`
+	Name         string `json:"name"           binding:"required"`
+	Neighborhood string `json:"neighborhood"   binding:"required"`
+	Surface      string `json:"surface"        binding:"required"`
+	Format       string `json:"format"         binding:"required"`
 	PricePerHour int    `json:"price_per_hour" binding:"required,gt=0"`
-	Description  string `json:"description"`
-	ImageURL     string `json:"image_url"`
 	OwnerID      int    // injected from JWT — never from JSON body
 }
 
@@ -83,7 +78,7 @@ func scanPitch(row interface {
 	err := row.Scan(
 		&p.ID, &p.OwnerID,
 		&p.Name, &p.Neighborhood, &p.Surface, &p.Format,
-		&p.PricePerHour, &p.Description, &p.ImageURL,
+		&p.PricePerHour,
 		&p.Rating, &p.ReviewCount,
 		&p.IsFeatured, &p.Amenities, &p.PitchHue,
 	)
@@ -184,12 +179,12 @@ func (m *PitchModel) CreatePitch(ctx context.Context, req CreatePitchRequest) (*
 	row := m.DB.QueryRow(ctx, fmt.Sprintf(`
 		INSERT INTO pitches
 			(owner_id, name, neighborhood, surface, format, price_per_hour,
-			 description, image_url, rating, review_count, is_featured, pitch_hue, amenities)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 0, 0, false, $9, '{}')
+			 rating, review_count, is_featured, pitch_hue, amenities)
+		VALUES ($1, $2, $3, $4, $5, $6, 0, 0, false, $7, '{}')
 		RETURNING %s
 	`, pitchColumns),
 		req.OwnerID, req.Name, req.Neighborhood, req.Surface, req.Format,
-		req.PricePerHour, req.Description, req.ImageURL, hue,
+		req.PricePerHour, hue,
 	)
 
 	p, err := scanPitch(row)
