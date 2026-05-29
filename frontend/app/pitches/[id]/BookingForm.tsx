@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import { CalendarDays, RefreshCw, CheckCircle2 } from 'lucide-react';
+import { CalendarDays, X, CheckCircle2 } from 'lucide-react';
 import axios from 'axios';
 import api from '@/lib/api';
 
@@ -410,10 +410,16 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                 <button
                   type="button"
                   onClick={resetSelection}
-                  className="flex items-center gap-1 text-[10px] text-white/20 hover:text-white/45 transition-colors duration-150"
+                  className={[
+                    'flex items-center gap-1.5 px-3 py-1.5 rounded-lg border',
+                    'text-[12px] font-semibold transition-all duration-150',
+                    'border-rose-500/20 bg-rose-500/[0.06] text-rose-400',
+                    'hover:bg-rose-500/[0.14] hover:border-rose-500/35',
+                    'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-rose-500',
+                  ].join(' ')}
                 >
-                  <RefreshCw size={10} aria-hidden />
-                  إعادة
+                  <X size={13} aria-hidden />
+                  إلغاء التحديد
                 </button>
               )}
             </div>
