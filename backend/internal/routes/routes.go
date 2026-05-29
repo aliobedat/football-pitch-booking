@@ -52,6 +52,14 @@ v1.GET("/pitches", pitchHandler.ListPitches)
 			middleware.RequireRole("owner"),
 			pitchHandler.CreatePitch,
 		)
+		protected.PATCH("/pitches/:id",
+			middleware.RequireRole("owner"),
+			pitchHandler.UpdatePitch,
+		)
+		protected.DELETE("/pitches/:id",
+			middleware.RequireRole("owner"),
+			pitchHandler.DeletePitch,
+		)
 		protected.GET("/owner/pitches",
 			middleware.RequireRole("owner"),
 			pitchHandler.GetOwnerPitches,

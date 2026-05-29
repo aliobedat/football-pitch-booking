@@ -1,8 +1,10 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import api from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
 import Navbar from '@/components/Navbar';
 import {
   BookOpen, Clock, CheckCircle2, XCircle,
@@ -456,6 +458,16 @@ function AddPitchForm({
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function DashboardPage() {
+  const router = useRouter();
+  const { user, isLoading: authLoading } = useAuth();
+
+  // Client-side role guard (mirrors the edge middleware in middleware.ts).
+  // Runs immediately after auth state resolves to prevent a flash of owner UI.
+  useEffect(() => {
+    if (!authLoading && (!user || user.role !== 'owner')) {
+      router.replace(user ? '/pitches' : '/login');
+    }
+  }, [user, authLoading, router]);
 
   const [activeTab, setActiveTab] = useState<ActiveTab>('bookings');
 
@@ -505,7 +517,15 @@ export default function DashboardPage() {
     cancelled: bookings.filter(b => b.status === 'cancelled').length,
   }), [bookings]);
 
-  // ── global loading (bookings tab is the default) ────────────────────────
+  // ── global loading / access guard ──────────────────────────────────────
+  if (authLoading || !user || user.role !== 'owner') {
+    return (
+      <div className="min-h-screen bg-[#0d0f0e] flex items-center justify-center">
+        <div className="w-6 h-6 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
+      </div>
+    );
+  }
+
   if (bookingsLoading && activeTab === 'bookings') {
     return (
       <div className="min-h-screen bg-[#0d0f0e] flex items-center justify-center">

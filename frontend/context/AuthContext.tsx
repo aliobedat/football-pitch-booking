@@ -41,16 +41,20 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     localStorage.setItem('accessToken', access_token);
     localStorage.setItem('refreshToken', refresh_token);
     localStorage.setItem('user', JSON.stringify(userData));
+    // Lightweight role cookie so Next.js edge middleware can guard /dashboard
+    // without touching the JWT. The real role is enforced by the backend JWT.
+    document.cookie = `malaab_role=${userData.role}; path=/; max-age=${60 * 60 * 24 * 7}; SameSite=Lax`;
     setAccessToken(access_token);
     setUser(userData);
   };
 
   const logout = async () => {
-    try { await api.post('/auth/logout'); } catch (err) {} 
+    try { await api.post('/auth/logout'); } catch (err) {}
     finally {
       localStorage.removeItem('accessToken');
       localStorage.removeItem('refreshToken');
       localStorage.removeItem('user');
+      document.cookie = 'malaab_role=; path=/; max-age=0';
       setUser(null);
       setAccessToken(null);
       window.location.href = '/login';

@@ -107,6 +107,73 @@ func (h *PitchHandler) CreatePitch(c *gin.Context) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// PATCH /api/v1/pitches/:id  (owner only — must own the pitch)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (h *PitchHandler) UpdatePitch(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bad_request", "message": "رقم الملعب غير صحيح"})
+		return
+	}
+
+	var req data.UpdatePitchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+
+	ownerID := middleware.GetUserID(c)
+	pitch, err := h.Model.UpdatePitch(c.Request.Context(), id, ownerID, req)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":   "not_found",
+				"message": "الملعب غير موجود أو لا تملك صلاحية تعديله",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_server_error",
+			"message": "حدث خطأ أثناء تحديث الملعب",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "تم تحديث الملعب بنجاح", "data": pitch})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/v1/pitches/:id  (owner only — must own the pitch)
+// ─────────────────────────────────────────────────────────────────────────────
+
+func (h *PitchHandler) DeletePitch(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id < 1 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bad_request", "message": "رقم الملعب غير صحيح"})
+		return
+	}
+
+	ownerID := middleware.GetUserID(c)
+	if err := h.Model.DeletePitch(c.Request.Context(), id, ownerID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":   "not_found",
+				"message": "الملعب غير موجود أو لا تملك صلاحية حذفه",
+			})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error":   "internal_server_error",
+			"message": "حدث خطأ أثناء حذف الملعب",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "تم حذف الملعب بنجاح"})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GET /api/v1/owner/pitches  (owner only)
 // ─────────────────────────────────────────────────────────────────────────────
 

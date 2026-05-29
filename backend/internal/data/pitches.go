@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -168,6 +169,59 @@ func (m *PitchModel) GetByOwnerID(ctx context.Context, ownerID int) ([]Pitch, er
 		pitches = append(pitches, p)
 	}
 	return pitches, rows.Err()
+}
+
+// UpdatePitchRequest holds the fields an owner may change on their pitch.
+// Zero-value fields are ignored (existing DB value is kept).
+type UpdatePitchRequest struct {
+	Name         string `json:"name"`
+	Neighborhood string `json:"neighborhood"`
+	Surface      string `json:"surface"`
+	Format       string `json:"format"`
+	PricePerHour int    `json:"price_per_hour"`
+}
+
+// UpdatePitch applies a partial update to pitch `id` owned by `ownerID`.
+// Returns pgx.ErrNoRows when the pitch does not exist or is not owned by ownerID.
+func (m *PitchModel) UpdatePitch(ctx context.Context, id, ownerID int, req UpdatePitchRequest) (*Pitch, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	row := m.DB.QueryRow(ctx, fmt.Sprintf(`
+		UPDATE pitches
+		SET name          = CASE WHEN $3 <> '' THEN $3 ELSE name END,
+		    neighborhood  = CASE WHEN $4 <> '' THEN $4 ELSE neighborhood END,
+		    surface       = CASE WHEN $5 <> '' THEN $5 ELSE surface END,
+		    format        = CASE WHEN $6 <> '' THEN $6 ELSE format END,
+		    price_per_hour = CASE WHEN $7 > 0  THEN $7 ELSE price_per_hour END
+		WHERE id = $1 AND owner_id = $2
+		RETURNING %s
+	`, pitchColumns), id, ownerID, req.Name, req.Neighborhood, req.Surface, req.Format, req.PricePerHour)
+
+	p, err := scanPitch(row)
+	if err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// DeletePitch removes pitch `id` owned by `ownerID`.
+// Returns pgx.ErrNoRows when the pitch does not exist or is not owned by ownerID.
+func (m *PitchModel) DeletePitch(ctx context.Context, id, ownerID int) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	tag, err := m.DB.Exec(ctx,
+		`DELETE FROM pitches WHERE id = $1 AND owner_id = $2`,
+		id, ownerID,
+	)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	return nil
 }
 
 func (m *PitchModel) CreatePitch(ctx context.Context, req CreatePitchRequest) (*Pitch, error) {
