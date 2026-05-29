@@ -2,13 +2,11 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import { CalendarDays, Clock, CheckCircle2, ArrowLeft } from 'lucide-react';
+import { CalendarDays, RefreshCw, CheckCircle2 } from 'lucide-react';
 import axios from 'axios';
 import api from '@/lib/api';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 interface BookedSlot {
   booking_id: number;
@@ -22,15 +20,16 @@ interface Props {
   pricePerHour: number;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Constants & helpers
-// ─────────────────────────────────────────────────────────────────────────────
+type SlotState = 'available' | 'booked' | 'selected-start' | 'selected-end'
+               | 'in-range'  | 'hover-range' | 'disabled';
+type Phase = 'idle' | 'picking-end' | 'done';
+
+// ─── Constants & helpers ──────────────────────────────────────────────────────
 
 const AR_WEEKDAY = ['أحد', 'اثن', 'ثلا', 'أرب', 'خمي', 'جمع', 'سبت'];
 const AR_MONTH   = ['يناير','فبراير','مارس','أبريل','مايو','يونيو',
                     'يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
 
-// Returns "HH:MM" strings for every 30-min step in [fromMins, toMins].
 function genTimes(fromMins: number, toMins: number): string[] {
   const out: string[] = [];
   for (let m = fromMins; m <= toMins; m += 30) {
@@ -39,21 +38,25 @@ function genTimes(fromMins: number, toMins: number): string[] {
   return out;
 }
 
-// Minimum booking = 1 hour  →  last valid start = 21:00 so booking ends by 22:00
-const START_TIMES = genTimes(7 * 60, 21 * 60);   // 07:00 – 21:00
-const ALL_TIMES   = genTimes(7 * 60, 22 * 60);   // 07:00 – 22:00  (end-time pool)
+// 30 slot labels: 07:00 → 21:30  (each is a 30-min period; "21:30" ends at 22:00)
+const SLOTS = genTimes(7 * 60, 21 * 60 + 30);
 
 function toMins(t: string): number {
   const [h, m] = t.split(':').map(Number);
   return h * 60 + m;
 }
 
+function addMins(t: string, mins: number): string {
+  const total = toMins(t) + mins;
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
 function durationLabel(totalMins: number): string {
   const h = totalMins / 60;
-  if (h === 1)       return 'ساعة واحدة';
-  if (h === 1.5)     return 'ساعة ونصف';
-  if (h === 2)       return 'ساعتان';
-  if (h % 1 === 0)   return `${h} ساعات`;
+  if (h === 1)     return 'ساعة واحدة';
+  if (h === 1.5)   return 'ساعة ونصف';
+  if (h === 2)     return 'ساعتان';
+  if (h % 1 === 0) return `${h} ساعات`;
   return `${h} ساعة`;
 }
 
@@ -77,7 +80,46 @@ function buildDateTime(day: Date, timeStr: string): Date {
   return d;
 }
 
+function isSlotBooked(slot: string, booked: BookedSlot[], day: Date): boolean {
+  const slotStart = buildDateTime(day, slot).getTime();
+  const slotEnd   = slotStart + 30 * 60 * 1000;
+  return booked.some(b => {
+    const bStart = new Date(b.start_time).getTime();
+    const bEnd   = new Date(b.end_time).getTime();
+    return bStart < slotEnd && bEnd > slotStart;
+  });
+}
+
 const DAYS = upcomingDays();
+
+// ─── Slot visual appearance ───────────────────────────────────────────────────
+
+function slotClasses(state: SlotState): string {
+  const base =
+    'flex items-center justify-center h-10 rounded-xl border ' +
+    'text-[11px] font-mono font-semibold transition-all duration-150 select-none';
+
+  switch (state) {
+    case 'available':
+      return `${base} bg-white/[0.03] border-white/[0.07] text-white/45 cursor-pointer ` +
+             'hover:bg-emerald-500/10 hover:border-emerald-500/30 hover:text-emerald-300';
+    case 'booked':
+      return `${base} bg-red-950/20 border-red-900/[0.12] text-red-500/25 cursor-not-allowed line-through ` +
+             'decoration-red-500/20 opacity-60';
+    case 'selected-start':
+      return `${base} bg-emerald-500/25 border-emerald-400/60 text-emerald-300 cursor-pointer ` +
+             'shadow-[0_0_12px_rgba(52,211,153,0.14)]';
+    case 'selected-end':
+      return `${base} bg-emerald-500/25 border-emerald-400/60 text-emerald-300 cursor-pointer ` +
+             'shadow-[0_0_12px_rgba(52,211,153,0.14)]';
+    case 'in-range':
+      return `${base} bg-emerald-500/[0.13] border-emerald-500/25 text-emerald-400/80 cursor-pointer`;
+    case 'hover-range':
+      return `${base} bg-emerald-500/[0.07] border-emerald-500/[0.14] text-emerald-400/50 cursor-pointer`;
+    case 'disabled':
+      return `${base} bg-white/[0.01] border-white/[0.03] text-white/10 cursor-not-allowed`;
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Component
@@ -89,17 +131,21 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const [selDay,       setSelDay]       = useState<Date>(DAYS[0]);
   const [booked,       setBooked]       = useState<BookedSlot[]>([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
-  const [startTime,    setStartTime]    = useState('');
-  const [endTime,      setEndTime]      = useState('');
+  const [startSlot,    setStartSlot]    = useState<string | null>(null);
+  const [endSlot,      setEndSlot]      = useState<string | null>(null);
+  const [hoverSlot,    setHoverSlot]    = useState<string | null>(null);
   const [submitting,   setSubmitting]   = useState(false);
   const [apiError,     setApiError]     = useState<string | null>(null);
   const [success,      setSuccess]      = useState(false);
 
+  const phase: Phase = !startSlot ? 'idle' : !endSlot ? 'picking-end' : 'done';
+
   // Fetch booked slots whenever the selected day changes
   useEffect(() => {
     setLoadingSlots(true);
-    setStartTime('');
-    setEndTime('');
+    setStartSlot(null);
+    setEndSlot(null);
+    setHoverSlot(null);
     setApiError(null);
     api
       .get(`/pitches/${pitchId}/availability?date=${toDateStr(selDay)}`)
@@ -108,46 +154,104 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
       .finally(() => setLoadingSlots(false));
   }, [pitchId, selDay]);
 
-  // Reset end time whenever start changes
-  function handleStartChange(t: string) {
-    setStartTime(t);
-    setEndTime('');
+  function resetSelection() {
+    setStartSlot(null);
+    setEndSlot(null);
+    setHoverSlot(null);
     setApiError(null);
   }
 
-  // End-time options: every time ≥ startTime + 60 min, up to 22:00
-  const validEndTimes = useMemo(() => {
-    if (!startTime) return [];
-    const minEnd = toMins(startTime) + 60;
-    return ALL_TIMES.filter(t => toMins(t) >= minEnd);
-  }, [startTime]);
+  // ── Pre-compute booked slot set ───────────────────────────────────────────
 
-  // Duration (minutes) and total price
+  const bookedSet = useMemo(
+    () => new Set(SLOTS.filter(s => isSlotBooked(s, booked, selDay))),
+    [booked, selDay],
+  );
+
+  const startIdx = startSlot ? SLOTS.indexOf(startSlot) : -1;
+
+  // Index of the first booked slot after startSlot (blocks end-time extension past it)
+  const nextBookedIdx = useMemo(() => {
+    if (startIdx < 0) return SLOTS.length;
+    for (let i = startIdx + 1; i < SLOTS.length; i++) {
+      if (bookedSet.has(SLOTS[i])) return i;
+    }
+    return SLOTS.length;
+  }, [startIdx, bookedSet]);
+
+  // ── State map for every slot ──────────────────────────────────────────────
+
+  const slotStateMap = useMemo<Map<string, SlotState>>(() => {
+    const map = new Map<string, SlotState>();
+    const activeEnd    = endSlot ?? (phase === 'picking-end' ? hoverSlot : null);
+    const activeEndIdx = activeEnd ? SLOTS.indexOf(activeEnd) : -1;
+
+    for (let i = 0; i < SLOTS.length; i++) {
+      const s = SLOTS[i];
+
+      if (bookedSet.has(s))                          { map.set(s, 'booked');         continue; }
+      if (phase === 'idle')                          { map.set(s, 'available');       continue; }
+      if (i === startIdx)                            { map.set(s, 'selected-start');  continue; }
+      if (i < startIdx || i >= nextBookedIdx)        { map.set(s, 'disabled');        continue; }
+      if (endSlot && i === SLOTS.indexOf(endSlot))   { map.set(s, 'selected-end');   continue; }
+
+      if (activeEndIdx > startIdx && i > startIdx && i < activeEndIdx) {
+        map.set(s, endSlot ? 'in-range' : 'hover-range');
+        continue;
+      }
+
+      map.set(s, 'available');
+    }
+
+    return map;
+  }, [phase, startIdx, nextBookedIdx, bookedSet, endSlot, hoverSlot]);
+
+  // ── Derived booking values ────────────────────────────────────────────────
+
+  const startTime    = startSlot;                              // "HH:MM"
+  const endTime      = endSlot ? addMins(endSlot, 30) : null;  // "HH:MM"
   const durationMins = startTime && endTime ? toMins(endTime) - toMins(startTime) : 0;
   const total        = durationMins > 0
     ? Math.round((durationMins / 60) * pricePerHour * 100) / 100
     : 0;
+  const canSubmit    = !!startTime && !!endTime && !submitting;
 
-  // True if the chosen range overlaps any existing booking
-  const hasConflict = useMemo(() => {
-    if (!startTime || !endTime) return false;
-    const selStart = buildDateTime(selDay, startTime);
-    const selEnd   = buildDateTime(selDay, endTime);
-    return booked.some(
-      b => new Date(b.start_time) < selEnd && new Date(b.end_time) > selStart,
-    );
-  }, [startTime, endTime, booked, selDay]);
+  // ── Slot interaction ──────────────────────────────────────────────────────
 
-  const canSubmit = !!startTime && !!endTime && !hasConflict && !submitting;
+  function handleSlotClick(s: string) {
+    const state = slotStateMap.get(s);
+    setApiError(null);
+
+    if (phase === 'idle') {
+      if (state === 'available') setStartSlot(s);
+      return;
+    }
+
+    if (phase === 'picking-end') {
+      if (s === startSlot) { resetSelection(); return; }
+      const idx = SLOTS.indexOf(s);
+      if (state === 'available' && idx > startIdx) {
+        setEndSlot(s);
+        setHoverSlot(null);
+      }
+      return;
+    }
+    // phase === 'done': interaction locked until reset
+  }
+
+  function handleSlotHover(s: string) {
+    if (phase !== 'picking-end') { setHoverSlot(null); return; }
+    const state = slotStateMap.get(s);
+    const idx   = SLOTS.indexOf(s);
+    setHoverSlot(state === 'available' && idx > startIdx ? s : null);
+  }
 
   // ── Submit ────────────────────────────────────────────────────────────────
 
   async function handleSubmit() {
-    if (!canSubmit) return;
-
+    if (!canSubmit || !startTime || !endTime) return;
     const start = buildDateTime(selDay, startTime);
     const end   = buildDateTime(selDay, endTime);
-
     setSubmitting(true);
     setApiError(null);
 
@@ -197,12 +301,17 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     );
   }
 
-  // ── Main form ─────────────────────────────────────────────────────────────
+  // ── Main render ───────────────────────────────────────────────────────────
+
+  const phaseHint =
+    phase === 'idle'        ? 'اختر وقت البداية'                  :
+    phase === 'picking-end' ? 'اختر وقت الانتهاء (ساعة كحد أدنى)' :
+                              `${startTime} ← ${endTime}`;
 
   return (
     <div className="rounded-2xl bg-[#141715] border border-white/[0.07] overflow-hidden">
 
-      {/* Header */}
+      {/* ── Header ──────────────────────────────────────────────────────── */}
       <div className="px-6 pt-6 pb-5 border-b border-white/[0.05]">
         <p className="text-[10px] font-bold tracking-widest text-emerald-500 uppercase mb-1.5">
           احجز الملعب
@@ -214,7 +323,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
 
       <div className="px-6 py-5 flex flex-col gap-6">
 
-        {/* ── Day strip ──────────────────────────────────────────────────────── */}
+        {/* ── Day strip ───────────────────────────────────────────────── */}
         <div>
           <p className="flex items-center gap-1.5 text-[10px] font-bold text-white/30 tracking-widest uppercase mb-3">
             <CalendarDays size={11} className="text-emerald-500" aria-hidden />
@@ -237,108 +346,87 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                       : 'bg-white/[0.025] border-white/[0.06] hover:border-white/[0.14] hover:bg-white/[0.04]',
                   ].join(' ')}
                 >
-                  <span className={[
-                    'text-[9px] font-bold tracking-wide',
-                    active ? 'text-emerald-400' : 'text-white/30',
-                  ].join(' ')}>
+                  <span className={['text-[9px] font-bold tracking-wide', active ? 'text-emerald-400' : 'text-white/30'].join(' ')}>
                     {i === 0 ? 'اليوم' : AR_WEEKDAY[day.getDay()]}
                   </span>
-                  <span className={[
-                    'text-[20px] font-bold leading-tight',
-                    active ? 'text-emerald-300' : 'text-[#f0efe8]',
-                  ].join(' ')}>
+                  <span className={['text-[20px] font-bold leading-tight', active ? 'text-emerald-300' : 'text-[#f0efe8]'].join(' ')}>
                     {day.getDate()}
                   </span>
-                  <span className="text-[8px] text-white/20">
-                    {AR_MONTH[day.getMonth()]}
-                  </span>
+                  <span className="text-[8px] text-white/20">{AR_MONTH[day.getMonth()]}</span>
                 </button>
               );
             })}
           </div>
         </div>
 
-        {/* ── Time dropdowns ──────────────────────────────────────────────────── */}
+        {/* ── Slot grid ───────────────────────────────────────────────── */}
         {loadingSlots ? (
-          <div className="h-20 flex items-center justify-center">
+          <div className="h-44 flex items-center justify-center">
             <div className="w-5 h-5 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
           </div>
         ) : (
-          <div className="grid grid-cols-2 gap-3">
-
-            {/* Start time */}
-            <div className="flex flex-col gap-1.5">
-              <label className="flex items-center gap-1.5 text-[10px] font-bold text-white/30 tracking-widest uppercase">
-                <Clock size={10} className="text-emerald-500" aria-hidden />
-                وقت البداية
-              </label>
-              <select
-                value={startTime}
-                onChange={e => handleStartChange(e.target.value)}
-                style={{ colorScheme: 'dark' }}
-                className={[
-                  'w-full rounded-xl border px-3 py-2.5 appearance-none',
-                  'bg-[#0d0f0e] text-[13px] font-mono font-bold',
-                  'focus:outline-none focus:ring-1 focus:ring-emerald-500',
-                  'transition-colors duration-150 cursor-pointer',
-                  startTime
-                    ? 'border-emerald-500/30 text-emerald-300'
-                    : 'border-white/[0.08] text-white/30',
-                ].join(' ')}
-              >
-                <option value="" disabled>— اختر —</option>
-                {START_TIMES.map(t => (
-                  <option key={t} value={t} className="bg-[#1a1c1b] text-[#f0efe8]">{t}</option>
-                ))}
-              </select>
+          <>
+            {/* Status / instruction bar */}
+            <div className="flex items-center justify-between min-h-[20px]">
+              <p className={[
+                'text-[11px] transition-colors duration-200',
+                phase === 'picking-end' ? 'text-emerald-400/70' : 'text-white/35',
+              ].join(' ')}>
+                {phaseHint}
+              </p>
+              {startSlot && (
+                <button
+                  type="button"
+                  onClick={resetSelection}
+                  className="flex items-center gap-1 text-[10px] text-white/20 hover:text-white/45 transition-colors duration-150"
+                >
+                  <RefreshCw size={10} aria-hidden />
+                  إعادة
+                </button>
+              )}
             </div>
 
-            {/* End time */}
-            <div className="flex flex-col gap-1.5">
-              <label className="flex items-center gap-1.5 text-[10px] font-bold text-white/30 tracking-widest uppercase">
-                <Clock size={10} className="text-emerald-500" aria-hidden />
-                وقت الانتهاء
-              </label>
-              <select
-                value={endTime}
-                onChange={e => { setEndTime(e.target.value); setApiError(null); }}
-                disabled={!startTime}
-                style={{ colorScheme: 'dark' }}
-                className={[
-                  'w-full rounded-xl border px-3 py-2.5 appearance-none',
-                  'bg-[#0d0f0e] text-[13px] font-mono font-bold',
-                  'focus:outline-none focus:ring-1 focus:ring-emerald-500',
-                  'transition-colors duration-150',
-                  !startTime
-                    ? 'opacity-40 cursor-not-allowed border-white/[0.08] text-white/20'
-                    : 'cursor-pointer',
-                  endTime
-                    ? 'border-emerald-500/30 text-emerald-300'
-                    : 'border-white/[0.08] text-white/30',
-                ].join(' ')}
-              >
-                <option value="" disabled>— اختر —</option>
-                {validEndTimes.map(t => (
-                  <option key={t} value={t} className="bg-[#1a1c1b] text-[#f0efe8]">{t}</option>
-                ))}
-              </select>
+            {/* Grid */}
+            <div
+              role="group"
+              aria-label="اختر الفترة الزمنية"
+              className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-1.5"
+              onMouseLeave={() => setHoverSlot(null)}
+            >
+              {SLOTS.map(s => (
+                <button
+                  key={s}
+                  type="button"
+                  onClick={() => handleSlotClick(s)}
+                  onMouseEnter={() => handleSlotHover(s)}
+                  aria-label={`${s}${slotStateMap.get(s) === 'booked' ? ' (محجوز)' : ''}`}
+                  className={slotClasses(slotStateMap.get(s) ?? 'available')}
+                >
+                  {s}
+                </button>
+              ))}
             </div>
 
-          </div>
+            {/* Legend */}
+            <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[10px] text-white/25">
+              <span className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm bg-white/[0.05] border border-white/[0.08]" aria-hidden />
+                متاح
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm bg-red-950/20 border border-red-900/[0.12]" aria-hidden />
+                محجوز
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500/25 border border-emerald-400/60" aria-hidden />
+                محدد
+              </span>
+            </div>
+          </>
         )}
 
-        {/* ── Conflict warning ───────────────────────────────────────────────── */}
-        {hasConflict && (
-          <div
-            role="alert"
-            className="rounded-xl px-4 py-3 text-[11px] text-amber-400 bg-amber-500/[0.07] border border-amber-500/[0.18] leading-relaxed"
-          >
-            هذا الوقت متعارض مع حجز موجود مسبقاً. يرجى اختيار وقت آخر.
-          </div>
-        )}
-
-        {/* ── Price summary ───────────────────────────────────────────────────── */}
-        {startTime && endTime && !hasConflict && (
+        {/* ── Price summary ────────────────────────────────────────────── */}
+        {canSubmit && (
           <div className="flex items-center justify-between px-4 py-3.5 rounded-xl bg-[#0d0f0e] border border-white/[0.05]">
             <div>
               <p className="text-[9px] font-bold text-white/20 tracking-widest uppercase mb-0.5">
@@ -357,7 +445,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
           </div>
         )}
 
-        {/* ── API error ───────────────────────────────────────────────────────── */}
+        {/* ── API error ────────────────────────────────────────────────── */}
         {apiError && (
           <div
             role="alert"
@@ -367,7 +455,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
           </div>
         )}
 
-        {/* ── Confirm button ───────────────────────────────────────────────────── */}
+        {/* ── Confirm button ───────────────────────────────────────────── */}
         <button
           type="button"
           onClick={handleSubmit}
@@ -379,11 +467,8 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500',
             'focus-visible:ring-offset-2 focus-visible:ring-offset-[#141715]',
             canSubmit
-              ? [
-                  'bg-gradient-to-r from-green-600 to-emerald-500 text-white',
-                  'shadow-[0_4px_20px_rgba(16,185,129,0.22)]',
-                  'hover:shadow-[0_4px_28px_rgba(16,185,129,0.38)]',
-                ].join(' ')
+              ? 'bg-gradient-to-r from-green-600 to-emerald-500 text-white ' +
+                'shadow-[0_4px_20px_rgba(16,185,129,0.22)] hover:shadow-[0_4px_28px_rgba(16,185,129,0.38)]'
               : 'bg-white/[0.04] text-white/20 border border-white/[0.05] cursor-not-allowed',
           ].join(' ')}
         >
@@ -393,10 +478,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
               جاري الحجز...
             </>
           ) : (
-            <>
-              {canSubmit && <ArrowLeft size={14} className="rotate-180" aria-hidden />}
-              تأكيد الحجز
-            </>
+            'تأكيد الحجز'
           )}
         </button>
 
