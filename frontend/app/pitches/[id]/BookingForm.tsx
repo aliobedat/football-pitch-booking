@@ -26,10 +26,6 @@ type Phase = 'idle' | 'picking-end' | 'done';
 
 // ─── Constants & helpers ──────────────────────────────────────────────────────
 
-const AR_WEEKDAY = ['أحد', 'اثن', 'ثلا', 'أرب', 'خمي', 'جمع', 'سبت'];
-const AR_MONTH   = ['يناير','فبراير','مارس','أبريل','مايو','يونيو',
-                    'يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
-
 function genTimes(fromMins: number, toMins: number): string[] {
   const out: string[] = [];
   for (let m = fromMins; m <= toMins; m += 30) {
@@ -38,11 +34,10 @@ function genTimes(fromMins: number, toMins: number): string[] {
   return out;
 }
 
-// 31 time labels: 07:00 → 22:00
+// 49 time labels: 00:00 → 24:00
 // Each label is BOTH a possible start AND an exact end boundary.
-// e.g. clicking "08:30" as start + "09:30" as end → 1-hour booking 08:30–09:30.
-// The slot "22:00" can only appear as an end boundary, never as a start.
-const SLOTS = genTimes(7 * 60, 22 * 60);
+// "24:00" can only be an end boundary (maps to midnight of the next day).
+const SLOTS = genTimes(0, 24 * 60);
 
 function toMins(t: string): number {
   const [h, m] = t.split(':').map(Number);
@@ -58,28 +53,27 @@ function durationLabel(totalMins: number): string {
   return `${h} ساعة`;
 }
 
-function upcomingDays(): Date[] {
-  return Array.from({ length: 7 }, (_, i) => {
-    const d = new Date();
-    d.setDate(d.getDate() + i);
-    d.setHours(0, 0, 0, 0);
-    return d;
-  });
+function todayStr(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-function toDateStr(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+function parseDateInput(s: string): Date {
+  const [y, mo, d] = s.split('-').map(Number);
+  const date = new Date(y, mo - 1, d);
+  date.setHours(0, 0, 0, 0);
+  return date;
 }
 
 function buildDateTime(day: Date, timeStr: string): Date {
   const [h, m] = timeStr.split(':').map(Number);
   const d = new Date(day);
-  d.setHours(h, m, 0, 0);
+  d.setHours(h, m, 0, 0); // setHours(24,0,0,0) rolls to next-day midnight — intentional for "24:00"
   return d;
 }
 
 // True if the 30-min period [slot, slot+30min) overlaps any existing booking.
-// "22:00" is a boundary marker — its period 22:00–22:30 never overlaps real bookings.
+// "24:00" is a boundary marker — its period maps to next-day midnight and never overlaps real bookings.
 function isSlotBooked(slot: string, booked: BookedSlot[], day: Date): boolean {
   const slotStart = buildDateTime(day, slot).getTime();
   const slotEnd   = slotStart + 30 * 60 * 1000;
@@ -89,8 +83,6 @@ function isSlotBooked(slot: string, booked: BookedSlot[], day: Date): boolean {
     return bStart < slotEnd && bEnd > slotStart;
   });
 }
-
-const DAYS = upcomingDays();
 
 // ─── Slot visual appearance ───────────────────────────────────────────────────
 
@@ -125,11 +117,11 @@ function slotClasses(state: SlotState): string {
 export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const router = useRouter();
 
-  const [selDay,       setSelDay]       = useState<Date>(DAYS[0]);
+  const [selDayStr,    setSelDayStr]    = useState<string>(todayStr());
+  const selDay = useMemo(() => parseDateInput(selDayStr), [selDayStr]);
+
   const [booked,       setBooked]       = useState<BookedSlot[]>([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
-  // startSlot: the clicked start label, e.g. "08:30"
-  // endSlot:   the exact end boundary, e.g. "09:30" → booking is 08:30–09:30
   const [startSlot,    setStartSlot]    = useState<string | null>(null);
   const [endSlot,      setEndSlot]      = useState<string | null>(null);
   const [hoverSlot,    setHoverSlot]    = useState<string | null>(null);
@@ -146,11 +138,11 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     setHoverSlot(null);
     setApiError(null);
     api
-      .get(`/pitches/${pitchId}/availability?date=${toDateStr(selDay)}`)
+      .get(`/pitches/${pitchId}/availability?date=${selDayStr}`)
       .then(r  => setBooked(r.data.booked_slots ?? []))
       .catch(() => setBooked([]))
       .finally(() => setLoadingSlots(false));
-  }, [pitchId, selDay]);
+  }, [pitchId, selDayStr]);
 
   function resetSelection() {
     setStartSlot(null);
@@ -161,7 +153,6 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
 
   // ── Pre-computed values ───────────────────────────────────────────────────
 
-  // Set of slot labels whose 30-min period overlaps an existing booking
   const bookedSet = useMemo(
     () => new Set(SLOTS.filter(s => isSlotBooked(s, booked, selDay))),
     [booked, selDay],
@@ -171,22 +162,20 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const startMins = startSlot ? toMins(startSlot) : -1;
 
   // Minutes of the first booked period that starts AFTER startSlot.
-  // Valid end times must be <= this value (so the new booking doesn't overlap it).
+  // Iterates only the 48 period slots (i < 48), not the "24:00" boundary marker.
   const nextBookedStartMins = useMemo(() => {
-    if (startMins < 0) return 22 * 60;
-    // iterate only the 30 period slots (i < 30), not the "22:00" boundary
-    for (let i = 0; i < 30; i++) {
+    if (startMins < 0) return 24 * 60;
+    for (let i = 0; i < 48; i++) {
       const m = toMins(SLOTS[i]);
       if (m > startMins && bookedSet.has(SLOTS[i])) return m;
     }
-    return 22 * 60;
+    return 24 * 60;
   }, [startMins, bookedSet]);
 
   // ── State map for every slot ──────────────────────────────────────────────
 
   const slotStateMap = useMemo<Map<string, SlotState>>(() => {
     const map = new Map<string, SlotState>();
-    // Use confirmed endSlot, or hoverSlot when still picking
     const activeEnd     = endSlot ?? (phase === 'picking-end' ? hoverSlot : null);
     const activeEndMins = activeEnd ? toMins(activeEnd) : -1;
 
@@ -194,42 +183,26 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
       const s     = SLOTS[i];
       const sMins = toMins(s);
 
-      // Already occupied by an existing booking
       if (bookedSet.has(s)) { map.set(s, 'booked'); continue; }
 
-      // ── Idle phase ──────────────────────────────────────────────────────
       if (phase === 'idle') {
-        // A slot is only a valid START if a 1-hour end can fit before 22:00
-        // i.e. startTime + 60min ≤ 22:00 → startTime ≤ 21:00
-        map.set(s, sMins <= 21 * 60 ? 'available' : 'disabled');
+        // Valid start: must have room for at least 1 hour before 24:00
+        map.set(s, sMins <= 23 * 60 ? 'available' : 'disabled');
         continue;
       }
 
-      // ── Picking-end / done ──────────────────────────────────────────────
-
-      // The selected start slot itself
       if (i === startIdx) { map.set(s, 'selected-start'); continue; }
 
-      // Slots consumed by the active selection (strictly between start and end boundary)
-      // These are highlighted regardless of the disabled checks below.
+      // Slots consumed by active selection (strictly between start and end boundary)
       if (activeEndMins > 0 && sMins > startMins && sMins < activeEndMins) {
         map.set(s, endSlot ? 'in-range' : 'hover-range');
         continue;
       }
 
-      // Before the start: locked
       if (sMins < startMins) { map.set(s, 'disabled'); continue; }
-
-      // Within the 1-hour minimum gap — can't be an end time
-      // (startMins < sMins < startMins+60 → booking would be < 60 min)
       if (sMins > startMins && sMins < startMins + 60) { map.set(s, 'disabled'); continue; }
-
-      // Past the next booked slot — can't extend the booking here
       if (sMins > nextBookedStartMins) { map.set(s, 'disabled'); continue; }
 
-      // Everything else is an available (clickable) end boundary.
-      // This includes the confirmed endSlot itself — it shows as 'available'
-      // (unlit) because it is the exclusive boundary, not a consumed period.
       map.set(s, 'available');
     }
 
@@ -238,7 +211,6 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
 
   // ── Derived booking values ────────────────────────────────────────────────
 
-  // endSlot IS the exact end time (no +30min offset)
   const durationMins = startMins >= 0 && endSlot
     ? toMins(endSlot) - startMins : 0;
   const total = durationMins > 0
@@ -252,14 +224,12 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     const sMins = toMins(s);
 
     if (phase === 'idle') {
-      // Only startable slots (available, not booked, sMins ≤ 21:00)
-      if (!bookedSet.has(s) && sMins <= 21 * 60) setStartSlot(s);
+      if (!bookedSet.has(s) && sMins <= 23 * 60) setStartSlot(s);
       return;
     }
 
     if (phase === 'picking-end') {
       if (s === startSlot) { resetSelection(); return; }
-      // Valid end: startMins+60 ≤ sMins ≤ nextBookedStartMins
       const isValidEnd = sMins >= startMins + 60 && sMins <= nextBookedStartMins;
       if (isValidEnd) {
         setEndSlot(s);
@@ -267,11 +237,9 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
       }
       return;
     }
-    // phase === 'done': locked until reset button
+    // phase === 'done': locked until reset
   }
 
-  // Hover validity is checked directly (not from slotStateMap) to avoid
-  // stale-state race when the mouse moves between slots quickly.
   function handleSlotHover(s: string) {
     if (phase !== 'picking-end') { setHoverSlot(null); return; }
     const sMins = toMins(s);
@@ -354,40 +322,25 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
 
       <div className="px-6 py-5 flex flex-col gap-6">
 
-        {/* ── Day strip ───────────────────────────────────────────────── */}
+        {/* ── Date picker ─────────────────────────────────────────────── */}
         <div>
           <p className="flex items-center gap-1.5 text-[10px] font-bold text-white/30 tracking-widest uppercase mb-3">
             <CalendarDays size={11} className="text-emerald-500" aria-hidden />
             التاريخ
           </p>
-          <div className="flex gap-2 overflow-x-auto pb-0.5" style={{ scrollbarWidth: 'none' }}>
-            {DAYS.map((day, i) => {
-              const active = toDateStr(day) === toDateStr(selDay);
-              return (
-                <button
-                  key={toDateStr(day)}
-                  type="button"
-                  onClick={() => setSelDay(day)}
-                  className={[
-                    'flex-shrink-0 flex flex-col items-center gap-0.5 px-3.5 py-2.5 rounded-xl border',
-                    'text-center transition-all duration-150 focus-visible:outline-none',
-                    'focus-visible:ring-1 focus-visible:ring-emerald-500',
-                    active
-                      ? 'bg-emerald-500/[0.14] border-emerald-500/40'
-                      : 'bg-white/[0.025] border-white/[0.06] hover:border-white/[0.14] hover:bg-white/[0.04]',
-                  ].join(' ')}
-                >
-                  <span className={['text-[9px] font-bold tracking-wide', active ? 'text-emerald-400' : 'text-white/30'].join(' ')}>
-                    {i === 0 ? 'اليوم' : AR_WEEKDAY[day.getDay()]}
-                  </span>
-                  <span className={['text-[20px] font-bold leading-tight', active ? 'text-emerald-300' : 'text-[#f0efe8]'].join(' ')}>
-                    {day.getDate()}
-                  </span>
-                  <span className="text-[8px] text-white/20">{AR_MONTH[day.getMonth()]}</span>
-                </button>
-              );
-            })}
-          </div>
+          <input
+            type="date"
+            value={selDayStr}
+            min={todayStr()}
+            onChange={e => { if (e.target.value) setSelDayStr(e.target.value); }}
+            className={[
+              'w-full rounded-xl border border-white/[0.09] px-4 py-2.5',
+              'bg-[#0d0f0e] text-[13px] text-[#f0efe8]',
+              'hover:border-white/[0.18] focus:outline-none',
+              'focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/[0.12]',
+              'transition-all duration-150 [color-scheme:dark]',
+            ].join(' ')}
+          />
         </div>
 
         {/* ── Slot grid ───────────────────────────────────────────────── */}
@@ -424,25 +377,30 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
               )}
             </div>
 
-            {/* Grid */}
+            {/* Scrollable grid wrapper — 49 slots (00:00–24:00) */}
             <div
-              role="group"
-              aria-label="اختر الفترة الزمنية"
-              className="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 gap-1.5"
-              onMouseLeave={() => setHoverSlot(null)}
+              className="max-h-[380px] overflow-y-auto rounded-xl"
+              style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.08) transparent' }}
             >
-              {SLOTS.map(s => (
-                <button
-                  key={s}
-                  type="button"
-                  onClick={() => handleSlotClick(s)}
-                  onMouseEnter={() => handleSlotHover(s)}
-                  aria-label={`${s}${slotStateMap.get(s) === 'booked' ? ' (محجوز)' : ''}`}
-                  className={slotClasses(slotStateMap.get(s) ?? 'available')}
-                >
-                  {s}
-                </button>
-              ))}
+              <div
+                role="group"
+                aria-label="اختر الفترة الزمنية"
+                className="grid grid-cols-4 sm:grid-cols-6 gap-1.5 p-0.5"
+                onMouseLeave={() => setHoverSlot(null)}
+              >
+                {SLOTS.map(s => (
+                  <button
+                    key={s}
+                    type="button"
+                    onClick={() => handleSlotClick(s)}
+                    onMouseEnter={() => handleSlotHover(s)}
+                    aria-label={`${s}${slotStateMap.get(s) === 'booked' ? ' (محجوز)' : ''}`}
+                    className={slotClasses(slotStateMap.get(s) ?? 'available')}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Legend */}
