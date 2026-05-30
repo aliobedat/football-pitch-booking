@@ -18,8 +18,6 @@ import { cn } from '@/lib/utils';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Role = 'player' | 'owner';
-
 interface AuthApiResponse {
   access_token:       string;
   refresh_token:      string;
@@ -28,7 +26,7 @@ interface AuthApiResponse {
     id:         number;
     full_name:  string;
     email:      string;
-    role:       Role;
+    role:       string;
     created_at: string;
   };
 }
@@ -37,7 +35,6 @@ interface FormValues {
   fullName: string;
   email:    string;
   password: string;
-  role:     Role;
 }
 
 interface FormErrors {
@@ -60,11 +57,6 @@ const PASSWORD_RULES: PasswordRule[] = [
   { label: 'حرف كبير واحد (A-Z)',   test: (pw) => /[A-Z]/.test(pw) },
   { label: 'حرف صغير واحد (a-z)',   test: (pw) => /[a-z]/.test(pw) },
   { label: 'رقم واحد على الأقل',    test: (pw) => /\d/.test(pw) },
-];
-
-const ROLE_OPTIONS: { value: Role; label: string; description: string }[] = [
-  { value: 'player', label: 'لاعب',      description: 'ابحث واحجز الملاعب' },
-  { value: 'owner',  label: 'صاحب ملعب', description: 'أضف وأدر ملاعبك' },
 ];
 
 // ─── Validation ───────────────────────────────────────────────────────────────
@@ -95,7 +87,7 @@ function validate(values: FormValues): FormErrors {
   return errors;
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
+// ─── Sub-components ──────────────────────────────────────────────────────────
 
 function BrandMark({ subtitle }: { subtitle: string }) {
   return (
@@ -114,69 +106,6 @@ function BrandMark({ subtitle }: { subtitle: string }) {
         Malaab
       </h1>
       <p className="text-sm text-white/35">{subtitle}</p>
-    </div>
-  );
-}
-
-// Role selector — ARIA radiogroup pattern for accessibility
-function RoleToggle({
-  value,
-  onChange,
-}: {
-  value: Role;
-  onChange: (role: Role) => void;
-}) {
-  return (
-    <div className="flex flex-col gap-2">
-      <span
-        id="role-group-label"
-        className="text-[10px] font-bold tracking-wide text-white/45"
-      >
-        أنا
-      </span>
-      <div
-        role="radiogroup"
-        aria-labelledby="role-group-label"
-        className="grid grid-cols-2 gap-2"
-      >
-        {ROLE_OPTIONS.map((opt) => {
-          const isSelected = value === opt.value;
-          return (
-            <button
-              key={opt.value}
-              type="button"
-              role="radio"
-              aria-checked={isSelected}
-              onClick={() => onChange(opt.value)}
-              className={cn(
-                'flex flex-col items-start px-4 py-3 rounded-lg border text-start',
-                'transition-all duration-150',
-                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#0f4c3a]',
-                isSelected
-                  ? 'bg-[#0f4c3a]/20 border-[#0f4c3a]/60'
-                  : 'bg-transparent border-white/[0.08] hover:border-white/[0.16]'
-              )}
-            >
-              <span
-                className={cn(
-                  'text-sm font-bold transition-colors duration-150',
-                  isSelected ? 'text-[#f0efe8]' : 'text-white/50'
-                )}
-              >
-                {opt.label}
-              </span>
-              <span
-                className={cn(
-                  'text-[11px] mt-0.5 transition-colors duration-150',
-                  isSelected ? 'text-white/45' : 'text-white/22'
-                )}
-              >
-                {opt.description}
-              </span>
-            </button>
-          );
-        })}
-      </div>
     </div>
   );
 }
@@ -239,7 +168,6 @@ export default function RegisterPage() {
     fullName: '',
     email:    '',
     password: '',
-    role:     'player',
   });
   const [errors, setErrors]             = useState<FormErrors>({});
   const [apiError, setApiError]         = useState<string | null>(null);
@@ -289,7 +217,6 @@ export default function RegisterPage() {
         full_name: form.fullName.trim(),
         email:     form.email.trim().toLowerCase(),
         password:  form.password,
-        role:      form.role,
       };
 
       const { data } = await api.post<{ message: string; data: AuthApiResponse }>(
@@ -333,14 +260,6 @@ export default function RegisterPage() {
         {/* Form card */}
         <div className="bg-[#1a1c1b] border border-white/[0.07] rounded-2xl p-8">
           <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-5">
-            {/* Role selector */}
-            <RoleToggle
-              value={form.role}
-              onChange={(role) => setForm((prev) => ({ ...prev, role }))}
-            />
-
-            <div className="h-px bg-white/[0.06]" />
-
             {/* Personal details */}
             <Input
               label="الاسم الكامل"

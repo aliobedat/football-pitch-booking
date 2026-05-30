@@ -6,7 +6,7 @@ import { NextRequest, NextResponse } from 'next/server';
 export function middleware(request: NextRequest) {
   const role = request.cookies.get('malaab_role')?.value;
 
-  if (role !== 'owner') {
+  if (role !== 'owner' && role !== 'admin') {
     const destination = role
       ? '/pitches'   // logged-in player → send to pitch list
       : '/login';    // unauthenticated → send to login

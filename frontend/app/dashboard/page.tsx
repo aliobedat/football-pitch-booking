@@ -462,9 +462,9 @@ export default function DashboardPage() {
   const { user, isLoading: authLoading } = useAuth();
 
   // Client-side role guard (mirrors the edge middleware in middleware.ts).
-  // Runs immediately after auth state resolves to prevent a flash of owner UI.
+  // Guard: only 'owner' and 'admin' may access the dashboard
   useEffect(() => {
-    if (!authLoading && (!user || user.role !== 'owner')) {
+    if (!authLoading && (!user || (user.role !== 'owner' && user.role !== 'admin'))) {
       router.replace(user ? '/pitches' : '/login');
     }
   }, [user, authLoading, router]);
@@ -518,7 +518,7 @@ export default function DashboardPage() {
   }), [bookings]);
 
   // ── global loading / access guard ──────────────────────────────────────
-  if (authLoading || !user || user.role !== 'owner') {
+  if (authLoading || !user || (user.role !== 'owner' && user.role !== 'admin')) {
     return (
       <div className="min-h-screen bg-[#0d0f0e] flex items-center justify-center">
         <div className="w-6 h-6 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />

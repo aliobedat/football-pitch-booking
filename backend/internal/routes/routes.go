@@ -49,31 +49,31 @@ v1.GET("/pitches", pitchHandler.ListPitches)
 
 		// Owner: manage their own pitches
 		protected.POST("/pitches",
-			middleware.RequireRole("owner"),
+			middleware.RequireRole("owner", "admin"),
 			pitchHandler.CreatePitch,
 		)
 		protected.PATCH("/pitches/:id",
-			middleware.RequireRole("owner"),
+			middleware.RequireRole("owner", "admin"),
 			pitchHandler.UpdatePitch,
 		)
 		protected.DELETE("/pitches/:id",
-			middleware.RequireRole("owner"),
+			middleware.RequireRole("owner", "admin"),
 			pitchHandler.DeletePitch,
 		)
 		protected.GET("/owner/pitches",
-			middleware.RequireRole("owner"),
+			middleware.RequireRole("owner", "admin"),
 			pitchHandler.GetOwnerPitches,
 		)
 
 		// Owner/admin: list all bookings across all users and pitches
 		protected.GET("/admin/bookings",
-			middleware.RequireRole("owner"),
+			middleware.RequireRole("owner", "admin"),
 			bookingHandler.GetAllBookings,
 		)
 
 		// Only pitch owners can confirm a booking
 		protected.PATCH("/bookings/:id/confirm",
-			middleware.RequireRole("owner"),
+			middleware.RequireRole("owner", "admin"),
 			bookingHandler.ConfirmBooking,
 		)
 

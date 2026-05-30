@@ -7,7 +7,7 @@ interface User {
   id: number;
   full_name: string;
   email: string;
-  role: 'player' | 'owner';
+  role: 'player' | 'owner' | 'admin';
 }
 
 interface AuthContextType {

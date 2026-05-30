@@ -42,7 +42,8 @@ type registerRequest struct {
 	FullName string `json:"full_name" binding:"required"`
 	Email    string `json:"email"     binding:"required"`
 	Password string `json:"password"  binding:"required"`
-	Role     string `json:"role"      binding:"required"`
+	// Role is intentionally ignored — all self-registrations become 'player'.
+	// Owners and admins are promoted manually in the database.
 }
 
 type loginRequest struct {
@@ -102,7 +103,7 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		Email:        req.Email,
 		Phone:        "",
 		PasswordHash: hash,
-		Role:         models.UserRole(req.Role),
+		Role:         models.RolePlayer, // all self-registrations are 'player'
 	})
 	if err != nil {
 		if errors.Is(err, repository.ErrEmailTaken) {
@@ -313,10 +314,6 @@ func validateRegistration(req registerRequest) map[string]string {
 
 	if pwErr := validatePassword(req.Password); pwErr != "" {
 		errs["password"] = pwErr
-	}
-
-	if req.Role != string(models.RolePlayer) && req.Role != string(models.RoleOwner) {
-		errs["role"] = "must be either 'player' or 'owner'"
 	}
 
 	return errs

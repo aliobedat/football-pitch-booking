@@ -123,7 +123,12 @@ func (h *PitchHandler) UpdatePitch(c *gin.Context) {
 		return
 	}
 
+	// Admin passes ownerID = 0 to bypass the ownership check in the data layer.
 	ownerID := middleware.GetUserID(c)
+	if middleware.GetUserRole(c) == "admin" {
+		ownerID = 0
+	}
+
 	pitch, err := h.Model.UpdatePitch(c.Request.Context(), id, ownerID, req)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -154,7 +159,12 @@ func (h *PitchHandler) DeletePitch(c *gin.Context) {
 		return
 	}
 
+	// Admin passes ownerID = 0 to bypass the ownership check in the data layer.
 	ownerID := middleware.GetUserID(c)
+	if middleware.GetUserRole(c) == "admin" {
+		ownerID = 0
+	}
+
 	if err := h.Model.DeletePitch(c.Request.Context(), id, ownerID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			c.JSON(http.StatusNotFound, gin.H{
@@ -178,9 +188,18 @@ func (h *PitchHandler) DeletePitch(c *gin.Context) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *PitchHandler) GetOwnerPitches(c *gin.Context) {
-	ownerID := middleware.GetUserID(c)
+	var (
+		pitches []data.Pitch
+		err     error
+	)
 
-	pitches, err := h.Model.GetByOwnerID(c.Request.Context(), ownerID)
+	if middleware.GetUserRole(c) == "admin" {
+		// Admin sees every pitch on the platform (no owner filter)
+		pitches, err = h.Model.GetAll(c.Request.Context(), data.PitchFilters{})
+	} else {
+		pitches, err = h.Model.GetByOwnerID(c.Request.Context(), middleware.GetUserID(c))
+	}
+
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_server_error",

@@ -7,6 +7,7 @@ type UserRole string
 const (
 	RolePlayer UserRole = "player"
 	RoleOwner  UserRole = "owner"
+	RoleAdmin  UserRole = "admin"
 )
 
 // User mirrors the users table. PasswordHash is never serialised to JSON.

@@ -181,22 +181,35 @@ type UpdatePitchRequest struct {
 	PricePerHour int    `json:"price_per_hour"`
 }
 
-// UpdatePitch applies a partial update to pitch `id` owned by `ownerID`.
-// Returns pgx.ErrNoRows when the pitch does not exist or is not owned by ownerID.
+// UpdatePitch applies a partial update to pitch `id`.
+// ownerID == 0 means the caller is an admin and the ownership check is skipped.
+// Otherwise the update only applies when owner_id matches, returning pgx.ErrNoRows
+// if the pitch does not exist or belongs to a different owner.
 func (m *PitchModel) UpdatePitch(ctx context.Context, id, ownerID int, req UpdatePitchRequest) (*Pitch, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	row := m.DB.QueryRow(ctx, fmt.Sprintf(`
-		UPDATE pitches
-		SET name          = CASE WHEN $3 <> '' THEN $3 ELSE name END,
-		    neighborhood  = CASE WHEN $4 <> '' THEN $4 ELSE neighborhood END,
-		    surface       = CASE WHEN $5 <> '' THEN $5 ELSE surface END,
-		    format        = CASE WHEN $6 <> '' THEN $6 ELSE format END,
-		    price_per_hour = CASE WHEN $7 > 0  THEN $7 ELSE price_per_hour END
-		WHERE id = $1 AND owner_id = $2
-		RETURNING %s
-	`, pitchColumns), id, ownerID, req.Name, req.Neighborhood, req.Surface, req.Format, req.PricePerHour)
+	const setCols = `
+		name          = CASE WHEN $%d <> '' THEN $%d ELSE name END,
+		neighborhood  = CASE WHEN $%d <> '' THEN $%d ELSE neighborhood END,
+		surface       = CASE WHEN $%d <> '' THEN $%d ELSE surface END,
+		format        = CASE WHEN $%d <> '' THEN $%d ELSE format END,
+		price_per_hour = CASE WHEN $%d > 0  THEN $%d ELSE price_per_hour END`
+
+	var row pgx.Row
+	if ownerID == 0 {
+		// admin — no ownership restriction
+		row = m.DB.QueryRow(ctx, fmt.Sprintf(
+			`UPDATE pitches SET `+setCols+` WHERE id = $1 RETURNING %s`,
+			2, 2, 3, 3, 4, 4, 5, 5, 6, 6, pitchColumns,
+		), id, req.Name, req.Neighborhood, req.Surface, req.Format, req.PricePerHour)
+	} else {
+		// owner — only their own pitches
+		row = m.DB.QueryRow(ctx, fmt.Sprintf(
+			`UPDATE pitches SET `+setCols+` WHERE id = $1 AND owner_id = $2 RETURNING %s`,
+			3, 3, 4, 4, 5, 5, 6, 6, 7, 7, pitchColumns,
+		), id, ownerID, req.Name, req.Neighborhood, req.Surface, req.Format, req.PricePerHour)
+	}
 
 	p, err := scanPitch(row)
 	if err != nil {
@@ -205,16 +218,21 @@ func (m *PitchModel) UpdatePitch(ctx context.Context, id, ownerID int, req Updat
 	return &p, nil
 }
 
-// DeletePitch removes pitch `id` owned by `ownerID`.
+// DeletePitch removes pitch `id`.
+// ownerID == 0 means the caller is an admin and the ownership check is skipped.
 // Returns pgx.ErrNoRows when the pitch does not exist or is not owned by ownerID.
 func (m *PitchModel) DeletePitch(ctx context.Context, id, ownerID int) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	tag, err := m.DB.Exec(ctx,
-		`DELETE FROM pitches WHERE id = $1 AND owner_id = $2`,
-		id, ownerID,
-	)
+	query := `DELETE FROM pitches WHERE id = $1 AND owner_id = $2`
+	args := []any{id, ownerID}
+	if ownerID == 0 {
+		query = `DELETE FROM pitches WHERE id = $1`
+		args = []any{id}
+	}
+
+	tag, err := m.DB.Exec(ctx, query, args...)
 	if err != nil {
 		return err
 	}

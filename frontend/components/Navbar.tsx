@@ -8,7 +8,7 @@ import { Users, Plus } from 'lucide-react';
 export default function Navbar() {
   const pathname = usePathname();
   const { user, logout } = useAuth();
-  const isOwner = user?.role === 'owner';
+  const isOwner = user?.role === 'owner' || user?.role === 'admin';
 
   const navLinks = isOwner
     ? [{ href: '/dashboard', label: 'لوحة التحكم' }]
