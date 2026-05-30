@@ -7,8 +7,8 @@ import api from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import Navbar from '@/components/Navbar';
 import {
-  BookOpen, Clock, CheckCircle2, XCircle,
-  Check, X, CalendarDays, LayoutDashboard,
+  BookOpen, CheckCircle2, XCircle,
+  X, CalendarDays, LayoutDashboard,
   MapPin, DollarSign, Plus, ChevronDown,
 } from 'lucide-react';
 
@@ -129,23 +129,8 @@ function StatCard({ icon: Icon, value, label, iconBg, iconColor, valueColor }: {
 // Booking row
 // ─────────────────────────────────────────────────────────────────────────────
 
-function BookingRow({ booking, onUpdate }: {
-  booking:  AdminBooking;
-  onUpdate: (id: number, status: BookingStatus) => void;
-}) {
-  const [acting, setActing] = useState<'confirm' | 'reject' | null>(null);
-
-  const act = useCallback(async (action: 'confirm' | 'reject') => {
-    setActing(action);
-    try {
-      await api.patch(`/bookings/${booking.id}/${action === 'confirm' ? 'confirm' : 'cancel'}`);
-      onUpdate(booking.id, action === 'confirm' ? 'confirmed' : 'cancelled');
-    } catch {
-      setActing(null);
-    }
-  }, [booking.id, onUpdate]);
-
-  const { label, badge } = STATUS_CONFIG[booking.status] ?? STATUS_CONFIG.pending;
+function BookingRow({ booking }: { booking: AdminBooking }) {
+  const { label, badge } = STATUS_CONFIG[booking.status] ?? STATUS_CONFIG.confirmed;
 
   return (
     <tr className="border-b border-white/[0.04] hover:bg-white/[0.018] transition-colors duration-150">
@@ -179,30 +164,6 @@ function BookingRow({ booking, onUpdate }: {
         <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold tracking-wide border ${badge}`}>
           {label}
         </span>
-      </td>
-      <td className="px-5 py-4 text-start">
-        {booking.status === 'pending' ? (
-          <div className="flex items-center gap-2">
-            <button type="button" onClick={() => act('confirm')} disabled={!!acting} aria-label="تأكيد"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/20 hover:border-emerald-500/35 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-150 active:scale-[0.97]"
-            >
-              {acting === 'confirm'
-                ? <span className="w-3 h-3 rounded-full border border-emerald-400/60 border-t-transparent animate-spin" aria-hidden />
-                : <Check size={11} aria-hidden />}
-              تأكيد
-            </button>
-            <button type="button" onClick={() => act('reject')} disabled={!!acting} aria-label="رفض"
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-red-500/[0.07] border border-red-500/[0.18] text-red-400/75 hover:bg-red-500/[0.13] hover:border-red-500/30 hover:text-red-400 disabled:opacity-40 disabled:cursor-not-allowed transition-all duration-150 active:scale-[0.97]"
-            >
-              {acting === 'reject'
-                ? <span className="w-3 h-3 rounded-full border border-red-400/60 border-t-transparent animate-spin" aria-hidden />
-                : <X size={11} aria-hidden />}
-              رفض
-            </button>
-          </div>
-        ) : (
-          <span className="text-[11px] text-white/20">—</span>
-        )}
       </td>
     </tr>
   );
@@ -501,10 +462,6 @@ export default function DashboardPage() {
       .finally(() => setPitchesLoading(false));
   }, [activeTab, pitchesLoaded]);
 
-  const handleBookingUpdate = useCallback((id: number, status: BookingStatus) => {
-    setBookings(prev => prev.map(b => b.id === id ? { ...b, status } : b));
-  }, []);
-
   const handlePitchAdded = useCallback((pitch: OwnerPitch) => {
     setPitches(prev => [pitch, ...prev]);
     setShowAddForm(false);
@@ -512,7 +469,6 @@ export default function DashboardPage() {
 
   const stats = useMemo(() => ({
     total:     bookings.length,
-    pending:   bookings.filter(b => b.status === 'pending').length,
     confirmed: bookings.filter(b => b.status === 'confirmed').length,
     cancelled: bookings.filter(b => b.status === 'cancelled').length,
   }), [bookings]);
@@ -602,11 +558,10 @@ export default function DashboardPage() {
             ) : (
               <>
                 {/* Stats row */}
-                <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-                  <StatCard icon={BookOpen}    value={stats.total}     label="إجمالي الحجوزات" iconBg="bg-white/[0.05]"      iconColor="text-white/50"    valueColor="text-[#f0efe8]"  />
-                  <StatCard icon={Clock}       value={stats.pending}   label="قيد الانتظار"    iconBg="bg-amber-500/10"      iconColor="text-amber-400"   valueColor="text-amber-400"  />
-                  <StatCard icon={CheckCircle2} value={stats.confirmed} label="مؤكدة"           iconBg="bg-emerald-500/10"    iconColor="text-emerald-400" valueColor="text-emerald-400" />
-                  <StatCard icon={XCircle}     value={stats.cancelled} label="مرفوضة / ملغاة"  iconBg="bg-red-500/[0.08]"   iconColor="text-red-400"     valueColor="text-red-400"    />
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8">
+                  <StatCard icon={BookOpen}     value={stats.total}     label="إجمالي الحجوزات" iconBg="bg-white/[0.05]"    iconColor="text-white/50"    valueColor="text-[#f0efe8]"   />
+                  <StatCard icon={CheckCircle2} value={stats.confirmed} label="مؤكدة"            iconBg="bg-emerald-500/10"  iconColor="text-emerald-400" valueColor="text-emerald-400" />
+                  <StatCard icon={XCircle}      value={stats.cancelled} label="مرفوضة / ملغاة"  iconBg="bg-red-500/[0.08]" iconColor="text-red-400"     valueColor="text-red-400"     />
                 </div>
 
                 {bookings.length === 0 ? (
@@ -629,7 +584,7 @@ export default function DashboardPage() {
                       <table className="w-full min-w-[860px] bg-[#141715]">
                         <thead>
                           <tr className="border-b border-white/[0.06] bg-[#111312]">
-                            {['# الحجز', 'اللاعب', 'الملعب', 'التاريخ', 'الوقت', 'المبلغ', 'الحالة', 'الإجراءات'].map(col => (
+                            {['# الحجز', 'اللاعب', 'الملعب', 'التاريخ', 'الوقت', 'المبلغ', 'الحالة'].map(col => (
                               <th key={col} className="px-5 py-3.5 text-start text-[10px] font-semibold text-white/30 tracking-widest uppercase whitespace-nowrap">
                                 {col}
                               </th>
@@ -638,7 +593,7 @@ export default function DashboardPage() {
                         </thead>
                         <tbody>
                           {bookings.map(b => (
-                            <BookingRow key={b.id} booking={b} onUpdate={handleBookingUpdate} />
+                            <BookingRow key={b.id} booking={b} />
                           ))}
                         </tbody>
                       </table>
