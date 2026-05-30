@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
-import { Users, Plus } from 'lucide-react';
+import { Users } from 'lucide-react';
 
 export default function Navbar() {
   const pathname = usePathname();
@@ -59,24 +59,6 @@ export default function Navbar() {
         <div className="flex items-center gap-3">
           {user ? (
             <div className="flex items-center gap-3">
-              {/* Owner-only: Add Pitch button */}
-              {isOwner && (
-                <Link
-                  href="/dashboard?tab=pitches&action=add"
-                  className={[
-                    'hidden sm:flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg',
-                    'text-[12px] font-semibold',
-                    'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20',
-                    'hover:bg-emerald-500/20 hover:text-emerald-300 hover:border-emerald-500/40',
-                    'transition-all duration-200 active:scale-[0.97]',
-                    'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500',
-                  ].join(' ')}
-                >
-                  <Plus size={12} aria-hidden="true" />
-                  إضافة ملعب
-                </Link>
-              )}
-
               {/* Greeting chip */}
               <div className="flex items-center gap-2 text-emerald-400 bg-emerald-500/10 px-3 py-1.5 rounded-full border border-emerald-500/20">
                 <Users size={12} aria-hidden="true" />
