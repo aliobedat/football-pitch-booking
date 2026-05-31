@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
-import { CalendarDays, X, CheckCircle2 } from 'lucide-react';
+import { CalendarDays, CheckCircle2 } from 'lucide-react';
 import axios from 'axios';
 import api from '@/lib/api';
 
@@ -20,38 +20,7 @@ interface Props {
   pricePerHour: number;
 }
 
-type SlotState = 'available' | 'booked' | 'past' | 'selected-start' | 'in-range'
-               | 'hover-range' | 'disabled';
-type Phase = 'idle' | 'picking-end' | 'done';
-
-// ─── Constants & helpers ──────────────────────────────────────────────────────
-
-function genTimes(fromMins: number, toMins: number): string[] {
-  const out: string[] = [];
-  for (let m = fromMins; m <= toMins; m += 30) {
-    out.push(`${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`);
-  }
-  return out;
-}
-
-// 49 time labels: 00:00 → 24:00
-// Each label is BOTH a possible start AND an exact end boundary.
-// "24:00" can only be an end boundary (maps to midnight of the next day).
-const SLOTS = genTimes(0, 24 * 60);
-
-function toMins(t: string): number {
-  const [h, m] = t.split(':').map(Number);
-  return h * 60 + m;
-}
-
-function durationLabel(totalMins: number): string {
-  const h = totalMins / 60;
-  if (h === 1)     return 'ساعة واحدة';
-  if (h === 1.5)   return 'ساعة ونصف';
-  if (h === 2)     return 'ساعتان';
-  if (h % 1 === 0) return `${h} ساعات`;
-  return `${h} ساعة`;
-}
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function todayStr(): string {
   const d = new Date();
@@ -65,6 +34,10 @@ function parseDateInput(s: string): Date {
   return date;
 }
 
+function minsToTime(mins: number): string {
+  return `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
+}
+
 function buildDateTime(day: Date, timeStr: string): Date {
   const [h, m] = timeStr.split(':').map(Number);
   const d = new Date(day);
@@ -72,10 +45,9 @@ function buildDateTime(day: Date, timeStr: string): Date {
   return d;
 }
 
-// True if the 30-min period [slot, slot+30min) overlaps any existing booking.
-// "24:00" is a boundary marker — its period maps to next-day midnight and never overlaps real bookings.
-function isSlotBooked(slot: string, booked: BookedSlot[], day: Date): boolean {
-  const slotStart = buildDateTime(day, slot).getTime();
+// True if the 30-min block starting at slotMins overlaps any existing booking.
+function isSlotBooked(slotMins: number, booked: BookedSlot[], day: Date): boolean {
+  const slotStart = buildDateTime(day, minsToTime(slotMins)).getTime();
   const slotEnd   = slotStart + 30 * 60 * 1000;
   return booked.some(b => {
     const bStart = new Date(b.start_time).getTime();
@@ -84,32 +56,22 @@ function isSlotBooked(slot: string, booked: BookedSlot[], day: Date): boolean {
   });
 }
 
-// ─── Slot visual appearance ───────────────────────────────────────────────────
+// True if the range [startMins, endMins) overlaps any existing booking.
+function rangeOverlapsBookings(startMins: number, endMins: number, booked: BookedSlot[], day: Date): boolean {
+  const rangeStart = buildDateTime(day, minsToTime(startMins)).getTime();
+  const rangeEnd   = buildDateTime(day, minsToTime(endMins)).getTime();
+  return booked.some(b => {
+    const bStart = new Date(b.start_time).getTime();
+    const bEnd   = new Date(b.end_time).getTime();
+    return bStart < rangeEnd && bEnd > rangeStart;
+  });
+}
 
-function slotClasses(state: SlotState): string {
-  const base =
-    'flex items-center justify-center h-10 rounded-xl border ' +
-    'text-[11px] font-mono font-semibold transition-all duration-150 select-none';
-
-  switch (state) {
-    case 'available':
-      return `${base} bg-white/[0.03] border-white/[0.07] text-white/45 cursor-pointer ` +
-             'hover:bg-emerald-500/10 hover:border-emerald-500/30 hover:text-emerald-300';
-    case 'booked':
-      return `${base} bg-red-950/20 border-red-900/[0.12] text-red-500/25 cursor-not-allowed ` +
-             'line-through decoration-red-500/20 opacity-60';
-    case 'past':
-      return `${base} bg-white/[0.02] border-white/[0.04] text-white/15 cursor-not-allowed opacity-45`;
-    case 'selected-start':
-      return `${base} bg-emerald-500/25 border-emerald-400/60 text-emerald-300 cursor-pointer ` +
-             'shadow-[0_0_12px_rgba(52,211,153,0.14)]';
-    case 'in-range':
-      return `${base} bg-emerald-500/[0.13] border-emerald-500/25 text-emerald-400/80 cursor-pointer`;
-    case 'hover-range':
-      return `${base} bg-emerald-500/[0.07] border-emerald-500/[0.14] text-emerald-400/50 cursor-pointer`;
-    case 'disabled':
-      return `${base} bg-white/[0.01] border-white/[0.03] text-white/10 cursor-not-allowed`;
-  }
+function durationLabel(mins: number): string {
+  if (mins === 60)  return 'ساعة';
+  if (mins === 90)  return 'ساعة ونصف';
+  if (mins === 120) return 'ساعتان';
+  return `${mins / 60} ساعة`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -119,25 +81,24 @@ function slotClasses(state: SlotState): string {
 export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const router = useRouter();
 
-  const [selDayStr,    setSelDayStr]    = useState<string>(todayStr());
+  const [selDayStr, setSelDayStr] = useState<string>(todayStr());
   const selDay = useMemo(() => parseDateInput(selDayStr), [selDayStr]);
+
+  // Default AM/PM based on current hour
+  const [amPm,     setAmPm]     = useState<'am' | 'pm'>(() => new Date().getHours() < 12 ? 'am' : 'pm');
+  const [baseHour, setBaseHour] = useState<number | null>(null); // 0–23
+  const [startMod, setStartMod] = useState<0 | 30>(0);           // :00 or :30
+  const [duration, setDuration] = useState<60 | 90 | 120>(60);   // minutes
 
   const [booked,       setBooked]       = useState<BookedSlot[]>([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
-  const [startSlot,    setStartSlot]    = useState<string | null>(null);
-  const [endSlot,      setEndSlot]      = useState<string | null>(null);
-  const [hoverSlot,    setHoverSlot]    = useState<string | null>(null);
   const [submitting,   setSubmitting]   = useState(false);
   const [apiError,     setApiError]     = useState<string | null>(null);
   const [success,      setSuccess]      = useState(false);
 
-  const phase: Phase = !startSlot ? 'idle' : !endSlot ? 'picking-end' : 'done';
-
   useEffect(() => {
     setLoadingSlots(true);
-    setStartSlot(null);
-    setEndSlot(null);
-    setHoverSlot(null);
+    setBaseHour(null);
     setApiError(null);
     api
       .get(`/pitches/${pitchId}/availability?date=${selDayStr}`)
@@ -146,134 +107,110 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
       .finally(() => setLoadingSlots(false));
   }, [pitchId, selDayStr]);
 
-  function resetSelection() {
-    setStartSlot(null);
-    setEndSlot(null);
-    setHoverSlot(null);
-    setApiError(null);
-  }
-
-  // ── Pre-computed values ───────────────────────────────────────────────────
-
-  const bookedSet = useMemo(
-    () => new Set(SLOTS.filter(s => isSlotBooked(s, booked, selDay))),
-    [booked, selDay],
-  );
-
-  // Minutes from midnight for the current local time; -1 when selDay is not today.
+  // Current local time in minutes from midnight; -1 when selDay is not today.
   const nowMins = useMemo(() => {
     if (selDayStr !== todayStr()) return -1;
     const now = new Date();
     return now.getHours() * 60 + now.getMinutes();
   }, [selDayStr]);
 
-  const pastSet = useMemo(
-    () => new Set(SLOTS.filter(s => nowMins >= 0 && toMins(s) <= nowMins)),
-    [nowMins],
-  );
+  // ── Slot availability helpers (30-min granularity) ────────────────────────
 
-  const startIdx  = startSlot ? SLOTS.indexOf(startSlot) : -1;
-  const startMins = startSlot ? toMins(startSlot) : -1;
+  function slotUnavailable(mins: number): boolean {
+    if (nowMins >= 0 && mins <= nowMins) return true;
+    return isSlotBooked(mins, booked, selDay);
+  }
 
-  // Minutes of the first booked period that starts AFTER startSlot.
-  // Iterates only the 48 period slots (i < 48), not the "24:00" boundary marker.
-  const nextBookedStartMins = useMemo(() => {
-    if (startMins < 0) return 24 * 60;
-    for (let i = 0; i < 48; i++) {
-      const m = toMins(SLOTS[i]);
-      if (m > startMins && bookedSet.has(SLOTS[i])) return m;
-    }
-    return 24 * 60;
-  }, [startMins, bookedSet]);
+  function slotIsPast(mins: number): boolean {
+    return nowMins >= 0 && mins <= nowMins;
+  }
 
-  // ── State map for every slot ──────────────────────────────────────────────
+  // ── Grid helpers ──────────────────────────────────────────────────────────
 
-  const slotStateMap = useMemo<Map<string, SlotState>>(() => {
-    const map = new Map<string, SlotState>();
-    const activeEnd     = endSlot ?? (phase === 'picking-end' ? hoverSlot : null);
-    const activeEndMins = activeEnd ? toMins(activeEnd) : -1;
+  // Hours shown in the 12-slot grid
+  const gridHours = amPm === 'am'
+    ? [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    : [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23];
 
-    for (let i = 0; i < SLOTS.length; i++) {
-      const s     = SLOTS[i];
-      const sMins = toMins(s);
+  // An hour is disabled only when BOTH its :00 and :30 slots are unavailable.
+  function isHourDisabled(h: number): boolean {
+    return slotUnavailable(h * 60) && slotUnavailable(h * 60 + 30);
+  }
 
-      if (bookedSet.has(s)) { map.set(s, 'booked'); continue; }
-      if (pastSet.has(s))   { map.set(s, 'past');   continue; }
+  // ── Fine-tuning validation ────────────────────────────────────────────────
 
-      if (phase === 'idle') {
-        // Valid start: must have room for at least 1 hour before 24:00
-        map.set(s, sMins <= 23 * 60 ? 'available' : 'disabled');
-        continue;
-      }
+  function isModDisabled(mod: 0 | 30): boolean {
+    if (baseHour === null) return true;
+    return slotUnavailable(baseHour * 60 + mod);
+  }
 
-      if (i === startIdx) { map.set(s, 'selected-start'); continue; }
-
-      // Slots consumed by active selection (strictly between start and end boundary)
-      if (activeEndMins > 0 && sMins > startMins && sMins < activeEndMins) {
-        map.set(s, endSlot ? 'in-range' : 'hover-range');
-        continue;
-      }
-
-      if (sMins < startMins) { map.set(s, 'disabled'); continue; }
-      if (sMins > startMins && sMins < startMins + 60) { map.set(s, 'disabled'); continue; }
-      if (sMins > nextBookedStartMins) { map.set(s, 'disabled'); continue; }
-
-      map.set(s, 'available');
-    }
-
-    return map;
-  }, [phase, startIdx, startMins, nextBookedStartMins, bookedSet, pastSet, endSlot, hoverSlot]);
+  function isDurationDisabled(d: 60 | 90 | 120): boolean {
+    if (baseHour === null) return true;
+    const startMs = baseHour * 60 + startMod;
+    const endMs   = startMs + d;
+    if (endMs > 24 * 60) return true;
+    return rangeOverlapsBookings(startMs, endMs, booked, selDay);
+  }
 
   // ── Derived booking values ────────────────────────────────────────────────
 
-  const durationMins = startMins >= 0 && endSlot
-    ? toMins(endSlot) - startMins : 0;
-  const total = durationMins > 0
-    ? Math.round((durationMins / 60) * pricePerHour * 100) / 100 : 0;
-  const canSubmit = !!startSlot && !!endSlot && !submitting;
+  const actualStartMins = baseHour !== null ? baseHour * 60 + startMod : -1;
+  const actualEndMins   = actualStartMins >= 0 ? actualStartMins + duration : -1;
+  const actualStartStr  = actualStartMins >= 0 ? minsToTime(actualStartMins) : null;
+  const actualEndStr    = actualEndMins   >= 0 ? minsToTime(actualEndMins)   : null;
+  const total           = actualStartMins >= 0
+    ? Math.round((duration / 60) * pricePerHour * 100) / 100 : 0;
 
-  // ── Slot interaction ──────────────────────────────────────────────────────
+  const canSubmit =
+    baseHour !== null &&
+    !isModDisabled(startMod) &&
+    !isDurationDisabled(duration) &&
+    !submitting;
 
-  function handleSlotClick(s: string) {
+  // ── Interaction handlers ──────────────────────────────────────────────────
+
+  function handleAmPm(val: 'am' | 'pm') {
+    setAmPm(val);
+    setBaseHour(null);
     setApiError(null);
-    const sMins = toMins(s);
-
-    if (phase === 'idle') {
-      if (!bookedSet.has(s) && !pastSet.has(s) && sMins <= 23 * 60) setStartSlot(s);
-      return;
-    }
-
-    if (phase === 'picking-end') {
-      if (s === startSlot) { resetSelection(); return; }
-      const isValidEnd = sMins >= startMins + 60 && sMins <= nextBookedStartMins;
-      if (isValidEnd) {
-        setEndSlot(s);
-        setHoverSlot(null);
-      }
-      return;
-    }
-    // phase === 'done': locked until reset
   }
 
-  function handleSlotHover(s: string) {
-    if (phase !== 'picking-end') { setHoverSlot(null); return; }
-    const sMins = toMins(s);
-    const isValidEnd = sMins >= startMins + 60 && sMins <= nextBookedStartMins;
-    setHoverSlot(isValidEnd ? s : null);
+  function handleHourClick(h: number) {
+    if (isHourDisabled(h)) return;
+    setApiError(null);
+    // Clicking the already-selected hour deselects it
+    if (baseHour === h) { setBaseHour(null); return; }
+    setBaseHour(h);
+    // Auto-select first available modifier
+    const newMod = (!slotUnavailable(h * 60) ? 0 : 30) as 0 | 30;
+    setStartMod(newMod);
+    setDuration(60);
+  }
+
+  function handleModClick(mod: 0 | 30) {
+    if (isModDisabled(mod)) return;
+    setStartMod(mod);
+    setApiError(null);
+  }
+
+  function handleDurationClick(d: 60 | 90 | 120) {
+    if (isDurationDisabled(d)) return;
+    setDuration(d);
+    setApiError(null);
   }
 
   // ── Submit ────────────────────────────────────────────────────────────────
 
   async function handleSubmit() {
-    if (!canSubmit || !startSlot || !endSlot) return;
+    if (!canSubmit || !actualStartStr || !actualEndStr) return;
     setSubmitting(true);
     setApiError(null);
 
     try {
       await api.post('/bookings', {
         pitch_id:    pitchId,
-        start_time:  buildDateTime(selDay, startSlot).toISOString(),
-        end_time:    buildDateTime(selDay, endSlot).toISOString(),
+        start_time:  buildDateTime(selDay, actualStartStr).toISOString(),
+        end_time:    buildDateTime(selDay, actualEndStr).toISOString(),
         total_price: total,
       });
       setSuccess(true);
@@ -315,17 +252,28 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     );
   }
 
-  // ── Main render ───────────────────────────────────────────────────────────
+  // ── Shared button style factories ─────────────────────────────────────────
 
-  const phaseHint =
-    phase === 'idle'        ? 'اختر وقت البداية'                  :
-    phase === 'picking-end' ? 'اختر وقت الانتهاء (ساعة كحد أدنى)' :
-                              `${startSlot} ← ${endSlot}`;
+  const optionBtn = (selected: boolean, disabled: boolean, extra = '') =>
+    [
+      'rounded-xl border transition-all duration-150 font-bold select-none',
+      selected
+        ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+        : disabled
+          ? 'bg-white/[0.01] border-white/[0.03] text-white/15 cursor-not-allowed opacity-40'
+          : [
+              'bg-white/[0.04] border-white/[0.08] text-white/50 cursor-pointer',
+              'hover:bg-emerald-500/10 hover:border-emerald-500/25 hover:text-emerald-300',
+            ].join(' '),
+      extra,
+    ].join(' ');
+
+  // ── Main render ───────────────────────────────────────────────────────────
 
   return (
     <div className="rounded-2xl bg-[#141715] border border-white/[0.07] overflow-hidden">
 
-      {/* ── Header ──────────────────────────────────────────────────────── */}
+      {/* ── Header ── */}
       <div className="px-6 pt-6 pb-5 border-b border-white/[0.05]">
         <p className="text-[10px] font-bold tracking-widest text-emerald-500 uppercase mb-1.5">
           احجز الملعب
@@ -337,7 +285,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
 
       <div className="px-6 py-5 flex flex-col gap-6">
 
-        {/* ── Date picker ─────────────────────────────────────────────── */}
+        {/* ── Date picker ── */}
         <div>
           <p className="flex items-center gap-1.5 text-[10px] font-bold text-white/30 tracking-widest uppercase mb-3">
             <CalendarDays size={11} className="text-emerald-500" aria-hidden />
@@ -358,87 +306,146 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
           />
         </div>
 
-        {/* ── Slot grid ───────────────────────────────────────────────── */}
         {loadingSlots ? (
           <div className="h-44 flex items-center justify-center">
             <div className="w-5 h-5 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
           </div>
         ) : (
           <>
-            {/* Status / instruction bar */}
-            <div className="flex items-center justify-between min-h-[20px]">
-              <p className={[
-                'text-[11px] transition-colors duration-200',
-                phase === 'picking-end' ? 'text-emerald-400/70' :
-                phase === 'done'        ? 'text-emerald-300 font-mono' : 'text-white/35',
-              ].join(' ')}>
-                {phaseHint}
+            {/* ── AM / PM Toggle ── */}
+            <div>
+              <p className="text-[10px] font-bold text-white/30 tracking-widest uppercase mb-3">
+                الفترة
               </p>
-              {startSlot && (
-                <button
-                  type="button"
-                  onClick={resetSelection}
-                  className={[
-                    'flex items-center gap-1.5 px-3 py-1.5 rounded-lg border',
-                    'text-[12px] font-semibold transition-all duration-150',
-                    'border-rose-500/20 bg-rose-500/[0.06] text-rose-400',
-                    'hover:bg-rose-500/[0.14] hover:border-rose-500/35',
-                    'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-rose-500',
-                  ].join(' ')}
-                >
-                  <X size={13} aria-hidden />
-                  إلغاء التحديد
-                </button>
-              )}
+              <div className="flex rounded-xl border border-white/[0.08] bg-[#0d0f0e] p-1 gap-1">
+                {(['am', 'pm'] as const).map(val => (
+                  <button
+                    key={val}
+                    type="button"
+                    onClick={() => handleAmPm(val)}
+                    className={[
+                      'flex-1 py-2.5 rounded-lg text-[13px] font-bold tracking-wide',
+                      'transition-all duration-150 border',
+                      amPm === val
+                        ? 'bg-emerald-500/20 border-emerald-500/30 text-emerald-300'
+                        : 'border-transparent text-white/35 hover:text-white/60 hover:bg-white/[0.04]',
+                    ].join(' ')}
+                  >
+                    {val === 'am' ? 'صباحاً' : 'مساءً'}
+                  </button>
+                ))}
+              </div>
             </div>
 
-            {/* Scrollable grid wrapper — 49 slots (00:00–24:00) */}
-            <div
-              className="max-h-[380px] overflow-y-auto rounded-xl"
-              style={{ scrollbarWidth: 'thin', scrollbarColor: 'rgba(255,255,255,0.08) transparent' }}
-            >
-              <div
-                role="group"
-                aria-label="اختر الفترة الزمنية"
-                className="grid grid-cols-4 sm:grid-cols-6 gap-1.5 p-0.5"
-                onMouseLeave={() => setHoverSlot(null)}
-              >
-                {SLOTS.map(s => {
-                  const st = slotStateMap.get(s) ?? 'available';
-                  const tip =
-                    st === 'booked' ? 'محجوز' :
-                    st === 'past'   ? 'الوقت انقضى' :
-                    undefined;
+            {/* ── 12-Hour Grid ── */}
+            <div>
+              <p className="text-[10px] font-bold text-white/30 tracking-widest uppercase mb-3">
+                الساعة
+              </p>
+              <div role="group" aria-label="اختر الساعة" className="grid grid-cols-4 gap-2">
+                {gridHours.map(h => {
+                  const disabled = isHourDisabled(h);
+                  const selected = baseHour === h;
                   return (
                     <button
-                      key={s}
+                      key={h}
                       type="button"
-                      onClick={() => handleSlotClick(s)}
-                      onMouseEnter={() => handleSlotHover(s)}
-                      aria-label={`${s}${tip ? ` (${tip})` : ''}`}
-                      title={tip}
-                      className={slotClasses(st)}
+                      onClick={() => handleHourClick(h)}
+                      disabled={disabled}
+                      aria-pressed={selected}
+                      title={disabled ? 'لا توجد أوقات متاحة في هذه الساعة' : undefined}
+                      className={[
+                        'h-14 rounded-xl border transition-all duration-150 select-none',
+                        'flex flex-col items-center justify-center gap-0.5',
+                        selected
+                          ? 'bg-emerald-500/25 border-emerald-400/60 text-emerald-300 shadow-[0_0_14px_rgba(52,211,153,0.15)]'
+                          : disabled
+                            ? 'bg-white/[0.01] border-white/[0.03] text-white/10 cursor-not-allowed'
+                            : [
+                                'bg-white/[0.03] border-white/[0.07] text-white/55 cursor-pointer',
+                                'hover:bg-emerald-500/10 hover:border-emerald-500/30 hover:text-emerald-300',
+                              ].join(' '),
+                      ].join(' ')}
                     >
-                      {s}
+                      <span className="text-[16px] font-mono font-bold leading-none">
+                        {String(h).padStart(2, '0')}
+                      </span>
+                      <span className="text-[9px] font-semibold opacity-50 tracking-wider">:00</span>
                     </button>
                   );
                 })}
               </div>
             </div>
 
-            {/* Legend */}
+            {/* ── Fine-Tuning Panel ── */}
+            {baseHour !== null && (
+              <div className="rounded-xl border border-white/[0.08] bg-[#0d0f0e] p-4 flex flex-col gap-5">
+
+                {/* Start modifier */}
+                <div>
+                  <p className="text-[10px] font-bold text-white/25 tracking-widest uppercase mb-2.5">
+                    وقت البداية بالضبط
+                  </p>
+                  <div className="grid grid-cols-2 gap-2">
+                    {([0, 30] as const).map(mod => {
+                      const dis = isModDisabled(mod);
+                      const sel = startMod === mod;
+                      const tip = !dis ? undefined
+                        : slotIsPast(baseHour * 60 + mod) ? 'الوقت انقضى' : 'محجوز';
+                      return (
+                        <button
+                          key={mod}
+                          type="button"
+                          onClick={() => handleModClick(mod)}
+                          disabled={dis}
+                          title={tip}
+                          aria-pressed={sel}
+                          className={optionBtn(sel, dis, 'py-3 text-[14px] font-mono')}
+                        >
+                          {minsToTime(baseHour * 60 + mod)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Duration */}
+                <div>
+                  <p className="text-[10px] font-bold text-white/25 tracking-widest uppercase mb-2.5">
+                    المدة
+                  </p>
+                  <div className="grid grid-cols-3 gap-2">
+                    {([60, 90, 120] as const).map(d => {
+                      const dis = isDurationDisabled(d);
+                      const sel = duration === d;
+                      return (
+                        <button
+                          key={d}
+                          type="button"
+                          onClick={() => handleDurationClick(d)}
+                          disabled={dis}
+                          title={dis ? 'يتعارض مع حجز موجود أو يتجاوز منتصف الليل' : undefined}
+                          aria-pressed={sel}
+                          className={optionBtn(sel, dis, 'py-3 text-[12px]')}
+                        >
+                          {durationLabel(d)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ── Legend ── */}
             <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[10px] text-white/25">
               <span className="flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-sm bg-white/[0.05] border border-white/[0.08]" aria-hidden />
                 متاح
               </span>
               <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-sm bg-red-950/20 border border-red-900/[0.12]" aria-hidden />
-                محجوز
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-sm bg-white/[0.02] border border-white/[0.04] opacity-45" aria-hidden />
-                منقضٍ
+                <span className="w-2.5 h-2.5 rounded-sm bg-white/[0.01] border border-white/[0.03]" aria-hidden />
+                غير متاح
               </span>
               <span className="flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500/25 border border-emerald-400/60" aria-hidden />
@@ -448,15 +455,15 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
           </>
         )}
 
-        {/* ── Price summary ────────────────────────────────────────────── */}
-        {canSubmit && (
+        {/* ── Price summary ── */}
+        {canSubmit && actualStartStr && actualEndStr && (
           <div className="flex items-center justify-between px-4 py-3.5 rounded-xl bg-[#0d0f0e] border border-white/[0.05]">
             <div>
               <p className="text-[9px] font-bold text-white/20 tracking-widest uppercase mb-0.5">
                 إجمالي الحجز
               </p>
-              <p className="text-[11px] text-white/30">
-                {durationLabel(durationMins)} × {pricePerHour} دينار
+              <p className="text-[11px] text-white/30 font-mono">
+                {actualStartStr} ← {actualEndStr}
               </p>
             </div>
             <div className="flex items-baseline gap-1">
@@ -468,7 +475,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
           </div>
         )}
 
-        {/* ── API error ────────────────────────────────────────────────── */}
+        {/* ── API error ── */}
         {apiError && (
           <div
             role="alert"
@@ -478,7 +485,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
           </div>
         )}
 
-        {/* ── Confirm button ───────────────────────────────────────────── */}
+        {/* ── Confirm button ── */}
         <button
           type="button"
           onClick={handleSubmit}
