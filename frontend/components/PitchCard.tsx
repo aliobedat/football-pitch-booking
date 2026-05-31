@@ -48,6 +48,17 @@ const AVAIL_STYLE = {
   },
 } as const;
 
+// ─── Time helper ─────────────────────────────────────────────────────────────
+// Converts a "HH:mm" slot string (24-hr) → "07:00 م" style (12-hr + Arabic marker).
+// Keeps the same mapping logic used everywhere else in the UI.
+function formatSlot12(slot: string): string {
+  const [hStr = '0', mStr = '0'] = slot.split(':');
+  const h    = parseInt(hStr, 10);
+  const m    = parseInt(mStr, 10);
+  const hr12 = (h === 0 || h === 12) ? 12 : h > 12 ? h - 12 : h;
+  return `${String(hr12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${h < 12 ? 'ص' : 'م'}`;
+}
+
 // ─── Pitch silhouette — branded fallback when imageUrl is null / fails ────────
 
 function PitchSilhouette() {
@@ -163,7 +174,7 @@ export default function PitchCard({ pitch }: { pitch: Pitch }) {
             </span>
             {pitch.nextAvailableSlot && pitch.availabilityToday !== 'full' && (
               <span className="text-[9px] text-white/55 bg-black/50 backdrop-blur-sm px-2 py-0.5 rounded-full border border-white/10">
-                أقرب موعد {pitch.nextAvailableSlot}
+                أقرب موعد {formatSlot12(pitch.nextAvailableSlot!)}
               </span>
             )}
           </div>
