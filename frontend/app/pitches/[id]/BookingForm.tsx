@@ -561,15 +561,18 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                 </p>
                 <div role="group" aria-label="اختر الساعة" className="grid grid-cols-4 gap-2">
                   {gridHours.map(h => {
-                    const fullyPast   = isHourFullyPast(h);
-                    const fullyBooked = isHourFullyBooked(h);
-                    const disabled    = isHourDisabled(h);
-                    const selected    = baseHour === h;
-                    // Partially booked = one of the two sub-slots is booked
+                    const fullyPast     = isHourFullyPast(h);
+                    const fullyBooked   = isHourFullyBooked(h);
+                    const disabled      = isHourDisabled(h);
+                    const selected      = baseHour === h;
                     const partialBooked = !fullyBooked && (slotIsBooked(h * 60) || slotIsBooked(h * 60 + 30));
 
-                    // Accessibility label for the two edge cases
-                    const edgeLabel = h === 0 ? ' (منتصف الليل)' : h === 12 ? ' (الظهر)' : '';
+                    // Strict 12-hour mapping — never shows raw 24-hr values
+                    // 0→12, 1-11→01-11, 12→12, 13-23→01-11
+                    const hr12  = (h === 0 || h === 12) ? 12 : h > 12 ? h - 12 : h;
+                    const label = String(hr12).padStart(2, '0') + ':00';
+
+                    const edgeNote = h === 0 ? ' منتصف الليل' : h === 12 ? ' الظهر' : '';
 
                     return (
                       <button
@@ -578,7 +581,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                         onClick={() => handleHourClick(h)}
                         disabled={disabled}
                         aria-pressed={selected}
-                        aria-label={`${displayHour(h)}:00${edgeLabel}`}
+                        aria-label={label + edgeNote}
                         title={
                           fullyBooked ? 'محجوز'
                           : fullyPast  ? 'انقضى الوقت'
@@ -589,10 +592,8 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                           'h-14 rounded-xl border transition-all duration-150 select-none',
                           'flex flex-col items-center justify-center gap-0.5',
                           fullyPast
-                            // Kept visible but faded to preserve 4×3 grid symmetry
                             ? 'opacity-30 pointer-events-none bg-white/[0.02] border-white/[0.04] text-white/20'
                             : fullyBooked
-                              // Color + text label (not color alone) for accessibility
                               ? 'bg-red-950/40 text-red-400 border-red-800/50 cursor-not-allowed'
                               : selected
                                 ? 'bg-emerald-500/25 border-emerald-400/60 text-emerald-300 shadow-[0_0_14px_rgba(52,211,153,0.15)]'
@@ -605,8 +606,9 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                                     ].join(' '),
                         ].join(' ')}
                       >
-                        <span className="text-[13px] font-mono font-bold leading-none tracking-wide">
-                          {displayHour(h)}:00
+                        {/* Single inline string — hour and :00 are never split across elements */}
+                        <span className="text-[14px] font-mono font-bold leading-none tracking-wide">
+                          {label}
                         </span>
                         {fullyBooked && (
                           <span className="text-[8px] font-bold tracking-wider">محجوز</span>
