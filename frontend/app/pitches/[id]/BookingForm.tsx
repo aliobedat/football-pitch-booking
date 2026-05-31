@@ -20,34 +20,55 @@ interface Props {
   pricePerHour: number;
 }
 
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const AR_DAYS = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
+const MAX_BOOKING_DAYS = 365;
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function todayStr(): string {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+function getAmmanParts(date: Date): { dateStr: string; hours: number; minutes: number } {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone:  'Asia/Amman',
+    year:      'numeric',
+    month:     '2-digit',
+    day:       '2-digit',
+    hour:      '2-digit',
+    minute:    '2-digit',
+    hour12:    false,
+  });
+  const parts = fmt.formatToParts(date);
+  const get = (t: string) => parts.find(p => p.type === t)?.value ?? '0';
+  return {
+    dateStr: `${get('year')}-${get('month')}-${get('day')}`,
+    hours:   parseInt(get('hour'), 10) % 24, // guard: some engines emit "24" at midnight
+    minutes: parseInt(get('minute'), 10),
+  };
 }
 
-function parseDateInput(s: string): Date {
+function addDays(dateStr: string, n: number): string {
+  const [y, mo, d] = dateStr.split('-').map(Number);
+  const date = new Date(y, mo - 1, d + n);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+}
+
+function parseDateStr(s: string): Date {
   const [y, mo, d] = s.split('-').map(Number);
-  const date = new Date(y, mo - 1, d);
-  date.setHours(0, 0, 0, 0);
-  return date;
+  return new Date(y, mo - 1, d);
 }
 
 function minsToTime(mins: number): string {
   return `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
 }
 
-function buildDateTime(day: Date, timeStr: string): Date {
+function buildDateTime(dateStr: string, timeStr: string): Date {
+  const [y, mo, d] = dateStr.split('-').map(Number);
   const [h, m] = timeStr.split(':').map(Number);
-  const d = new Date(day);
-  d.setHours(h, m, 0, 0); // setHours(24,0,0,0) rolls to next-day midnight — intentional for "24:00"
-  return d;
+  return new Date(y, mo - 1, d, h, m, 0, 0);
 }
 
-// True if the 30-min block starting at slotMins overlaps any existing booking.
-function isSlotBooked(slotMins: number, booked: BookedSlot[], day: Date): boolean {
-  const slotStart = buildDateTime(day, minsToTime(slotMins)).getTime();
+function isSlotBooked(slotMins: number, booked: BookedSlot[], dateStr: string): boolean {
+  const slotStart = buildDateTime(dateStr, minsToTime(slotMins)).getTime();
   const slotEnd   = slotStart + 30 * 60 * 1000;
   return booked.some(b => {
     const bStart = new Date(b.start_time).getTime();
@@ -56,10 +77,14 @@ function isSlotBooked(slotMins: number, booked: BookedSlot[], day: Date): boolea
   });
 }
 
-// True if the range [startMins, endMins) overlaps any existing booking.
-function rangeOverlapsBookings(startMins: number, endMins: number, booked: BookedSlot[], day: Date): boolean {
-  const rangeStart = buildDateTime(day, minsToTime(startMins)).getTime();
-  const rangeEnd   = buildDateTime(day, minsToTime(endMins)).getTime();
+function rangeOverlapsBookings(
+  startMins: number,
+  endMins:   number,
+  booked:    BookedSlot[],
+  dateStr:   string,
+): boolean {
+  const rangeStart = buildDateTime(dateStr, minsToTime(startMins)).getTime();
+  const rangeEnd   = buildDateTime(dateStr, minsToTime(endMins)).getTime();
   return booked.some(b => {
     const bStart = new Date(b.start_time).getTime();
     const bEnd   = new Date(b.end_time).getTime();
@@ -74,6 +99,12 @@ function durationLabel(mins: number): string {
   return `${mins / 60} ساعة`;
 }
 
+// Returns 12-hour display string: 0→"12", 1→"01" … 11→"11", 12→"12", 13→"01" …
+function displayHour(h: number): string {
+  const d = h % 12 === 0 ? 12 : h % 12;
+  return String(d).padStart(2, '0');
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
@@ -81,15 +112,56 @@ function durationLabel(mins: number): string {
 export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const router = useRouter();
 
-  const [selDayStr, setSelDayStr] = useState<string>(todayStr());
-  const selDay = useMemo(() => parseDateInput(selDayStr), [selDayStr]);
+  // ── Server time (Asia/Amman) — source of truth for all time logic ─────────
+  const [serverNow,      setServerNow]      = useState<Date | null>(null);
+  const [serverTodayStr, setServerTodayStr] = useState<string>('');
 
-  // Default AM/PM based on current hour
-  const [amPm,     setAmPm]     = useState<'am' | 'pm'>(() => new Date().getHours() < 12 ? 'am' : 'pm');
-  const [baseHour, setBaseHour] = useState<number | null>(null); // 0–23
-  const [startMod, setStartMod] = useState<0 | 30>(0);           // :00 or :30
-  const [duration, setDuration] = useState<60 | 90 | 120>(60);   // minutes
+  useEffect(() => {
+    fetch('/api/server-time')
+      .then(r => r.json())
+      .then((d: { iso: string }) => {
+        const now = new Date(d.iso);
+        const { dateStr } = getAmmanParts(now);
+        setServerNow(now);
+        setServerTodayStr(dateStr);
+      })
+      .catch(() => {
+        // fallback to client time — display a console warning
+        console.warn('[BookingForm] server-time fetch failed; falling back to client clock');
+        const now = new Date();
+        const { dateStr } = getAmmanParts(now);
+        setServerNow(now);
+        setServerTodayStr(dateStr);
+      });
+  }, []);
 
+  // ── Selected date ─────────────────────────────────────────────────────────
+  const [selDayStr,     setSelDayStr]     = useState<string>('');
+  const [showDatePicker, setShowDatePicker] = useState(false);
+
+  useEffect(() => {
+    if (serverTodayStr && !selDayStr) setSelDayStr(serverTodayStr);
+  }, [serverTodayStr, selDayStr]);
+
+  // ── AM/PM — smart default tied to server time ─────────────────────────────
+  const [amPm, setAmPm] = useState<'am' | 'pm'>('am');
+
+  useEffect(() => {
+    if (!serverNow || !selDayStr || !serverTodayStr) return;
+    if (selDayStr === serverTodayStr) {
+      const { hours } = getAmmanParts(serverNow);
+      setAmPm(hours < 12 ? 'am' : 'pm');
+    } else {
+      setAmPm('am');
+    }
+  }, [selDayStr, serverNow, serverTodayStr]);
+
+  // ── Time selection ────────────────────────────────────────────────────────
+  const [baseHour, setBaseHour] = useState<number | null>(null);
+  const [startMod, setStartMod] = useState<0 | 30>(0);
+  const [duration, setDuration] = useState<60 | 90 | 120>(60);
+
+  // ── Availability data ─────────────────────────────────────────────────────
   const [booked,       setBooked]       = useState<BookedSlot[]>([]);
   const [loadingSlots, setLoadingSlots] = useState(false);
   const [submitting,   setSubmitting]   = useState(false);
@@ -97,6 +169,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const [success,      setSuccess]      = useState(false);
 
   useEffect(() => {
+    if (!selDayStr) return;
     setLoadingSlots(true);
     setBaseHour(null);
     setApiError(null);
@@ -107,34 +180,53 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
       .finally(() => setLoadingSlots(false));
   }, [pitchId, selDayStr]);
 
-  // Current local time in minutes from midnight; -1 when selDay is not today.
+  // ── Server "now" in minutes (Amman time, today only) ──────────────────────
   const nowMins = useMemo(() => {
-    if (selDayStr !== todayStr()) return -1;
-    const now = new Date();
-    return now.getHours() * 60 + now.getMinutes();
-  }, [selDayStr]);
+    if (!serverNow || !selDayStr || selDayStr !== serverTodayStr) return -1;
+    const { hours, minutes } = getAmmanParts(serverNow);
+    return hours * 60 + minutes;
+  }, [serverNow, selDayStr, serverTodayStr]);
 
-  // ── Slot availability helpers (30-min granularity) ────────────────────────
+  // ── 7-day rolling strip ───────────────────────────────────────────────────
+  const sevenDays = useMemo(
+    () => serverTodayStr ? Array.from({ length: 7 }, (_, i) => addDays(serverTodayStr, i)) : [],
+    [serverTodayStr],
+  );
 
-  function slotUnavailable(mins: number): boolean {
-    if (nowMins >= 0 && mins <= nowMins) return true;
-    return isSlotBooked(mins, booked, selDay);
-  }
+  const maxDateStr = useMemo(
+    () => serverTodayStr ? addDays(serverTodayStr, MAX_BOOKING_DAYS) : '',
+    [serverTodayStr],
+  );
+
+  // ── Grid hours for selected half ──────────────────────────────────────────
+  const gridHours = amPm === 'am'
+    ? [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    : [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23];
+
+  // ── Slot availability predicates ──────────────────────────────────────────
 
   function slotIsPast(mins: number): boolean {
     return nowMins >= 0 && mins <= nowMins;
   }
 
-  // ── Grid helpers ──────────────────────────────────────────────────────────
+  function slotIsBooked(mins: number): boolean {
+    return isSlotBooked(mins, booked, selDayStr);
+  }
 
-  // Hours shown in the 12-slot grid
-  const gridHours = amPm === 'am'
-    ? [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-    : [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23];
+  function slotUnavailable(mins: number): boolean {
+    return slotIsPast(mins) || slotIsBooked(mins);
+  }
 
-  // An hour is disabled only when BOTH its :00 and :30 slots are unavailable.
   function isHourDisabled(h: number): boolean {
     return slotUnavailable(h * 60) && slotUnavailable(h * 60 + 30);
+  }
+
+  function isHourFullyBooked(h: number): boolean {
+    return slotIsBooked(h * 60) && slotIsBooked(h * 60 + 30);
+  }
+
+  function isHourFullyPast(h: number): boolean {
+    return nowMins >= 0 && h * 60 + 30 <= nowMins;
   }
 
   // ── Fine-tuning validation ────────────────────────────────────────────────
@@ -149,11 +241,13 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     const startMs = baseHour * 60 + startMod;
     const endMs   = startMs + d;
     if (endMs > 24 * 60) return true;
-    return rangeOverlapsBookings(startMs, endMs, booked, selDay);
+    return rangeOverlapsBookings(startMs, endMs, booked, selDayStr);
   }
 
-  // ── Derived booking values ────────────────────────────────────────────────
+  // ── Empty state check for current AM/PM half ──────────────────────────────
+  const hasAvailableHours = gridHours.some(h => !isHourDisabled(h));
 
+  // ── Derived booking values ────────────────────────────────────────────────
   const actualStartMins = baseHour !== null ? baseHour * 60 + startMod : -1;
   const actualEndMins   = actualStartMins >= 0 ? actualStartMins + duration : -1;
   const actualStartStr  = actualStartMins >= 0 ? minsToTime(actualStartMins) : null;
@@ -167,7 +261,14 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     !isDurationDisabled(duration) &&
     !submitting;
 
-  // ── Interaction handlers ──────────────────────────────────────────────────
+  // ── Handlers ─────────────────────────────────────────────────────────────
+
+  function handleDaySelect(dayStr: string) {
+    setSelDayStr(dayStr);
+    setBaseHour(null);
+    setApiError(null);
+    setShowDatePicker(false);
+  }
 
   function handleAmPm(val: 'am' | 'pm') {
     setAmPm(val);
@@ -178,10 +279,8 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
   function handleHourClick(h: number) {
     if (isHourDisabled(h)) return;
     setApiError(null);
-    // Clicking the already-selected hour deselects it
     if (baseHour === h) { setBaseHour(null); return; }
     setBaseHour(h);
-    // Auto-select first available modifier
     const newMod = (!slotUnavailable(h * 60) ? 0 : 30) as 0 | 30;
     setStartMod(newMod);
     setDuration(60);
@@ -199,18 +298,33 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     setApiError(null);
   }
 
-  // ── Submit ────────────────────────────────────────────────────────────────
+  // ── Submit — re-validates against server before confirming ────────────────
 
   async function handleSubmit() {
     if (!canSubmit || !actualStartStr || !actualEndStr) return;
     setSubmitting(true);
     setApiError(null);
 
+    // Fresh availability check to catch race-condition double-bookings
+    try {
+      const avail = await api.get(`/pitches/${pitchId}/availability?date=${selDayStr}`);
+      const freshBooked: BookedSlot[] = avail.data.booked_slots ?? [];
+      setBooked(freshBooked);
+      if (rangeOverlapsBookings(actualStartMins, actualEndMins, freshBooked, selDayStr)) {
+        setApiError('تم حجز هذا الوقت للتو — يرجى اختيار وقت آخر');
+        setBaseHour(null);
+        setSubmitting(false);
+        return;
+      }
+    } catch {
+      // server will validate; proceed
+    }
+
     try {
       await api.post('/bookings', {
         pitch_id:    pitchId,
-        start_time:  buildDateTime(selDay, actualStartStr).toISOString(),
-        end_time:    buildDateTime(selDay, actualEndStr).toISOString(),
+        start_time:  buildDateTime(selDayStr, actualStartStr).toISOString(),
+        end_time:    buildDateTime(selDayStr, actualEndStr).toISOString(),
         total_price: total,
       });
       setSuccess(true);
@@ -252,11 +366,12 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     );
   }
 
-  // ── Shared button style factories ─────────────────────────────────────────
+  // ── Shared option-button style factory ────────────────────────────────────
 
   const optionBtn = (selected: boolean, disabled: boolean, extra = '') =>
     [
       'rounded-xl border transition-all duration-150 font-bold select-none',
+      'flex items-center justify-center',
       selected
         ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
         : disabled
@@ -267,6 +382,16 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
             ].join(' '),
       extra,
     ].join(' ');
+
+  // ── Loading screen (waiting for server time) ──────────────────────────────
+
+  if (!serverTodayStr || !selDayStr) {
+    return (
+      <div className="rounded-2xl bg-[#141715] border border-white/[0.07] p-8 flex items-center justify-center h-44">
+        <div className="w-5 h-5 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
+      </div>
+    );
+  }
 
   // ── Main render ───────────────────────────────────────────────────────────
 
@@ -285,25 +410,97 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
 
       <div className="px-6 py-5 flex flex-col gap-6">
 
-        {/* ── Date picker ── */}
+        {/* ── 7-day rolling strip + date picker ── */}
         <div>
-          <p className="flex items-center gap-1.5 text-[10px] font-bold text-white/30 tracking-widest uppercase mb-3">
-            <CalendarDays size={11} className="text-emerald-500" aria-hidden />
-            التاريخ
-          </p>
-          <input
-            type="date"
-            value={selDayStr}
-            min={todayStr()}
-            onChange={e => { if (e.target.value) setSelDayStr(e.target.value); }}
-            className={[
-              'w-full rounded-xl border border-white/[0.09] px-4 py-2.5',
-              'bg-[#0d0f0e] text-[13px] text-[#f0efe8]',
-              'hover:border-white/[0.18] focus:outline-none',
-              'focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/[0.12]',
-              'transition-all duration-150 [color-scheme:dark]',
-            ].join(' ')}
-          />
+          <div className="flex items-center justify-between mb-3">
+            <p className="flex items-center gap-1.5 text-[10px] font-bold text-white/30 tracking-widest uppercase">
+              <CalendarDays size={11} className="text-emerald-500" aria-hidden />
+              التاريخ
+            </p>
+            <button
+              type="button"
+              onClick={() => setShowDatePicker(v => !v)}
+              aria-expanded={showDatePicker}
+              className="flex items-center gap-1 text-[10px] text-white/30 hover:text-emerald-400 transition-colors duration-150"
+            >
+              <CalendarDays size={12} />
+              <span>تاريخ آخر</span>
+            </button>
+          </div>
+
+          {/* Horizontally scrollable 7-day strip */}
+          <div className="flex gap-2 overflow-x-auto pt-3 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+            {sevenDays.map(dayStr => {
+              const date      = parseDateStr(dayStr);
+              const dow       = date.getDay();
+              const dd        = date.getDate();
+              const isSelected = selDayStr === dayStr;
+              const isToday    = dayStr === serverTodayStr;
+              const isTomorrow = dayStr === addDays(serverTodayStr, 1);
+
+              return (
+                <button
+                  key={dayStr}
+                  type="button"
+                  onClick={() => handleDaySelect(dayStr)}
+                  aria-pressed={isSelected}
+                  className={[
+                    'relative flex-shrink-0 flex flex-col items-center gap-1',
+                    'rounded-xl border px-3 py-2.5 min-w-[56px]',
+                    'transition-all duration-150 select-none',
+                    isSelected
+                      ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                      : 'bg-white/[0.03] border-white/[0.07] text-white/50 hover:bg-white/[0.06] hover:border-white/[0.14]',
+                  ].join(' ')}
+                >
+                  {(isToday || isTomorrow) && (
+                    <span className={[
+                      'absolute -top-2.5 left-1/2 -translate-x-1/2',
+                      'px-1.5 py-px rounded-full text-[8px] font-bold whitespace-nowrap',
+                      isSelected ? 'bg-emerald-500 text-white' : 'bg-white/10 text-white/50',
+                    ].join(' ')}>
+                      {isToday ? 'اليوم' : 'غداً'}
+                    </span>
+                  )}
+                  <span className="text-[9px] font-bold tracking-wide">{AR_DAYS[dow]}</span>
+                  <span className="text-[18px] font-bold leading-none font-mono">{dd}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Expandable date picker for dates beyond the 7-day strip */}
+          <div className={[
+            'overflow-hidden transition-all duration-300 ease-in-out',
+            showDatePicker ? 'max-h-24 opacity-100 mt-2' : 'max-h-0 opacity-0',
+          ].join(' ')}>
+            <input
+              type="date"
+              value={selDayStr}
+              min={serverTodayStr}
+              max={maxDateStr}
+              onChange={e => { if (e.target.value) handleDaySelect(e.target.value); }}
+              className={[
+                'w-full rounded-xl border border-white/[0.09] px-4 py-2.5',
+                'bg-[#0d0f0e] text-[13px] text-[#f0efe8]',
+                'hover:border-white/[0.18] focus:outline-none',
+                'focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/[0.12]',
+                'transition-all duration-150 [color-scheme:dark]',
+              ].join(' ')}
+            />
+          </div>
+
+          {/* Selected date badge when outside the 7-day strip */}
+          {!sevenDays.includes(selDayStr) && (
+            <div className="mt-2 px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-[11px] text-emerald-400 text-center">
+              {parseDateStr(selDayStr).toLocaleDateString('ar-JO', {
+                weekday: 'long',
+                year:    'numeric',
+                month:   'long',
+                day:     'numeric',
+              })}
+            </div>
+          )}
         </div>
 
         {loadingSlots ? (
@@ -337,51 +534,101 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
               </div>
             </div>
 
-            {/* ── 12-Hour Grid ── */}
-            <div>
-              <p className="text-[10px] font-bold text-white/30 tracking-widest uppercase mb-3">
-                الساعة
-              </p>
-              <div role="group" aria-label="اختر الساعة" className="grid grid-cols-4 gap-2">
-                {gridHours.map(h => {
-                  const disabled = isHourDisabled(h);
-                  const selected = baseHour === h;
-                  return (
-                    <button
-                      key={h}
-                      type="button"
-                      onClick={() => handleHourClick(h)}
-                      disabled={disabled}
-                      aria-pressed={selected}
-                      title={disabled ? 'لا توجد أوقات متاحة في هذه الساعة' : undefined}
-                      className={[
-                        'h-14 rounded-xl border transition-all duration-150 select-none',
-                        'flex flex-col items-center justify-center gap-0.5',
-                        selected
-                          ? 'bg-emerald-500/25 border-emerald-400/60 text-emerald-300 shadow-[0_0_14px_rgba(52,211,153,0.15)]'
-                          : disabled
-                            ? 'bg-white/[0.01] border-white/[0.03] text-white/10 cursor-not-allowed'
-                            : [
-                                'bg-white/[0.03] border-white/[0.07] text-white/55 cursor-pointer',
-                                'hover:bg-emerald-500/10 hover:border-emerald-500/30 hover:text-emerald-300',
-                              ].join(' '),
-                      ].join(' ')}
-                    >
-                      <span className="text-[16px] font-mono font-bold leading-none">
-                        {String(h).padStart(2, '0')}
-                      </span>
-                      <span className="text-[9px] font-semibold opacity-50 tracking-wider">:00</span>
-                    </button>
-                  );
-                })}
+            {/* ── 12-Hour Grid or Empty State ── */}
+            {!hasAvailableHours ? (
+              <div className="flex flex-col items-center gap-3 py-8 text-center">
+                <div className="w-10 h-10 rounded-full bg-white/[0.04] border border-white/[0.07] flex items-center justify-center">
+                  <CalendarDays size={18} className="text-white/20" aria-hidden />
+                </div>
+                <div>
+                  <p className="text-[13px] font-bold text-white/40 mb-1">لا مواعيد متاحة لهذا اليوم</p>
+                  <p className="text-[11px] text-white/20">
+                    {amPm === 'am' ? 'جرب فترة المساء أو اختر يوماً آخر' : 'جرب فترة الصباح أو اختر يوماً آخر'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleAmPm(amPm === 'am' ? 'pm' : 'am')}
+                  className="px-4 py-2 rounded-xl text-[11px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 hover:bg-emerald-500/20 transition-all duration-150"
+                >
+                  {amPm === 'am' ? 'تبديل إلى المساء' : 'تبديل إلى الصباح'}
+                </button>
               </div>
-            </div>
+            ) : (
+              <div>
+                <p className="text-[10px] font-bold text-white/30 tracking-widest uppercase mb-3">
+                  الساعة
+                </p>
+                <div role="group" aria-label="اختر الساعة" className="grid grid-cols-4 gap-2">
+                  {gridHours.map(h => {
+                    const fullyPast   = isHourFullyPast(h);
+                    const fullyBooked = isHourFullyBooked(h);
+                    const disabled    = isHourDisabled(h);
+                    const selected    = baseHour === h;
+                    // Partially booked = one of the two sub-slots is booked
+                    const partialBooked = !fullyBooked && (slotIsBooked(h * 60) || slotIsBooked(h * 60 + 30));
 
-            {/* ── Fine-Tuning Panel ── */}
-            {baseHour !== null && (
+                    // Accessibility label for the two edge cases
+                    const edgeLabel = h === 0 ? ' (منتصف الليل)' : h === 12 ? ' (الظهر)' : '';
+
+                    return (
+                      <button
+                        key={h}
+                        type="button"
+                        onClick={() => handleHourClick(h)}
+                        disabled={disabled}
+                        aria-pressed={selected}
+                        aria-label={`${displayHour(h)}:00${edgeLabel}`}
+                        title={
+                          fullyBooked ? 'محجوز'
+                          : fullyPast  ? 'انقضى الوقت'
+                          : disabled   ? 'لا توجد أوقات متاحة في هذه الساعة'
+                          : undefined
+                        }
+                        className={[
+                          'h-14 rounded-xl border transition-all duration-150 select-none',
+                          'flex flex-col items-center justify-center gap-0.5',
+                          fullyPast
+                            // Kept visible but faded to preserve 4×3 grid symmetry
+                            ? 'opacity-30 pointer-events-none bg-white/[0.02] border-white/[0.04] text-white/20'
+                            : fullyBooked
+                              // Color + text label (not color alone) for accessibility
+                              ? 'bg-red-950/40 text-red-400 border-red-800/50 cursor-not-allowed'
+                              : selected
+                                ? 'bg-emerald-500/25 border-emerald-400/60 text-emerald-300 shadow-[0_0_14px_rgba(52,211,153,0.15)]'
+                                : disabled
+                                  ? 'bg-white/[0.01] border-white/[0.03] text-white/10 cursor-not-allowed'
+                                  : [
+                                      'bg-white/[0.03] border-white/[0.07] text-white/55 cursor-pointer',
+                                      'hover:bg-emerald-500/10 hover:border-emerald-500/30 hover:text-emerald-300',
+                                      partialBooked ? 'border-dashed border-white/[0.12]' : '',
+                                    ].join(' '),
+                        ].join(' ')}
+                      >
+                        <span className="text-[16px] font-mono font-bold leading-none">
+                          {displayHour(h)}
+                        </span>
+                        {fullyBooked
+                          ? <span className="text-[8px] font-bold tracking-wider">محجوز</span>
+                          : <span className="text-[9px] font-semibold opacity-50 tracking-wider">:00</span>
+                        }
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* ── Fine-Tuning Panel — slides in smoothly via max-height transition ── */}
+            <div
+              className={[
+                'overflow-hidden transition-all duration-300 ease-in-out',
+                baseHour !== null ? 'max-h-[420px] opacity-100' : 'max-h-0 opacity-0',
+              ].join(' ')}
+            >
               <div className="rounded-xl border border-white/[0.08] bg-[#0d0f0e] p-4 flex flex-col gap-5">
 
-                {/* Start modifier */}
+                {/* Start modifier :00 / :30 */}
                 <div>
                   <p className="text-[10px] font-bold text-white/25 tracking-widest uppercase mb-2.5">
                     وقت البداية بالضبط
@@ -391,7 +638,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                       const dis = isModDisabled(mod);
                       const sel = startMod === mod;
                       const tip = !dis ? undefined
-                        : slotIsPast(baseHour * 60 + mod) ? 'الوقت انقضى' : 'محجوز';
+                        : slotIsPast(baseHour! * 60 + mod) ? 'الوقت انقضى' : 'محجوز';
                       return (
                         <button
                           key={mod}
@@ -402,22 +649,23 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                           aria-pressed={sel}
                           className={optionBtn(sel, dis, 'py-3 text-[14px] font-mono')}
                         >
-                          {minsToTime(baseHour * 60 + mod)}
+                          {minsToTime(baseHour! * 60 + mod)}
                         </button>
                       );
                     })}
                   </div>
                 </div>
 
-                {/* Duration */}
+                {/* Duration — shows live price per option */}
                 <div>
                   <p className="text-[10px] font-bold text-white/25 tracking-widest uppercase mb-2.5">
                     المدة
                   </p>
                   <div className="grid grid-cols-3 gap-2">
                     {([60, 90, 120] as const).map(d => {
-                      const dis = isDurationDisabled(d);
-                      const sel = duration === d;
+                      const dis   = isDurationDisabled(d);
+                      const sel   = duration === d;
+                      const price = Math.round((d / 60) * pricePerHour * 100) / 100;
                       return (
                         <button
                           key={d}
@@ -426,16 +674,22 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                           disabled={dis}
                           title={dis ? 'يتعارض مع حجز موجود أو يتجاوز منتصف الليل' : undefined}
                           aria-pressed={sel}
-                          className={optionBtn(sel, dis, 'py-3 text-[12px]')}
+                          className={optionBtn(sel, dis, 'py-3 text-[11px] flex-col gap-0.5')}
                         >
-                          {durationLabel(d)}
+                          <span>{durationLabel(d)}</span>
+                          <span className={[
+                            'text-[9px] font-mono',
+                            sel ? 'text-emerald-400/70' : 'text-white/25',
+                          ].join(' ')}>
+                            {price} د.أ
+                          </span>
                         </button>
                       );
                     })}
                   </div>
                 </div>
               </div>
-            )}
+            </div>
 
             {/* ── Legend ── */}
             <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[10px] text-white/25">
@@ -444,8 +698,12 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                 متاح
               </span>
               <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-sm bg-white/[0.01] border border-white/[0.03]" aria-hidden />
-                غير متاح
+                <span className="w-2.5 h-2.5 rounded-sm bg-red-950/40 border border-red-800/50" aria-hidden />
+                محجوز
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm bg-white/[0.02] border border-white/[0.04] opacity-30" aria-hidden />
+                منتهي
               </span>
               <span className="flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500/25 border border-emerald-400/60" aria-hidden />
