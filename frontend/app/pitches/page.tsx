@@ -3,74 +3,11 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
+import api from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
-import { Search, SlidersHorizontal, ChevronDown } from 'lucide-react';
+import { Search, SlidersHorizontal, ChevronDown, RefreshCw } from 'lucide-react';
 import Navbar from '@/components/Navbar';
 import PitchCard, { type Pitch } from '@/components/PitchCard';
-
-// ─── Dummy data ───────────────────────────────────────────────────────────────
-// Typed against the Pitch contract in PitchCard.tsx.
-// To switch to the real API, replace the useEffect below with:
-//   api.get('/pitches').then(r => setPitches(r.data.data)).catch(...)
-
-const DUMMY_PITCHES: Pitch[] = [
-  {
-    id: '1', name: 'ملعب النجمة الذهبية', city: 'عمان', area: 'عين الباشا',
-    imageUrl: null, pricePerHour: 10, rating: 4.8, reviewsCount: 124,
-    size: '5x5', surface: 'عشب صناعي', isIndoor: false,
-    hasLighting: true, hasParking: true,
-    availabilityToday: 'available', nextAvailableSlot: '18:00', distanceKm: 2.3,
-  },
-  {
-    id: '2', name: 'ملعب الفيصل', city: 'عمان', area: 'خلدا',
-    imageUrl: null, pricePerHour: 15, rating: 4.5, reviewsCount: 87,
-    size: '7x7', surface: 'عشب طبيعي', isIndoor: true,
-    hasLighting: true, hasParking: false,
-    availabilityToday: 'limited', nextAvailableSlot: '20:00', distanceKm: 5.1,
-  },
-  {
-    id: '3', name: 'ملعب الوحدات', city: 'عمان', area: 'الجبيهة',
-    imageUrl: null, pricePerHour: 8, rating: 4.2, reviewsCount: 56,
-    size: '5x5', surface: 'عشب صناعي', isIndoor: false,
-    hasLighting: false, hasParking: true,
-    availabilityToday: 'full', distanceKm: 7.8,
-  },
-  {
-    id: '4', name: 'ملعب البطولة', city: 'عمان', area: 'شفا بدران',
-    imageUrl: null, pricePerHour: 12, rating: 4.9, reviewsCount: 203,
-    size: '11x11', surface: 'عشب طبيعي', isIndoor: false,
-    hasLighting: true, hasParking: true,
-    availabilityToday: 'available', nextAvailableSlot: '19:00', distanceKm: 3.6,
-  },
-  {
-    id: '5', name: 'ملعب الأولمبي', city: 'عمان', area: 'عين الباشا',
-    imageUrl: null, pricePerHour: 20, rating: 4.7, reviewsCount: 341,
-    size: '7x7', surface: 'عشب صناعي', isIndoor: true,
-    hasLighting: true, hasParking: true,
-    availabilityToday: 'limited', nextAvailableSlot: '21:00', distanceKm: 1.9,
-  },
-  {
-    id: '6', name: 'ملعب الهلال', city: 'عمان', area: 'خلدا',
-    imageUrl: null, pricePerHour: 10, rating: 4.3, reviewsCount: 67,
-    size: '5x5', surface: 'عشب صناعي', isIndoor: false,
-    hasLighting: true, hasParking: false,
-    availabilityToday: 'available', nextAvailableSlot: '17:00', distanceKm: 4.4,
-  },
-  {
-    id: '7', name: 'ملعب الاتحاد', city: 'عمان', area: 'الجبيهة',
-    imageUrl: null, pricePerHour: 18, rating: 4.6, reviewsCount: 152,
-    size: '7x7', surface: 'عشب صناعي', isIndoor: true,
-    hasLighting: true, hasParking: true,
-    availabilityToday: 'available', nextAvailableSlot: '18:30', distanceKm: 6.2,
-  },
-  {
-    id: '8', name: 'ملعب المدينة', city: 'عمان', area: 'شفا بدران',
-    imageUrl: null, pricePerHour: 9, rating: 4.0, reviewsCount: 38,
-    size: '5x5', surface: 'عشب طبيعي', isIndoor: false,
-    hasLighting: false, hasParking: true,
-    availabilityToday: 'limited', nextAvailableSlot: '22:00', distanceKm: 9.1,
-  },
-];
 
 // ─── Filter / sort types ──────────────────────────────────────────────────────
 
@@ -117,6 +54,39 @@ function pitchCountLabel(n: number): string {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
+/** Matches PitchCard's visual shape exactly so the grid doesn't reflow on load */
+function PitchCardSkeleton() {
+  return (
+    <div className="rounded-2xl overflow-hidden bg-[#141715] border border-gray-800 animate-pulse">
+      {/* Image placeholder */}
+      <div className="aspect-video bg-white/[0.05]" />
+      {/* Body */}
+      <div className="p-4 flex flex-col gap-3">
+        {/* Title */}
+        <div className="h-4 bg-white/[0.07] rounded-full w-3/4" />
+        {/* Location row */}
+        <div className="flex items-center justify-between gap-2">
+          <div className="h-3 bg-white/[0.05] rounded-full w-2/5" />
+          <div className="h-3 bg-white/[0.04] rounded-full w-10" />
+        </div>
+        {/* Pills row */}
+        <div className="flex gap-1.5">
+          <div className="h-5 bg-white/[0.05] rounded-full w-10" />
+          <div className="h-5 bg-white/[0.05] rounded-full w-16" />
+          <div className="h-5 bg-white/[0.05] rounded-full w-12" />
+        </div>
+        {/* Divider */}
+        <div className="h-px bg-white/[0.05]" />
+        {/* Price + CTA row */}
+        <div className="flex items-center justify-between">
+          <div className="h-6 bg-white/[0.07] rounded-full w-14" />
+          <div className="h-8 bg-white/[0.05] rounded-xl w-20" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function SortDropdown({ value, onChange }: { value: SortKey; onChange: (v: SortKey) => void }) {
   return (
     <div className="relative">
@@ -150,26 +120,20 @@ function SortDropdown({ value, onChange }: { value: SortKey; onChange: (v: SortK
 function EmptyState({ onReset }: { onReset: () => void }) {
   return (
     <div className="col-span-full flex flex-col items-center justify-center py-28 gap-5 text-center">
-      {/* Pitch illustration */}
-      <svg
-        viewBox="0 0 240 140"
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
-        className="w-28 h-16 opacity-[0.12]"
-        aria-hidden
-      >
+      <svg viewBox="0 0 240 140" fill="none" xmlns="http://www.w3.org/2000/svg"
+        className="w-28 h-16 opacity-[0.12]" aria-hidden>
         <rect x="8" y="8" width="224" height="124" stroke="white" strokeWidth="2" rx="3" />
         <line x1="120" y1="8" x2="120" y2="132" stroke="white" strokeWidth="1.5" />
         <circle cx="120" cy="70" r="28" stroke="white" strokeWidth="1.5" />
         <circle cx="120" cy="70" r="3" fill="white" />
-        <rect x="8"   y="40" width="36"  height="60" stroke="white" strokeWidth="1.5" />
-        <rect x="196" y="40" width="36"  height="60" stroke="white" strokeWidth="1.5" />
+        <rect x="8"   y="40" width="36" height="60" stroke="white" strokeWidth="1.5" />
+        <rect x="196" y="40" width="36" height="60" stroke="white" strokeWidth="1.5" />
         <circle cx="50"  cy="70" r="2.5" fill="white" />
         <circle cx="190" cy="70" r="2.5" fill="white" />
       </svg>
       <div>
         <p className="text-[16px] font-bold text-white/40 mb-1.5">لا توجد ملاعب متاحة</p>
-        <p className="text-[13px] text-white/22">جرّب تغيير الفلاتر أو البحث بكلمة مختلفة</p>
+        <p className="text-[13px] text-white/25">جرّب تغيير الفلاتر أو البحث بكلمة مختلفة</p>
       </div>
       <button
         type="button"
@@ -177,6 +141,35 @@ function EmptyState({ onReset }: { onReset: () => void }) {
         className="text-[11px] text-emerald-500 hover:text-emerald-400 transition-colors underline underline-offset-2"
       >
         إعادة تعيين الفلاتر
+      </button>
+    </div>
+  );
+}
+
+function ErrorState({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="col-span-full flex flex-col items-center justify-center py-28 gap-5 text-center">
+      {/* Broken-connection icon */}
+      <div className="w-14 h-14 rounded-full bg-red-500/[0.07] border border-red-500/20 flex items-center justify-center">
+        <RefreshCw size={22} className="text-red-400/60" aria-hidden />
+      </div>
+      <div>
+        <p className="text-[16px] font-bold text-white/40 mb-1.5">تعذّر تحميل الملاعب</p>
+        <p className="text-[13px] text-white/25">تحقق من اتصالك بالإنترنت وحاول مجدداً</p>
+      </div>
+      <button
+        type="button"
+        onClick={onRetry}
+        className={[
+          'flex items-center gap-2 px-5 py-2.5 rounded-xl',
+          'text-[12px] font-bold text-emerald-400',
+          'bg-emerald-500/10 border border-emerald-500/20',
+          'hover:bg-emerald-500/20 transition-all duration-150',
+          'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500',
+        ].join(' ')}
+      >
+        <RefreshCw size={13} aria-hidden />
+        إعادة المحاولة
       </button>
     </div>
   );
@@ -196,19 +189,38 @@ export default function PitchesPage() {
 
   const [pitches,   setPitches]   = useState<Pitch[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [error,     setError]     = useState<string | null>(null);
+  // Increment to trigger a fresh fetch (used by the retry button)
+  const [fetchKey,  setFetchKey]  = useState(0);
 
   const [query,        setQuery]        = useState('');
   const [activeFilter, setActiveFilter] = useState<FilterValue>('all');
   const [sortKey,      setSortKey]      = useState<SortKey>('price_asc');
 
   useEffect(() => {
-    // Swap this block for an api.get('/pitches') call when the backend is ready
-    setPitches(DUMMY_PITCHES);
-    setIsLoading(false);
-  }, []);
+    let cancelled = false;
+    setIsLoading(true);
+    setError(null);
+
+    api.get('/pitches')
+      .then(res => {
+        if (!cancelled) setPitches(res.data.data ?? []);
+      })
+      .catch(() => {
+        if (!cancelled) setError('fetch_failed');
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoading(false);
+      });
+
+    return () => { cancelled = true; };
+  }, [fetchKey]);
+
+  const retry = useCallback(() => setFetchKey(k => k + 1), []);
 
   const filteredPitches = useMemo<Pitch[]>(() => {
-    const q = query.trim();
+    if (isLoading || error) return [];
+    const q    = query.trim();
     const chip = FILTER_CHIPS.find(c => c.value === activeFilter);
 
     const filtered = pitches.filter(pitch => {
@@ -224,7 +236,7 @@ export default function PitchesPage() {
           ? pitch.area === activeFilter
           : chip.type === 'size'
             ? pitch.size === activeFilter
-            : pitch.availabilityToday !== 'full'; // availability_now
+            : pitch.availabilityToday !== 'full';
 
       return matchesQuery && matchesFilter;
     });
@@ -234,7 +246,7 @@ export default function PitchesPage() {
       if (sortKey === 'price_desc') return b.pricePerHour - a.pricePerHour;
       return b.rating - a.rating;
     });
-  }, [query, activeFilter, sortKey, pitches]);
+  }, [query, activeFilter, sortKey, pitches, isLoading, error]);
 
   const handleReset = useCallback(() => {
     setQuery('');
@@ -242,7 +254,9 @@ export default function PitchesPage() {
     setSortKey('price_asc');
   }, []);
 
-  if (isLoading || authLoading || user?.role === 'owner') {
+  // Full-page spinner only while auth is resolving (user role unknown).
+  // Data loading is handled inline inside the grid so the page chrome stays visible.
+  if (authLoading || user?.role === 'owner') {
     return (
       <div className="min-h-screen bg-[#0d0f0e] flex items-center justify-center">
         <div className="w-6 h-6 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
@@ -326,9 +340,16 @@ export default function PitchesPage() {
       {/* ── Results bar ───────────────────────────────────────────────────── */}
       <section className="max-w-7xl mx-auto px-6 mb-6">
         <div className="flex items-center justify-between">
-          <p className="text-[11px] font-semibold tracking-wide text-white/30 uppercase">
-            {pitchCountLabel(filteredPitches.length)} متاح
-          </p>
+          {/* Skeleton shimmer while loading, real count once data arrives */}
+          {isLoading ? (
+            <div className="h-3.5 w-28 bg-white/[0.05] rounded-full animate-pulse" />
+          ) : !error ? (
+            <p className="text-[11px] font-semibold tracking-wide text-white/30 uppercase">
+              {pitchCountLabel(filteredPitches.length)} متاح
+            </p>
+          ) : (
+            <span />
+          )}
           <SortDropdown value={sortKey} onChange={setSortKey} />
         </div>
       </section>
@@ -340,11 +361,18 @@ export default function PitchesPage() {
           aria-label="الملاعب المتاحة"
           aria-live="polite"
           aria-atomic="true"
+          aria-busy={isLoading}
         >
-          {filteredPitches.length > 0
-            ? filteredPitches.map(pitch => <PitchCard key={pitch.id} pitch={pitch} />)
-            : <EmptyState onReset={handleReset} />
-          }
+          {isLoading ? (
+            // 6 skeleton cards — same shape as PitchCard, no layout jump
+            Array.from({ length: 6 }, (_, i) => <PitchCardSkeleton key={i} />)
+          ) : error ? (
+            <ErrorState onRetry={retry} />
+          ) : filteredPitches.length > 0 ? (
+            filteredPitches.map(pitch => <PitchCard key={pitch.id} pitch={pitch} />)
+          ) : (
+            <EmptyState onReset={handleReset} />
+          )}
         </div>
       </main>
 
