@@ -105,6 +105,14 @@ function displayHour(h: number): string {
   return String(d).padStart(2, '0');
 }
 
+// Formats minutes-from-midnight as "02:00 م" / "11:30 ص" etc.
+function formatTime12(totalMins: number): string {
+  const h    = Math.floor(totalMins / 60) % 24;
+  const m    = totalMins % 60;
+  const hr12 = (h === 0 || h === 12) ? 12 : h > 12 ? h - 12 : h;
+  return `${String(hr12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${h < 12 ? 'ص' : 'م'}`;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
@@ -722,7 +730,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                 إجمالي الحجز
               </p>
               <p className="text-[11px] text-white/30 font-mono">
-                {actualStartStr} ← {actualEndStr}
+                {formatTime12(actualStartMins)} - {formatTime12(actualEndMins)}
               </p>
             </div>
             <div className="flex items-baseline gap-1">
