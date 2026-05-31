@@ -605,13 +605,12 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                                     ].join(' '),
                         ].join(' ')}
                       >
-                        <span className="text-[16px] font-mono font-bold leading-none">
-                          {displayHour(h)}
+                        <span className="text-[13px] font-mono font-bold leading-none tracking-wide">
+                          {displayHour(h)}:00
                         </span>
-                        {fullyBooked
-                          ? <span className="text-[8px] font-bold tracking-wider">محجوز</span>
-                          : <span className="text-[9px] font-semibold opacity-50 tracking-wider">:00</span>
-                        }
+                        {fullyBooked && (
+                          <span className="text-[8px] font-bold tracking-wider">محجوز</span>
+                        )}
                       </button>
                     );
                   })}
