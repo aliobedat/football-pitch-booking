@@ -20,7 +20,7 @@ interface Props {
   pricePerHour: number;
 }
 
-type SlotState = 'available' | 'booked' | 'selected-start' | 'in-range'
+type SlotState = 'available' | 'booked' | 'past' | 'selected-start' | 'in-range'
                | 'hover-range' | 'disabled';
 type Phase = 'idle' | 'picking-end' | 'done';
 
@@ -98,6 +98,8 @@ function slotClasses(state: SlotState): string {
     case 'booked':
       return `${base} bg-red-950/20 border-red-900/[0.12] text-red-500/25 cursor-not-allowed ` +
              'line-through decoration-red-500/20 opacity-60';
+    case 'past':
+      return `${base} bg-white/[0.02] border-white/[0.04] text-white/15 cursor-not-allowed opacity-45`;
     case 'selected-start':
       return `${base} bg-emerald-500/25 border-emerald-400/60 text-emerald-300 cursor-pointer ` +
              'shadow-[0_0_12px_rgba(52,211,153,0.14)]';
@@ -158,6 +160,18 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     [booked, selDay],
   );
 
+  // Minutes from midnight for the current local time; -1 when selDay is not today.
+  const nowMins = useMemo(() => {
+    if (selDayStr !== todayStr()) return -1;
+    const now = new Date();
+    return now.getHours() * 60 + now.getMinutes();
+  }, [selDayStr]);
+
+  const pastSet = useMemo(
+    () => new Set(SLOTS.filter(s => nowMins >= 0 && toMins(s) <= nowMins)),
+    [nowMins],
+  );
+
   const startIdx  = startSlot ? SLOTS.indexOf(startSlot) : -1;
   const startMins = startSlot ? toMins(startSlot) : -1;
 
@@ -184,6 +198,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
       const sMins = toMins(s);
 
       if (bookedSet.has(s)) { map.set(s, 'booked'); continue; }
+      if (pastSet.has(s))   { map.set(s, 'past');   continue; }
 
       if (phase === 'idle') {
         // Valid start: must have room for at least 1 hour before 24:00
@@ -207,7 +222,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     }
 
     return map;
-  }, [phase, startIdx, startMins, nextBookedStartMins, bookedSet, endSlot, hoverSlot]);
+  }, [phase, startIdx, startMins, nextBookedStartMins, bookedSet, pastSet, endSlot, hoverSlot]);
 
   // ── Derived booking values ────────────────────────────────────────────────
 
@@ -224,7 +239,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     const sMins = toMins(s);
 
     if (phase === 'idle') {
-      if (!bookedSet.has(s) && sMins <= 23 * 60) setStartSlot(s);
+      if (!bookedSet.has(s) && !pastSet.has(s) && sMins <= 23 * 60) setStartSlot(s);
       return;
     }
 
@@ -388,18 +403,26 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                 className="grid grid-cols-4 sm:grid-cols-6 gap-1.5 p-0.5"
                 onMouseLeave={() => setHoverSlot(null)}
               >
-                {SLOTS.map(s => (
-                  <button
-                    key={s}
-                    type="button"
-                    onClick={() => handleSlotClick(s)}
-                    onMouseEnter={() => handleSlotHover(s)}
-                    aria-label={`${s}${slotStateMap.get(s) === 'booked' ? ' (محجوز)' : ''}`}
-                    className={slotClasses(slotStateMap.get(s) ?? 'available')}
-                  >
-                    {s}
-                  </button>
-                ))}
+                {SLOTS.map(s => {
+                  const st = slotStateMap.get(s) ?? 'available';
+                  const tip =
+                    st === 'booked' ? 'محجوز' :
+                    st === 'past'   ? 'الوقت انقضى' :
+                    undefined;
+                  return (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => handleSlotClick(s)}
+                      onMouseEnter={() => handleSlotHover(s)}
+                      aria-label={`${s}${tip ? ` (${tip})` : ''}`}
+                      title={tip}
+                      className={slotClasses(st)}
+                    >
+                      {s}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
@@ -412,6 +435,10 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
               <span className="flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-sm bg-red-950/20 border border-red-900/[0.12]" aria-hidden />
                 محجوز
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm bg-white/[0.02] border border-white/[0.04] opacity-45" aria-hidden />
+                منقضٍ
               </span>
               <span className="flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500/25 border border-emerald-400/60" aria-hidden />
