@@ -3,88 +3,110 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import api from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
-import {
-  Search,
-  MapPin,
-  Star,
-  Clock,
-  Users,
-  Zap,
-  ChevronDown,
-  SlidersHorizontal,
-} from 'lucide-react';
+import { Search, SlidersHorizontal, ChevronDown } from 'lucide-react';
 import Navbar from '@/components/Navbar';
-// ─────────────────────────────────────────────────────────────────────────────
-// Types
-// ─────────────────────────────────────────────────────────────────────────────
+import PitchCard, { type Pitch } from '@/components/PitchCard';
 
-type SurfaceType = 'artificial_grass' | 'natural_grass' | 'futsal_court';
-type Format      = 'خماسي' | 'سباعي';
-type SortKey     = 'price_asc' | 'price_desc' | 'rating';
+// ─── Dummy data ───────────────────────────────────────────────────────────────
+// Typed against the Pitch contract in PitchCard.tsx.
+// To switch to the real API, replace the useEffect below with:
+//   api.get('/pitches').then(r => setPitches(r.data.data)).catch(...)
 
-interface Pitch {
-  id:           number;
-  name:         string;
-  neighborhood: string;
-  surface:      SurfaceType;
-  format:       Format;
-  pricePerHour: number;
-  rating:       number;
-  reviewCount:  number;
-  isFeatured:   boolean;
-  amenities:    string[];
-  pitchHue:     string;
-}
+const DUMMY_PITCHES: Pitch[] = [
+  {
+    id: '1', name: 'ملعب النجمة الذهبية', city: 'عمان', area: 'عين الباشا',
+    imageUrl: null, pricePerHour: 10, rating: 4.8, reviewsCount: 124,
+    size: '5x5', surface: 'عشب صناعي', isIndoor: false,
+    hasLighting: true, hasParking: true,
+    availabilityToday: 'available', nextAvailableSlot: '18:00', distanceKm: 2.3,
+  },
+  {
+    id: '2', name: 'ملعب الفيصل', city: 'عمان', area: 'خلدا',
+    imageUrl: null, pricePerHour: 15, rating: 4.5, reviewsCount: 87,
+    size: '7x7', surface: 'عشب طبيعي', isIndoor: true,
+    hasLighting: true, hasParking: false,
+    availabilityToday: 'limited', nextAvailableSlot: '20:00', distanceKm: 5.1,
+  },
+  {
+    id: '3', name: 'ملعب الوحدات', city: 'عمان', area: 'الجبيهة',
+    imageUrl: null, pricePerHour: 8, rating: 4.2, reviewsCount: 56,
+    size: '5x5', surface: 'عشب صناعي', isIndoor: false,
+    hasLighting: false, hasParking: true,
+    availabilityToday: 'full', distanceKm: 7.8,
+  },
+  {
+    id: '4', name: 'ملعب البطولة', city: 'عمان', area: 'شفا بدران',
+    imageUrl: null, pricePerHour: 12, rating: 4.9, reviewsCount: 203,
+    size: '11x11', surface: 'عشب طبيعي', isIndoor: false,
+    hasLighting: true, hasParking: true,
+    availabilityToday: 'available', nextAvailableSlot: '19:00', distanceKm: 3.6,
+  },
+  {
+    id: '5', name: 'ملعب الأولمبي', city: 'عمان', area: 'عين الباشا',
+    imageUrl: null, pricePerHour: 20, rating: 4.7, reviewsCount: 341,
+    size: '7x7', surface: 'عشب صناعي', isIndoor: true,
+    hasLighting: true, hasParking: true,
+    availabilityToday: 'limited', nextAvailableSlot: '21:00', distanceKm: 1.9,
+  },
+  {
+    id: '6', name: 'ملعب الهلال', city: 'عمان', area: 'خلدا',
+    imageUrl: null, pricePerHour: 10, rating: 4.3, reviewsCount: 67,
+    size: '5x5', surface: 'عشب صناعي', isIndoor: false,
+    hasLighting: true, hasParking: false,
+    availabilityToday: 'available', nextAvailableSlot: '17:00', distanceKm: 4.4,
+  },
+  {
+    id: '7', name: 'ملعب الاتحاد', city: 'عمان', area: 'الجبيهة',
+    imageUrl: null, pricePerHour: 18, rating: 4.6, reviewsCount: 152,
+    size: '7x7', surface: 'عشب صناعي', isIndoor: true,
+    hasLighting: true, hasParking: true,
+    availabilityToday: 'available', nextAvailableSlot: '18:30', distanceKm: 6.2,
+  },
+  {
+    id: '8', name: 'ملعب المدينة', city: 'عمان', area: 'شفا بدران',
+    imageUrl: null, pricePerHour: 9, rating: 4.0, reviewsCount: 38,
+    size: '5x5', surface: 'عشب طبيعي', isIndoor: false,
+    hasLighting: false, hasParking: true,
+    availabilityToday: 'limited', nextAvailableSlot: '22:00', distanceKm: 9.1,
+  },
+];
+
+// ─── Filter / sort types ──────────────────────────────────────────────────────
 
 type FilterValue =
   | 'all'
-  | 'عين الباشا'
-  | 'خلدا'
-  | 'الجبيهة'
-  | 'شفا بدران'
-  | 'خماسي'
-  | 'سباعي';
+  | 'عين الباشا' | 'خلدا' | 'الجبيهة' | 'شفا بدران'
+  | '5x5' | '7x7' | '11x11'
+  | 'available_now';
 
 interface FilterChip {
   label: string;
   value: FilterValue;
-  type:  'all' | 'neighborhood' | 'format';
+  type: 'all' | 'area' | 'size' | 'availability';
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Static data  (replace PITCHES with an API call when the Go backend is wired)
-// ─────────────────────────────────────────────────────────────────────────────
-
+type SortKey = 'price_asc' | 'price_desc' | 'rating';
 
 const FILTER_CHIPS: FilterChip[] = [
   { label: 'جميع الملاعب', value: 'all',          type: 'all'          },
-  { label: 'عين الباشا',   value: 'عين الباشا',   type: 'neighborhood' },
-  { label: 'خلدا',         value: 'خلدا',          type: 'neighborhood' },
-  { label: 'الجبيهة',      value: 'الجبيهة',       type: 'neighborhood' },
-  { label: 'شفا بدران',    value: 'شفا بدران',     type: 'neighborhood' },
-  { label: 'خماسي',        value: 'خماسي',          type: 'format'       },
-  { label: 'سباعي',        value: 'سباعي',          type: 'format'       },
+  { label: 'عين الباشا',   value: 'عين الباشا',   type: 'area'         },
+  { label: 'خلدا',          value: 'خلدا',          type: 'area'         },
+  { label: 'الجبيهة',       value: 'الجبيهة',       type: 'area'         },
+  { label: 'شفا بدران',     value: 'شفا بدران',     type: 'area'         },
+  { label: '5×5',           value: '5x5',           type: 'size'         },
+  { label: '7×7',           value: '7x7',           type: 'size'         },
+  { label: 'متاح الآن',     value: 'available_now', type: 'availability' },
 ];
 
 const SORT_OPTIONS: { label: string; value: SortKey }[] = [
-  { label: 'السعر: من الأقل',    value: 'price_asc'  },
-  { label: 'السعر: من الأعلى',   value: 'price_desc' },
-  { label: 'الأعلى تقييماً',     value: 'rating'     },
+  { label: 'السعر: من الأقل',  value: 'price_asc'  },
+  { label: 'السعر: من الأعلى', value: 'price_desc' },
+  { label: 'الأعلى تقييماً',   value: 'rating'     },
 ];
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Helpers
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-const SURFACE_LABEL: Record<SurfaceType, string> = {
-  artificial_grass: 'عشبية صناعية',
-  natural_grass:    'عشبية طبيعية',
-  futsal_court:     'ملعب فوتسال',
-};
-
-// Arabic ordinal for result count display
 function pitchCountLabel(n: number): string {
   if (n === 0) return 'لا توجد ملاعب';
   if (n === 1) return 'ملعب واحد';
@@ -93,223 +115,19 @@ function pitchCountLabel(n: number): string {
   return `${n} ملعبًا`;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Sub-components
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Sub-components ───────────────────────────────────────────────────────────
 
-/** Inline SVG pitch diagram — keeps each card visually alive without images */
-function PitchDiagram({
-  hue,
-  featured,
-}: {
-  hue: string;
-  featured: boolean;
-}) {
-  const lines = featured
-    ? 'rgba(52,211,153,0.55)'
-    : 'rgba(255,255,255,0.12)';
-
-  return (
-    <svg
-      viewBox="0 0 320 160"
-      fill="none"
-      xmlns="http://www.w3.org/2000/svg"
-      aria-hidden="true"
-      className="absolute inset-0 w-full h-full"
-    >
-      <rect width="320" height="160" fill={hue} />
-
-      {/* Pitch outline */}
-      <rect x="24" y="14" width="272" height="132" stroke={lines} strokeWidth="1.2" />
-
-      {/* Centre line */}
-      <line x1="160" y1="14" x2="160" y2="146" stroke={lines} strokeWidth="1" />
-
-      {/* Centre circle */}
-      <circle cx="160" cy="80" r="28" stroke={lines} strokeWidth="1" />
-      <circle cx="160" cy="80" r="2.5" fill={lines} />
-
-      {/* Left penalty area */}
-      <rect x="24" y="46" width="50" height="68" stroke={lines} strokeWidth="1" />
-      {/* Left goal area */}
-      <rect x="24" y="62" width="20" height="36" stroke={lines} strokeWidth="1" />
-      {/* Left goal post */}
-      <rect x="14" y="68" width="10" height="24" stroke={lines} strokeWidth="1" />
-
-      {/* Right penalty area */}
-      <rect x="246" y="46" width="50" height="68" stroke={lines} strokeWidth="1" />
-      {/* Right goal area */}
-      <rect x="276" y="62" width="20" height="36" stroke={lines} strokeWidth="1" />
-      {/* Right goal post */}
-      <rect x="296" y="68" width="10" height="24" stroke={lines} strokeWidth="1" />
-
-      {/* Corner arcs */}
-      <path d="M24 22 A8 8 0 0 1 32 14"   stroke={lines} strokeWidth="1" />
-      <path d="M288 14 A8 8 0 0 0 296 22" stroke={lines} strokeWidth="1" />
-      <path d="M32 146 A8 8 0 0 1 24 138" stroke={lines} strokeWidth="1" />
-      <path d="M296 138 A8 8 0 0 1 288 146" stroke={lines} strokeWidth="1" />
-
-      {/* Penalty spots */}
-      <circle cx="68"  cy="80" r="2" fill={lines} />
-      <circle cx="252" cy="80" r="2" fill={lines} />
-
-      {featured && (
-        <rect width="320" height="160" fill="rgba(16,185,129,0.04)" />
-      )}
-    </svg>
-  );
-}
-
-/** Individual pitch card */
-function PitchCard({ pitch }: { pitch: Pitch }) {
-  return (
-    <article
-      className={[
-        'group relative flex flex-col rounded-2xl overflow-hidden',
-        'bg-[#141715]',
-        'border transition-all duration-300 ease-out',
-        pitch.isFeatured
-          ? 'border-emerald-500/25 hover:border-emerald-500/50'
-          : 'border-white/[0.07] hover:border-white/[0.16]',
-        'hover:-translate-y-0.5',
-      ].join(' ')}
-    >
-      {/* ── Diagram area ── */}
-      <div className="relative h-44 overflow-hidden">
-        <PitchDiagram hue={pitch.pitchHue} featured={pitch.isFeatured} />
-
-        {/* Featured badge — top-right in RTL = inline-start */}
-        {pitch.isFeatured && (
-          <div className="absolute top-3 end-3 z-10">
-            <span className="flex items-center gap-1 px-2 py-1 rounded-md text-[9px] font-bold tracking-wide bg-emerald-500/20 border border-emerald-500/30 text-emerald-400">
-              <Zap size={8} aria-hidden="true" />
-              مميّز
-            </span>
-          </div>
-        )}
-
-        {/* Rating — top-start in RTL */}
-        <div className="absolute top-3 start-3 z-10">
-          <span className="flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-semibold bg-black/60 backdrop-blur-sm border border-white/10 text-amber-400">
-            <Star size={9} fill="currentColor" aria-hidden="true" />
-            {pitch.rating.toFixed(1)}
-            <span className="text-white/30 font-normal">
-              ({pitch.reviewCount})
-            </span>
-          </span>
-        </div>
-
-        {/* Surface label — bottom-end */}
-        <div className="absolute bottom-3 end-3 z-10">
-          <span className="px-2.5 py-1 rounded-md text-[9px] font-bold tracking-wide bg-emerald-500/15 border border-emerald-500/20 text-emerald-400">
-            {SURFACE_LABEL[pitch.surface]}
-          </span>
-        </div>
-      </div>
-
-      {/* ── Body ── */}
-      <div className="flex flex-col flex-1 p-5">
-        {/* Name & location */}
-        <div className="mb-3">
-          <h3 className="text-[15px] font-bold text-[#f0efe8] tracking-tight leading-snug mb-1.5 text-start">
-            {pitch.name}
-          </h3>
-          <div className="flex items-center justify-start gap-1.5 text-white/40">
-            <MapPin size={11} aria-hidden="true" />
-            <span className="text-[11px]">
-              {pitch.neighborhood}، عمّان
-            </span>
-          </div>
-        </div>
-
-        {/* Format + duration chips */}
-        <div className="flex items-center justify-start gap-2 mb-4">
-          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.04] border border-white/[0.07] text-[10px] text-white/45">
-            <Users size={9} aria-hidden="true" />
-            {pitch.format}
-          </span>
-          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.04] border border-white/[0.07] text-[10px] text-white/45">
-            <Clock size={9} aria-hidden="true" />
-            للساعة
-          </span>
-        </div>
-
-        {/* Amenities */}
-        <div className="flex flex-wrap justify-start gap-1.5 mb-4">
-          {pitch.amenities.map((a) => (
-            <span
-              key={a}
-              className="px-2 py-0.5 rounded-full text-[10px] text-white/28 bg-white/[0.03] border border-white/[0.05]"
-            >
-              {a}
-            </span>
-          ))}
-        </div>
-
-        {/* Divider */}
-        <div className="h-px bg-white/[0.05] mb-4" />
-
-        {/* Price + Book button */}
-        <div className="flex items-center justify-between mt-auto">
-
-          {/* Book button */}
-          <Link
-            href={`/pitches/${pitch.id}`}
-            className={[
-              'flex items-center gap-2 px-5 py-2.5 rounded-xl',
-              'text-[11px] font-bold tracking-wide',
-              'bg-[#0f4c3a] text-emerald-400',
-              'border border-emerald-500/20',
-              'transition-all duration-200 ease-out',
-              'hover:bg-[#1a6b52] hover:text-emerald-300 hover:border-emerald-500/40',
-              'hover:shadow-[0_0_20px_rgba(16,185,129,0.12)]',
-              'active:scale-[0.97]',
-              'focus-visible:outline-none focus-visible:ring-2',
-              'focus-visible:ring-emerald-500 focus-visible:ring-offset-2',
-              'focus-visible:ring-offset-[#141715]',
-            ].join(' ')}
-          >
-            احجز الآن
-          </Link>
-
-          {/* Price */}
-          <div className="text-end">
-            <div className="flex items-baseline justify-end gap-1">
-              <span className="text-[22px] font-bold text-[#f0efe8] tracking-tight leading-none">
-                {pitch.pricePerHour}
-              </span>
-              <span className="text-sm font-semibold text-emerald-500">دينار</span>
-            </div>
-            <p className="text-[10px] text-white/25 mt-0.5">للساعة الواحدة</p>
-          </div>
-
-        </div>
-      </div>
-    </article>
-  );
-}
-
-/** Sort dropdown — fully RTL-aware */
-function SortDropdown({
-  value,
-  onChange,
-}: {
-  value: SortKey;
-  onChange: (v: SortKey) => void;
-}) {
+function SortDropdown({ value, onChange }: { value: SortKey; onChange: (v: SortKey) => void }) {
   return (
     <div className="relative">
-      <label htmlFor="sort-select" className="sr-only">
-        ترتيب النتائج
-      </label>
-      {/* Leading icon on the end side because of RTL */}
+      <label htmlFor="sort-select" className="sr-only">ترتيب النتائج</label>
       <div className="flex items-center pointer-events-none absolute start-3 top-1/2 -translate-y-1/2 text-white/25">
-        <SlidersHorizontal size={10} aria-hidden="true" />
+        <SlidersHorizontal size={10} aria-hidden />
       </div>
       <select
         id="sort-select"
         value={value}
-        onChange={(e) => onChange(e.target.value as SortKey)}
+        onChange={e => onChange(e.target.value as SortKey)}
         dir="rtl"
         className={[
           'appearance-none ps-8 pe-4 py-2',
@@ -317,35 +135,41 @@ function SortDropdown({
           'text-[11px] text-white/50',
           'hover:border-white/[0.15] transition-colors duration-150',
           'focus:outline-none focus:ring-1 focus:ring-emerald-500/40',
-          'cursor-pointer',
-          '[&>option]:bg-[#1a1c1b]',
+          'cursor-pointer [&>option]:bg-[#1a1c1b]',
         ].join(' ')}
       >
-        {SORT_OPTIONS.map((opt) => (
-          <option key={opt.value} value={opt.value}>
-            {opt.label}
-          </option>
+        {SORT_OPTIONS.map(opt => (
+          <option key={opt.value} value={opt.value}>{opt.label}</option>
         ))}
       </select>
-      <ChevronDown
-        size={10}
-        aria-hidden="true"
-        className="absolute end-2.5 top-1/2 -translate-y-1/2 text-white/25 pointer-events-none"
-      />
+      <ChevronDown size={10} aria-hidden className="absolute end-2.5 top-1/2 -translate-y-1/2 text-white/25 pointer-events-none" />
     </div>
   );
 }
 
-/** Empty state */
 function EmptyState({ onReset }: { onReset: () => void }) {
   return (
-    <div className="col-span-full flex flex-col items-center justify-center py-24 gap-4">
-      <div className="w-16 h-16 rounded-full bg-white/[0.03] border border-white/[0.06] flex items-center justify-center">
-        <Search size={22} className="text-white/20" aria-hidden="true" />
-      </div>
-      <div className="text-center">
-        <p className="text-[15px] font-semibold text-white/50 mb-1">لا توجد ملاعب</p>
-        <p className="text-[12px] text-white/25">جرّب تغيير الفلاتر أو البحث بكلمة مختلفة</p>
+    <div className="col-span-full flex flex-col items-center justify-center py-28 gap-5 text-center">
+      {/* Pitch illustration */}
+      <svg
+        viewBox="0 0 240 140"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+        className="w-28 h-16 opacity-[0.12]"
+        aria-hidden
+      >
+        <rect x="8" y="8" width="224" height="124" stroke="white" strokeWidth="2" rx="3" />
+        <line x1="120" y1="8" x2="120" y2="132" stroke="white" strokeWidth="1.5" />
+        <circle cx="120" cy="70" r="28" stroke="white" strokeWidth="1.5" />
+        <circle cx="120" cy="70" r="3" fill="white" />
+        <rect x="8"   y="40" width="36"  height="60" stroke="white" strokeWidth="1.5" />
+        <rect x="196" y="40" width="36"  height="60" stroke="white" strokeWidth="1.5" />
+        <circle cx="50"  cy="70" r="2.5" fill="white" />
+        <circle cx="190" cy="70" r="2.5" fill="white" />
+      </svg>
+      <div>
+        <p className="text-[16px] font-bold text-white/40 mb-1.5">لا توجد ملاعب متاحة</p>
+        <p className="text-[13px] text-white/22">جرّب تغيير الفلاتر أو البحث بكلمة مختلفة</p>
       </div>
       <button
         type="button"
@@ -358,9 +182,7 @@ function EmptyState({ onReset }: { onReset: () => void }) {
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Page
-// ─────────────────────────────────────────────────────────────────────────────
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function PitchesPage() {
   const { user, isLoading: authLoading } = useAuth();
@@ -372,47 +194,43 @@ export default function PitchesPage() {
     }
   }, [user, authLoading, router]);
 
-  const [pitches, setPitches] = useState<Pitch[]>([]);
+  const [pitches,   setPitches]   = useState<Pitch[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  const [query, setQuery] = useState('');
+  const [query,        setQuery]        = useState('');
   const [activeFilter, setActiveFilter] = useState<FilterValue>('all');
-  const [sortKey, setSortKey] = useState<SortKey>('price_asc');
+  const [sortKey,      setSortKey]      = useState<SortKey>('price_asc');
 
   useEffect(() => {
-    api.get('/pitches')
-      .then((res) => {
-        setPitches(res.data.data);
-        setIsLoading(false);
-      })
-      .catch((err) => {
-        console.error('Failed to fetch pitches:', err);
-        setIsLoading(false);
-      });
+    // Swap this block for an api.get('/pitches') call when the backend is ready
+    setPitches(DUMMY_PITCHES);
+    setIsLoading(false);
   }, []);
 
   const filteredPitches = useMemo<Pitch[]>(() => {
     const q = query.trim();
+    const chip = FILTER_CHIPS.find(c => c.value === activeFilter);
 
-    const filtered = pitches.filter((pitch) => {
+    const filtered = pitches.filter(pitch => {
       const matchesQuery =
         !q ||
         pitch.name.includes(q) ||
-        pitch.neighborhood.includes(q);
+        pitch.area.includes(q) ||
+        pitch.city.includes(q);
 
-      const chip = FILTER_CHIPS.find((c) => c.value === activeFilter);
-      const matchesFilter =
-        !chip || chip.type === 'all'
-          ? true
-          : chip.type === 'neighborhood'
-          ? pitch.neighborhood === activeFilter
-          : pitch.format === activeFilter;
+      const matchesFilter = !chip || chip.type === 'all'
+        ? true
+        : chip.type === 'area'
+          ? pitch.area === activeFilter
+          : chip.type === 'size'
+            ? pitch.size === activeFilter
+            : pitch.availabilityToday !== 'full'; // availability_now
 
       return matchesQuery && matchesFilter;
     });
 
     return [...filtered].sort((a, b) => {
-      if (sortKey === 'price_asc') return a.pricePerHour - b.pricePerHour;
+      if (sortKey === 'price_asc')  return a.pricePerHour - b.pricePerHour;
       if (sortKey === 'price_desc') return b.pricePerHour - a.pricePerHour;
       return b.rating - a.rating;
     });
@@ -430,21 +248,21 @@ export default function PitchesPage() {
         <div className="w-6 h-6 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
       </div>
     );
-  }return (
+  }
+
+  return (
     <div dir="rtl" className="min-h-screen bg-[#0d0f0e]">
 
       <Navbar />
 
-      {/* ── Hero ─────────────────────────────────────────────────────────── */}
+      {/* ── Hero ──────────────────────────────────────────────────────────── */}
       <section className="max-w-7xl mx-auto px-6 pt-16 pb-12 text-center">
-        {/* Eyebrow pill */}
         <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/[0.06] mb-7">
           <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
           <span className="text-[10px] font-bold tracking-wide text-emerald-400">
             الشبكة الأولى للملاعب في الأردن
           </span>
         </div>
-
         <h1 className="text-4xl sm:text-5xl md:text-[56px] font-bold text-[#f0efe8] tracking-tight leading-[1.15] mb-5">
           ابحث عن{' '}
           <span className="text-emerald-500">ملعبك المثالي</span>
@@ -454,46 +272,34 @@ export default function PitchesPage() {
         </p>
       </section>
 
-      {/* ── Search & filters ─────────────────────────────────────────────── */}
-      <section
-        className="max-w-7xl mx-auto px-6 mb-10"
-        aria-label="البحث وتصفية الملاعب"
-      >
-        {/* Search bar */}
+      {/* ── Search & filters ──────────────────────────────────────────────── */}
+      <section className="max-w-7xl mx-auto px-6 mb-10" aria-label="البحث وتصفية الملاعب">
         <div className="relative mb-4">
-          <label htmlFor="pitch-search" className="sr-only">
-            ابحث عن ملعب
-          </label>
-          <Search
-            size={16}
-            aria-hidden="true"
-            className="absolute start-4 top-1/2 -translate-y-1/2 text-white/25 pointer-events-none"
-          />
+          <label htmlFor="pitch-search" className="sr-only">ابحث عن ملعب</label>
+          <Search size={16} aria-hidden className="absolute start-4 top-1/2 -translate-y-1/2 text-white/25 pointer-events-none" />
           <input
             id="pitch-search"
             type="search"
             placeholder="ابحث بالاسم أو الحي..."
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={e => setQuery(e.target.value)}
             dir="rtl"
             className={[
               'w-full h-12 pe-4 ps-11',
               'bg-white/[0.03] border border-white/[0.08] rounded-xl',
-              'text-sm text-[#f0efe8] placeholder:text-white/20 text-start',
-              'transition-all duration-150',
-              'hover:border-white/[0.14]',
+              'text-sm text-[#f0efe8] placeholder:text-white/20',
+              'hover:border-white/[0.14] transition-all duration-150',
               'focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/15',
             ].join(' ')}
           />
         </div>
 
-        {/* Filter chips */}
         <div
           role="group"
-          aria-label="فلترة حسب الحي أو نوع الملعب"
+          aria-label="فلترة حسب الحي أو نوع الملعب أو التوفر"
           className="flex flex-wrap gap-2 justify-start"
         >
-          {FILTER_CHIPS.map((chip) => {
+          {FILTER_CHIPS.map(chip => {
             const isActive = activeFilter === chip.value;
             return (
               <button
@@ -502,8 +308,8 @@ export default function PitchesPage() {
                 onClick={() => setActiveFilter(chip.value)}
                 aria-pressed={isActive}
                 className={[
-                  'px-4 py-1.5 rounded-full text-[12px] font-semibold',
-                  'border transition-all duration-150',
+                  'px-4 py-1.5 rounded-full text-[12px] font-semibold border',
+                  'transition-all duration-150',
                   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500',
                   isActive
                     ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
@@ -517,7 +323,7 @@ export default function PitchesPage() {
         </div>
       </section>
 
-      {/* ── Results bar ──────────────────────────────────────────────────── */}
+      {/* ── Results bar ───────────────────────────────────────────────────── */}
       <section className="max-w-7xl mx-auto px-6 mb-6">
         <div className="flex items-center justify-between">
           <p className="text-[11px] font-semibold tracking-wide text-white/30 uppercase">
@@ -527,32 +333,29 @@ export default function PitchesPage() {
         </div>
       </section>
 
-      {/* ── Pitches grid ─────────────────────────────────────────────────── */}
+      {/* ── Pitches grid ──────────────────────────────────────────────────── */}
       <main className="max-w-7xl mx-auto px-6 pb-20">
         <div
-          className="grid gap-5 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+          className="grid gap-5 grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
           aria-label="الملاعب المتاحة"
           aria-live="polite"
           aria-atomic="true"
         >
-          {filteredPitches.length > 0 ? (
-            filteredPitches.map((pitch) => (
-              <PitchCard key={pitch.id} pitch={pitch} />
-            ))
-          ) : (
-            <EmptyState onReset={handleReset} />
-          )}
+          {filteredPitches.length > 0
+            ? filteredPitches.map(pitch => <PitchCard key={pitch.id} pitch={pitch} />)
+            : <EmptyState onReset={handleReset} />
+          }
         </div>
       </main>
 
-      {/* ── Footer ───────────────────────────────────────────────────────── */}
+      {/* ── Footer ────────────────────────────────────────────────────────── */}
       <footer className="border-t border-white/[0.05] py-8">
         <div className="max-w-7xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-6">
             {['الخصوصية', 'الشروط', 'تواصل معنا'].map((item, i) => (
               <Link
                 key={item}
-                href={`/${['privacy', 'terms', 'contact'][i]!}`}
+                href={`/${(['privacy', 'terms', 'contact'] as const)[i]}`}
                 className="text-[11px] text-white/20 hover:text-white/45 transition-colors duration-150"
               >
                 {item}
@@ -560,13 +363,12 @@ export default function PitchesPage() {
             ))}
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-[11px] text-white/20">
-              © 2026 ملاعب. جميع الحقوق محفوظة.
-            </span>
+            <span className="text-[11px] text-white/20">© 2026 ملاعب. جميع الحقوق محفوظة.</span>
             <div className="w-1.5 h-1.5 rounded-full bg-emerald-500/50" />
           </div>
         </div>
       </footer>
+
     </div>
   );
 }
