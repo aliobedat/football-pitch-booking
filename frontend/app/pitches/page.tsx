@@ -5,9 +5,12 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import api from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
-import { Search, SlidersHorizontal, ChevronDown, RefreshCw } from 'lucide-react';
+import { LocationProvider, useLocation } from '@/context/LocationContext';
+import { haversineKm } from '@/lib/distance';
+import type { Pitch } from '@/lib/types';
+import { Search, SlidersHorizontal, ChevronDown, RefreshCw, MapPin, Loader2 } from 'lucide-react';
 import Navbar from '@/components/Navbar';
-import PitchCard, { type Pitch } from '@/components/PitchCard';
+import PitchCard from '@/components/PitchCard';
 
 // ─── Filter / sort types ──────────────────────────────────────────────────────
 
@@ -23,6 +26,8 @@ interface FilterChip {
   type: 'all' | 'area' | 'size' | 'availability';
 }
 
+// SortKey is defined as a union so that 'distance' (nearest) can be added
+// next phase without any refactor — just add it to SORT_OPTIONS.
 type SortKey = 'price_asc' | 'price_desc' | 'rating';
 
 const FILTER_CHIPS: FilterChip[] = [
@@ -54,30 +59,22 @@ function pitchCountLabel(n: number): string {
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-/** Matches PitchCard's visual shape exactly so the grid doesn't reflow on load */
 function PitchCardSkeleton() {
   return (
     <div className="rounded-2xl overflow-hidden bg-[#141715] border border-gray-800 animate-pulse">
-      {/* Image placeholder */}
       <div className="aspect-video bg-white/[0.05]" />
-      {/* Body */}
       <div className="p-4 flex flex-col gap-3">
-        {/* Title */}
         <div className="h-4 bg-white/[0.07] rounded-full w-3/4" />
-        {/* Location row */}
         <div className="flex items-center justify-between gap-2">
           <div className="h-3 bg-white/[0.05] rounded-full w-2/5" />
           <div className="h-3 bg-white/[0.04] rounded-full w-10" />
         </div>
-        {/* Pills row */}
         <div className="flex gap-1.5">
           <div className="h-5 bg-white/[0.05] rounded-full w-10" />
           <div className="h-5 bg-white/[0.05] rounded-full w-16" />
           <div className="h-5 bg-white/[0.05] rounded-full w-12" />
         </div>
-        {/* Divider */}
         <div className="h-px bg-white/[0.05]" />
-        {/* Price + CTA row */}
         <div className="flex items-center justify-between">
           <div className="h-6 bg-white/[0.07] rounded-full w-14" />
           <div className="h-8 bg-white/[0.05] rounded-xl w-20" />
@@ -135,11 +132,8 @@ function EmptyState({ onReset }: { onReset: () => void }) {
         <p className="text-[16px] font-bold text-white/40 mb-1.5">لا توجد ملاعب متاحة</p>
         <p className="text-[13px] text-white/25">جرّب تغيير الفلاتر أو البحث بكلمة مختلفة</p>
       </div>
-      <button
-        type="button"
-        onClick={onReset}
-        className="text-[11px] text-emerald-500 hover:text-emerald-400 transition-colors underline underline-offset-2"
-      >
+      <button type="button" onClick={onReset}
+        className="text-[11px] text-emerald-500 hover:text-emerald-400 transition-colors underline underline-offset-2">
         إعادة تعيين الفلاتر
       </button>
     </div>
@@ -149,7 +143,6 @@ function EmptyState({ onReset }: { onReset: () => void }) {
 function ErrorState({ onRetry }: { onRetry: () => void }) {
   return (
     <div className="col-span-full flex flex-col items-center justify-center py-28 gap-5 text-center">
-      {/* Broken-connection icon */}
       <div className="w-14 h-14 rounded-full bg-red-500/[0.07] border border-red-500/20 flex items-center justify-center">
         <RefreshCw size={22} className="text-red-400/60" aria-hidden />
       </div>
@@ -157,17 +150,14 @@ function ErrorState({ onRetry }: { onRetry: () => void }) {
         <p className="text-[16px] font-bold text-white/40 mb-1.5">تعذّر تحميل الملاعب</p>
         <p className="text-[13px] text-white/25">تحقق من اتصالك بالإنترنت وحاول مجدداً</p>
       </div>
-      <button
-        type="button"
-        onClick={onRetry}
+      <button type="button" onClick={onRetry}
         className={[
           'flex items-center gap-2 px-5 py-2.5 rounded-xl',
           'text-[12px] font-bold text-emerald-400',
           'bg-emerald-500/10 border border-emerald-500/20',
           'hover:bg-emerald-500/20 transition-all duration-150',
           'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500',
-        ].join(' ')}
-      >
+        ].join(' ')}>
         <RefreshCw size={13} aria-hidden />
         إعادة المحاولة
       </button>
@@ -175,22 +165,20 @@ function ErrorState({ onRetry }: { onRetry: () => void }) {
   );
 }
 
-// ─── Page ─────────────────────────────────────────────────────────────────────
+// ─── Inner page (consumes LocationContext) ────────────────────────────────────
 
-export default function PitchesPage() {
+function PitchesContent() {
   const { user, isLoading: authLoading } = useAuth();
   const router = useRouter();
+  const { coords, status: locStatus, request: requestLocation } = useLocation();
 
   useEffect(() => {
-    if (!authLoading && user?.role === 'owner') {
-      router.replace('/dashboard');
-    }
+    if (!authLoading && user?.role === 'owner') router.replace('/dashboard');
   }, [user, authLoading, router]);
 
   const [pitches,   setPitches]   = useState<Pitch[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error,     setError]     = useState<string | null>(null);
-  // Increment to trigger a fresh fetch (used by the retry button)
   const [fetchKey,  setFetchKey]  = useState(0);
 
   const [query,        setQuery]        = useState('');
@@ -203,37 +191,41 @@ export default function PitchesPage() {
     setError(null);
 
     api.get('/pitches')
-      .then(res => {
-        if (!cancelled) setPitches(res.data.data ?? []);
-      })
-      .catch(() => {
-        if (!cancelled) setError('fetch_failed');
-      })
-      .finally(() => {
-        if (!cancelled) setIsLoading(false);
-      });
+      .then(res => { if (!cancelled) setPitches(res.data.data ?? []); })
+      .catch(() => { if (!cancelled) setError('fetch_failed'); })
+      .finally(() => { if (!cancelled) setIsLoading(false); });
 
     return () => { cancelled = true; };
   }, [fetchKey]);
 
   const retry = useCallback(() => setFetchKey(k => k + 1), []);
 
+  // Attach distanceKm to every pitch at this level.
+  // When coords is null (location not granted) distanceKm is undefined —
+  // PitchCard hides the distance row entirely.
+  const pitchesWithDist = useMemo<Pitch[]>(() => {
+    if (!coords) return pitches;
+    return pitches.map(p => ({
+      ...p,
+      distanceKm: Math.round(haversineKm(coords, { lat: p.lat, lng: p.lng }) * 10) / 10,
+    }));
+  }, [pitches, coords]);
+
   const filteredPitches = useMemo<Pitch[]>(() => {
     if (isLoading || error) return [];
     const q    = query.trim();
     const chip = FILTER_CHIPS.find(c => c.value === activeFilter);
 
-    const filtered = pitches.filter(pitch => {
+    const filtered = pitchesWithDist.filter(pitch => {
       const matchesQuery =
         !q ||
         pitch.name.includes(q) ||
-        pitch.area.includes(q) ||
-        pitch.city.includes(q);
+        pitch.neighborhood.includes(q);
 
       const matchesFilter = !chip || chip.type === 'all'
         ? true
         : chip.type === 'area'
-          ? pitch.area === activeFilter
+          ? pitch.neighborhood === activeFilter
           : chip.type === 'size'
             ? pitch.size === activeFilter
             : pitch.availabilityToday !== 'full';
@@ -244,9 +236,12 @@ export default function PitchesPage() {
     return [...filtered].sort((a, b) => {
       if (sortKey === 'price_asc')  return a.pricePerHour - b.pricePerHour;
       if (sortKey === 'price_desc') return b.pricePerHour - a.pricePerHour;
-      return b.rating - a.rating;
+      // rating sort: nulls go last
+      const ra = a.rating ?? -1;
+      const rb = b.rating ?? -1;
+      return rb - ra;
     });
-  }, [query, activeFilter, sortKey, pitches, isLoading, error]);
+  }, [pitchesWithDist, query, activeFilter, sortKey, isLoading, error]);
 
   const handleReset = useCallback(() => {
     setQuery('');
@@ -254,8 +249,7 @@ export default function PitchesPage() {
     setSortKey('price_asc');
   }, []);
 
-  // Full-page spinner only while auth is resolving (user role unknown).
-  // Data loading is handled inline inside the grid so the page chrome stays visible.
+  // Full-page spinner only while auth resolves (user role unknown)
   if (authLoading || user?.role === 'owner') {
     return (
       <div className="min-h-screen bg-[#0d0f0e] flex items-center justify-center">
@@ -308,11 +302,8 @@ export default function PitchesPage() {
           />
         </div>
 
-        <div
-          role="group"
-          aria-label="فلترة حسب الحي أو نوع الملعب أو التوفر"
-          className="flex flex-wrap gap-2 justify-start"
-        >
+        {/* Filter chips + "nearest" button */}
+        <div className="flex flex-wrap items-center gap-2" role="group" aria-label="فلترة الملاعب">
           {FILTER_CHIPS.map(chip => {
             const isActive = activeFilter === chip.value;
             return (
@@ -334,13 +325,41 @@ export default function PitchesPage() {
               </button>
             );
           })}
+
+          {/* Location button — triggers geolocation on first click */}
+          <button
+            type="button"
+            onClick={requestLocation}
+            disabled={locStatus === 'loading' || locStatus === 'granted'}
+            aria-label="الملاعب الأقرب لي"
+            className={[
+              'flex items-center gap-1.5 px-4 py-1.5 rounded-full text-[12px] font-semibold border',
+              'transition-all duration-150',
+              'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500',
+              locStatus === 'granted'
+                ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
+                : 'bg-transparent border-white/[0.08] text-white/40 hover:border-white/[0.18] hover:text-white/65',
+            ].join(' ')}
+          >
+            {locStatus === 'loading'
+              ? <Loader2 size={11} className="animate-spin" aria-hidden />
+              : <MapPin size={11} aria-hidden />
+            }
+            الملاعب الأقرب لي
+          </button>
+
+          {/* Denied note — inline, no layout shift */}
+          {locStatus === 'denied' && (
+            <span className="text-[11px] text-red-400/70 flex items-center gap-1">
+              تعذّر تحديد موقعك
+            </span>
+          )}
         </div>
       </section>
 
       {/* ── Results bar ───────────────────────────────────────────────────── */}
       <section className="max-w-7xl mx-auto px-6 mb-6">
         <div className="flex items-center justify-between">
-          {/* Skeleton shimmer while loading, real count once data arrives */}
           {isLoading ? (
             <div className="h-3.5 w-28 bg-white/[0.05] rounded-full animate-pulse" />
           ) : !error ? (
@@ -363,16 +382,14 @@ export default function PitchesPage() {
           aria-atomic="true"
           aria-busy={isLoading}
         >
-          {isLoading ? (
-            // 6 skeleton cards — same shape as PitchCard, no layout jump
-            Array.from({ length: 6 }, (_, i) => <PitchCardSkeleton key={i} />)
-          ) : error ? (
-            <ErrorState onRetry={retry} />
-          ) : filteredPitches.length > 0 ? (
-            filteredPitches.map(pitch => <PitchCard key={pitch.id} pitch={pitch} />)
-          ) : (
-            <EmptyState onReset={handleReset} />
-          )}
+          {isLoading
+            ? Array.from({ length: 6 }, (_, i) => <PitchCardSkeleton key={i} />)
+            : error
+              ? <ErrorState onRetry={retry} />
+              : filteredPitches.length > 0
+                ? filteredPitches.map(p => <PitchCard key={p.id} pitch={p} />)
+                : <EmptyState onReset={handleReset} />
+          }
         </div>
       </main>
 
@@ -381,11 +398,9 @@ export default function PitchesPage() {
         <div className="max-w-7xl mx-auto px-6 flex flex-col sm:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-6">
             {['الخصوصية', 'الشروط', 'تواصل معنا'].map((item, i) => (
-              <Link
-                key={item}
+              <Link key={item}
                 href={`/${(['privacy', 'terms', 'contact'] as const)[i]}`}
-                className="text-[11px] text-white/20 hover:text-white/45 transition-colors duration-150"
-              >
+                className="text-[11px] text-white/20 hover:text-white/45 transition-colors duration-150">
                 {item}
               </Link>
             ))}
@@ -398,5 +413,15 @@ export default function PitchesPage() {
       </footer>
 
     </div>
+  );
+}
+
+// ─── Page wrapper — provides LocationContext once for the whole listing ───────
+
+export default function PitchesPage() {
+  return (
+    <LocationProvider>
+      <PitchesContent />
+    </LocationProvider>
   );
 }
