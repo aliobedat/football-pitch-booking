@@ -19,14 +19,13 @@ Malaeb is a SaaS for booking sports fields. Two actors:
    through a single `NotificationService` behind a channel interface. WhatsApp,
    SMS, and email are interchangeable adapters. NO direct WhatsApp/Meta SDK calls
    anywhere except inside the WhatsApp adapter file.
-3. BOOKING STATE MACHINE (payments DEFERRED — no payment system yet):
-   - Booking status: pending -> confirmed | rejected; confirmed -> completed | cancelled | no_show
-   - `reject` acts on a PENDING booking. `cancel` acts on a CONFIRMED booking and
-     triggers slot release + player notification (NO refund — see deferral note).
-   - PAYMENT DEFERRAL: there is no payment system yet. Do NOT build payment, deposit,
-     or refund logic. A dormant `payment_status` column may exist (default `unpaid`)
-     purely as a reserved seam, but nothing reads or acts on it. Payment is an
-     orthogonal dimension to be added later without touching booking logic.
+3. BOOKING STATE MACHINE (INSTANT BOOKING - payments DEFERRED):
+   - Booking status flow: Player creates booking -> immediately becomes `confirmed`. 
+   - There is NO `pending` approval step for admins.
+   - Admin role: Admins can view confirmed bookings and `cancel` them if absolutely necessary.
+   - Player cancellation: Players can also `cancel` their own confirmed bookings.
+   - `cancel` triggers slot release + player notification (NO refund — see deferral note).
+   - PAYMENT DEFERRAL: there is no payment system yet. Do NOT build payment, deposit, or refund logic. A dormant `payment_status` column may exist (default `unpaid`) purely as a reserved seam.
 4. Every state transition is recorded (actor, timestamp, reason) in an audit table.
 
 ## Hard external constraints (WhatsApp Business Platform)
