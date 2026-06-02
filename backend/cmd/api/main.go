@@ -17,6 +17,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/ali/football-pitch-api/internal/auth"
+	"github.com/ali/football-pitch-api/internal/booking"
 	"github.com/ali/football-pitch-api/internal/config"
 	"github.com/ali/football-pitch-api/internal/database"
 	"github.com/ali/football-pitch-api/internal/notification"
@@ -101,6 +102,13 @@ func main() {
 
 	otpSvc := otp.New(notifier, otpStore, otpStore, otpHasher, otp.DefaultConfig())
 
+	// ── Booking orchestration wiring (PART 5/5.1) ─────────────────────────────
+	// The BookingService persists each state transition with its audit row and
+	// routes the player notification through the same NotificationService used
+	// for OTP. The HTTP handlers create/cancel exclusively through this service.
+	bookingRepo := repository.NewBookingRepository(pool)
+	bookingSvc := booking.NewService(bookingRepo, notifier)
+
 	router := gin.New()
 	router.Use(gin.Logger())
 	router.Use(gin.Recovery())
@@ -122,7 +130,7 @@ func main() {
 		AllowCredentials: true,
 	}))
 
-	routes.Register(router, pool, jwtManager, cfg, otpSvc, authRepo) // ← updated signature
+	routes.Register(router, pool, jwtManager, cfg, otpSvc, authRepo, bookingSvc) // ← updated signature
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.ServerPort),

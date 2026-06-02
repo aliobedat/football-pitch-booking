@@ -19,12 +19,13 @@ func Register(
 	cfg *config.Config,
 	otpSvc notification.OtpService,
 	authStore handlers.PhoneAuthStore,
+	bookingSvc handlers.BookingService,
 ) {
 	// ── Handler construction ─────────────────────────────────────────────────
 	healthHandler := handlers.NewHealthHandler(db)
 	authHandler := handlers.NewAuthHandler(db, jwtManager, cfg)
 	phoneAuthHandler := handlers.NewPhoneAuthHandler(otpSvc, authStore, jwtManager, cfg)
-	bookingHandler := handlers.NewBookingHandler(db)
+	bookingHandler := handlers.NewBookingHandler(db, bookingSvc)
 	pitchHandler := &handlers.PitchHandler{Model: &data.PitchModel{DB: db}}
 	v1 := r.Group("/api/v1")
 
