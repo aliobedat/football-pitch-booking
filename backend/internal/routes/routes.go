@@ -20,6 +20,8 @@ func Register(
 	otpSvc notification.OtpService,
 	authStore handlers.PhoneAuthStore,
 	bookingSvc handlers.BookingService,
+	deliveryStore handlers.WhatsAppDeliveryStore,
+	optOutStore handlers.OptOutStore,
 ) {
 	// ── Handler construction ─────────────────────────────────────────────────
 	healthHandler := handlers.NewHealthHandler(db)
@@ -27,6 +29,8 @@ func Register(
 	phoneAuthHandler := handlers.NewPhoneAuthHandler(otpSvc, authStore, jwtManager, cfg)
 	bookingHandler := handlers.NewBookingHandler(db, bookingSvc)
 	pitchHandler := &handlers.PitchHandler{Model: &data.PitchModel{DB: db}}
+	webhookHandler := handlers.NewWhatsAppWebhookHandler(deliveryStore, cfg.WhatsApp.WebhookVerifyToken)
+	notificationHandler := handlers.NewNotificationHandler(optOutStore)
 	v1 := r.Group("/api/v1")
 
 	// ════════════════════════════════════════════════════════════════════════
@@ -35,6 +39,12 @@ func Register(
 	v1.GET("/ping", healthHandler.Ping)
 	v1.GET("/pitches", pitchHandler.ListPitches)
 	v1.GET("/pitches/:id", pitchHandler.GetPitch)
+
+	// Provider delivery-status webhooks (PART 6). Public: authentication is the
+	// Meta verify-token handshake (GET) plus, in production, request-signature
+	// validation at the edge — not a user JWT.
+	v1.GET("/webhooks/whatsapp", webhookHandler.Verify)
+	v1.POST("/webhooks/whatsapp", webhookHandler.Receive)
 	authRoutes := v1.Group("/auth")
 	{
 		// Phone-first auth (PART 3B): the primary login path.
@@ -55,6 +65,9 @@ func Register(
 	{
 		// Auth actions that require identity
 		protected.POST("/auth/logout", authHandler.Logout)
+
+		// Notification consent (PART 6): a user withdraws consent for themselves.
+		protected.POST("/notifications/opt-out", notificationHandler.OptOut)
 
 		// ── Bookings ─────────────────────────────────────────────────────────
 		// Any authenticated user can create a booking, list their own, or check availability

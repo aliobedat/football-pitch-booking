@@ -32,7 +32,12 @@ type WhatsAppConfig struct {
 	PhoneID    string // WHATSAPP_PHONE_ID — sender phone-number id
 	APIBaseURL string // WHATSAPP_API_BASE_URL — Graph API base (default https://graph.facebook.com)
 	APIVersion string // WHATSAPP_API_VERSION — Graph API version (default v21.0)
-	Templates  WhatsAppTemplates
+	// WebhookVerifyToken is the token Meta echoes during the status-webhook
+	// subscription handshake (WHATSAPP_WEBHOOK_VERIFY_TOKEN). Optional: when
+	// empty the GET verification endpoint rejects all handshakes. It is NOT a
+	// credential for outbound calls — only the inbound webhook uses it.
+	WebhookVerifyToken string
+	Templates          WhatsAppTemplates
 }
 
 // WhatsAppTemplates names the approved templates, one per outbound message kind.
@@ -138,10 +143,11 @@ func Load() *Config {
 // template names empty when unset.
 func loadWhatsAppConfig() WhatsAppConfig {
 	return WhatsAppConfig{
-		Token:      getEnv("WHATSAPP_TOKEN", ""),
-		PhoneID:    getEnv("WHATSAPP_PHONE_ID", ""),
-		APIBaseURL: getEnv("WHATSAPP_API_BASE_URL", "https://graph.facebook.com"),
-		APIVersion: getEnv("WHATSAPP_API_VERSION", "v21.0"),
+		Token:              getEnv("WHATSAPP_TOKEN", ""),
+		PhoneID:            getEnv("WHATSAPP_PHONE_ID", ""),
+		APIBaseURL:         getEnv("WHATSAPP_API_BASE_URL", "https://graph.facebook.com"),
+		APIVersion:         getEnv("WHATSAPP_API_VERSION", "v21.0"),
+		WebhookVerifyToken: getEnv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", ""),
 		Templates: WhatsAppTemplates{
 			Language:         getEnv("WHATSAPP_TEMPLATE_LANG", "en"),
 			OTP:              getEnv("WHATSAPP_OTP_TEMPLATE", ""),

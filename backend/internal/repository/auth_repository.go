@@ -32,6 +32,17 @@ type AuthRepository interface {
 	// the notification.OptInChecker. An unknown phone reports false (not an error).
 	HasOptedIn(ctx context.Context, phone string) (bool, error)
 
+	// SetOptOut records (or clears) an explicit consent WITHDRAWAL for a user by
+	// id. Opting out also clears opt_in in the same write, so a withdrawal fully
+	// revokes AUTHENTICATION consent rather than leaving a stale grant behind.
+	// Returns ErrUserNotFound if no user has that id.
+	SetOptOut(ctx context.Context, userID int, optOut bool) error
+
+	// HasOptedOut reports whether the phone has withdrawn consent. It backs the
+	// notification.OptOutChecker and gates EVERY message kind. An unknown phone
+	// reports false (not an error).
+	HasOptedOut(ctx context.Context, phone string) (bool, error)
+
 	// EnsureVerifiedUser returns the user for phone, creating one with
 	// phone_verified = true if it does not exist and flipping the flag if it does.
 	// Called after a successful OTP verification.
@@ -81,6 +92,41 @@ func (r *authRepo) HasOptedIn(ctx context.Context, phone string) (bool, error) {
 		return false, fmt.Errorf("HasOptedIn: %w", err)
 	}
 	return optIn, nil
+}
+
+// SetOptOut sets users.opt_out for the given user id. Opting out also clears
+// opt_in so a withdrawal fully revokes consent. A missing user id is reported as
+// ErrUserNotFound so the handler can map it to a 404 rather than silently no-op.
+func (r *authRepo) SetOptOut(ctx context.Context, userID int, optOut bool) error {
+	tag, err := r.db.Exec(ctx, `
+		UPDATE users
+		SET    opt_out    = $2,
+		       opt_in     = CASE WHEN $2 THEN FALSE ELSE opt_in END,
+		       updated_at = NOW()
+		WHERE  id = $1
+	`, userID, optOut)
+	if err != nil {
+		return fmt.Errorf("SetOptOut: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrUserNotFound
+	}
+	return nil
+}
+
+// HasOptedOut reads users.opt_out for phone. A missing row means no withdrawal.
+func (r *authRepo) HasOptedOut(ctx context.Context, phone string) (bool, error) {
+	var optOut bool
+	err := r.db.QueryRow(ctx,
+		`SELECT opt_out FROM users WHERE phone = $1`, phone,
+	).Scan(&optOut)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("HasOptedOut: %w", err)
+	}
+	return optOut, nil
 }
 
 // EnsureVerifiedUser upserts the phone's user row as verified and returns it.

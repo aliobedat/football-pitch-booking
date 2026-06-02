@@ -28,6 +28,12 @@ const EnvChannel = "NOTIFICATION_CHANNEL"
 
 // Errors surfaced by the service. Callers can match these with errors.Is.
 var (
+	// ErrOptedOut means the recipient has explicitly WITHDRAWN consent. Unlike
+	// the opt-in gate (which only guards AUTHENTICATION/OTP messages), opt-out
+	// blocks EVERY message kind — booking events included. It is a permanent,
+	// non-retryable refusal: the outbox worker dead-letters rather than retries
+	// a job that fails with it.
+	ErrOptedOut = errors.New("notification: recipient has opted out of all messages")
 	// ErrOptInRequired means the recipient has not granted opt-in consent and
 	// an AUTHENTICATION-category (OTP) message was refused.
 	ErrOptInRequired = errors.New("notification: recipient has not opted in for authentication messages")
@@ -59,6 +65,23 @@ func (f OptInFunc) HasOptedIn(ctx context.Context, recipient string) (bool, erro
 	return f(ctx, recipient)
 }
 
+// OptOutChecker reports whether a recipient has explicitly withdrawn consent to
+// receive ANY message. It is the enforcement seam behind the opt-out endpoint
+// (PART 6): when it reports true the service refuses delivery of every message
+// kind. Storage (the users.opt_out column) lives behind this seam so the
+// service stays storage-agnostic, mirroring OptInChecker.
+type OptOutChecker interface {
+	HasOptedOut(ctx context.Context, recipient string) (bool, error)
+}
+
+// OptOutFunc adapts a plain function to the OptOutChecker interface.
+type OptOutFunc func(ctx context.Context, recipient string) (bool, error)
+
+// HasOptedOut calls the underlying function.
+func (f OptOutFunc) HasOptedOut(ctx context.Context, recipient string) (bool, error) {
+	return f(ctx, recipient)
+}
+
 // Service routes an OutboundMessage to the active NotificationChannel after
 // enforcing the opt-in gate. It is the concrete implementation of the
 // NotificationChannel contract that the rest of the app depends on.
@@ -66,6 +89,7 @@ type Service struct {
 	active   ChannelName
 	channels map[ChannelName]NotificationChannel
 	optIn    OptInChecker
+	optOut   OptOutChecker
 }
 
 // Option configures a Service at construction time.
@@ -80,6 +104,13 @@ func WithChannel(name ChannelName, ch NotificationChannel) Option {
 // WithOptInChecker installs the consent lookup used to gate OTP messages.
 func WithOptInChecker(c OptInChecker) Option {
 	return func(s *Service) { s.optIn = c }
+}
+
+// WithOptOutChecker installs the consent-withdrawal lookup used to block ALL
+// messages to a recipient who has opted out. When unset, the opt-out gate is
+// inactive (no withdrawal can be observed) and only the opt-in gate applies.
+func WithOptOutChecker(c OptOutChecker) Option {
+	return func(s *Service) { s.optOut = c }
 }
 
 // NewService builds a Service that delivers through the channel registered under
@@ -105,6 +136,19 @@ func NewService(active ChannelName, opts ...Option) *Service {
 func (s *Service) Send(ctx context.Context, msg OutboundMessage) (DeliveryResult, error) {
 	if err := validate(msg); err != nil {
 		return failed(err)
+	}
+
+	// Opt-out gate: a recipient who has withdrawn consent receives NOTHING,
+	// regardless of message kind. This is checked before the opt-in gate so an
+	// explicit withdrawal always wins. A missing checker leaves the gate open.
+	if s.optOut != nil {
+		out, err := s.optOut.HasOptedOut(ctx, msg.Recipient)
+		if err != nil {
+			return failed(fmt.Errorf("notification: opt-out lookup failed: %w", err))
+		}
+		if out {
+			return failed(ErrOptedOut)
+		}
 	}
 
 	// Opt-in gate: AUTHENTICATION-category (OTP) messages require explicit
