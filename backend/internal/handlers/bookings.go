@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,13 +16,26 @@ import (
 	"github.com/ali/football-pitch-api/internal/repository"
 )
 
-type BookingHandler struct {
-	repo repository.BookingRepository
+// BookingService is the orchestration seam the handler depends on for state
+// transitions (PART 5). *booking.Service satisfies it: each call persists the
+// transition with its audit row and dispatches the player notification. Reads
+// stay on the repository — they neither mutate state nor notify. Defining the
+// interface here (rather than importing the concrete type) keeps the handler
+// testable with a recording fake.
+type BookingService interface {
+	Create(ctx context.Context, req models.CreateBookingRequest) (*models.Booking, error)
+	Cancel(ctx context.Context, params repository.CancelBookingParams) (*models.Booking, error)
 }
 
-func NewBookingHandler(db *pgxpool.Pool) *BookingHandler {
+type BookingHandler struct {
+	repo    repository.BookingRepository // read paths: list + availability
+	service BookingService               // write paths: create + cancel (audited + notified)
+}
+
+func NewBookingHandler(db *pgxpool.Pool, service BookingService) *BookingHandler {
 	return &BookingHandler{
-		repo: repository.NewBookingRepository(db),
+		repo:    repository.NewBookingRepository(db),
+		service: service,
 	}
 }
 
@@ -65,7 +79,9 @@ func (h *BookingHandler) CreateBooking(c *gin.Context) {
 		return
 	}
 
-	booking, err := h.repo.CreateBooking(c.Request.Context(), req)
+	// Route through the service so the confirmed booking is audited and the
+	// player receives a booking_confirmed notification.
+	booking, err := h.service.Create(c.Request.Context(), req)
 	if err != nil {
 		h.handleBookingError(c, err)
 		return
@@ -169,22 +185,31 @@ func (h *BookingHandler) GetPitchAvailability(c *gin.Context) {
 // PATCH /api/v1/bookings/:id/cancel                                    ← NEW
 // ─────────────────────────────────────────────────────────────────────────────
 
-// CancelBooking transitions a booking from 'pending' or 'confirmed' → 'cancelled'.
-// Cancelling a 'cancelled' booking is rejected as an invalid transition.
-// In production this endpoint will be protected to allow only the booking's
-// owner player or the pitch owner to cancel.
+// CancelBooking transitions a confirmed booking → 'cancelled', releasing the
+// slot. Cancelling a non-confirmed booking is rejected as an invalid
+// transition. The route is restricted to the player or pitch owner; the actor's
+// id and role are captured in the audit trail and the player is notified via the
+// service. An optional `reason` may be supplied in the request body; when
+// omitted the service defaults it from the actor role.
 func (h *BookingHandler) CancelBooking(c *gin.Context) {
 	bookingID, ok := parseIDParam(c, "id")
 	if !ok {
 		return
 	}
 
-	booking, err := h.repo.UpdateBookingStatus(
-		c.Request.Context(),
-		bookingID,
-		models.StatusCancelled,
-		[]models.BookingStatus{models.StatusPending, models.StatusConfirmed},
-	)
+	// The body is optional — a bare PATCH with no reason is valid.
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.ShouldBindJSON(&body)
+
+	actorID := int64(middleware.GetUserID(c))
+	booking, err := h.service.Cancel(c.Request.Context(), repository.CancelBookingParams{
+		BookingID: int64(bookingID),
+		ActorID:   &actorID,
+		ActorRole: middleware.GetUserRole(c),
+		Reason:    body.Reason,
+	})
 	if err != nil {
 		h.handleBookingError(c, err)
 		return
