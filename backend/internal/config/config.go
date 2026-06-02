@@ -11,8 +11,18 @@ type Config struct {
 	AppEnv     string
 	ServerPort string
 	DB         DBConfig
-	JWT        JWTConfig  // ← NEW
-	BcryptCost int        // ← NEW
+	JWT        JWTConfig // ← NEW
+	BcryptCost int       // ← NEW
+	OTP        OTPConfig // ← NEW (PART 3B)
+}
+
+// OTPConfig holds the configuration for the phone-first OTP flow.
+type OTPConfig struct {
+	// Pepper is the server-side HMAC secret used to key the digest of every
+	// stored one-time code (see internal/otp.NewHMACHasher). It MUST come from
+	// the environment and is never hardcoded — a leaked code store is useless
+	// without it.
+	Pepper string
 }
 
 type DBConfig struct {
@@ -70,6 +80,14 @@ func Load() *Config {
 		panic("CONFIG: BCRYPT_COST must be between 10 and 31")
 	}
 
+	// OTP_HMAC_PEPPER keys the digest of every stored one-time code. It is a
+	// server-side secret — required, never defaulted, and held to a minimum
+	// length so a weak/empty value fails loudly at startup.
+	otpPepper := mustGetEnv("OTP_HMAC_PEPPER")
+	if len(otpPepper) < 16 {
+		panic("CONFIG: OTP_HMAC_PEPPER must be at least 16 characters long")
+	}
+
 	return &Config{
 		AppEnv:     getEnv("APP_ENV", "development"),
 		ServerPort: getEnv("PORT", getEnv("SERVER_PORT", "8080")),
@@ -78,6 +96,9 @@ func Load() *Config {
 			Secret:        jwtSecret,
 			AccessExpiry:  accessExpiry,
 			RefreshExpiry: refreshExpiry,
+		},
+		OTP: OTPConfig{
+			Pepper: otpPepper,
 		},
 		DB: loadDBConfig(int32(maxConns), int32(minConns)),
 	}

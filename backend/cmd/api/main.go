@@ -19,6 +19,9 @@ import (
 	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/config"
 	"github.com/ali/football-pitch-api/internal/database"
+	"github.com/ali/football-pitch-api/internal/notification"
+	"github.com/ali/football-pitch-api/internal/otp"
+	"github.com/ali/football-pitch-api/internal/repository"
 	"github.com/ali/football-pitch-api/internal/routes"
 )
 
@@ -46,6 +49,36 @@ func main() {
 		cfg.JWT.RefreshExpiry,
 	)
 
+	// ── Phone-first auth wiring (PART 3B) ─────────────────────────────────────
+	// AuthRepository persists phone identities + opt-in consent; it also backs
+	// the notification opt-in gate (HasOptedIn). The OTP service is composed from
+	// the Postgres store/limiter, the HMAC hasher (keyed by the configured
+	// pepper), and the NotificationService routing to the active channel.
+	authRepo := repository.NewAuthRepository(pool)
+
+	otpStore := otp.NewPostgresStore(pool)
+
+	otpHasher, err := otp.NewHMACHasher(cfg.OTP.Pepper)
+	if err != nil {
+		log.Fatalf("[FATAL] Could not initialise OTP hasher: %v", err)
+	}
+
+	activeChannel, err := notification.ActiveChannelFromEnv()
+	if err != nil {
+		log.Fatalf("[FATAL] Invalid notification channel configuration: %v", err)
+	}
+
+	// Only the Fake adapter exists today; real SMS/WhatsApp adapters arrive in
+	// PART 4 and register here under their own names. The opt-in gate reads
+	// consent from the users table via authRepo.
+	notifier := notification.NewService(
+		activeChannel,
+		notification.WithChannel(notification.ChannelFake, notification.NewFakeChannel()),
+		notification.WithOptInChecker(notification.OptInFunc(authRepo.HasOptedIn)),
+	)
+
+	otpSvc := otp.New(notifier, otpStore, otpStore, otpHasher, otp.DefaultConfig())
+
 	router := gin.New()
 	router.Use(gin.Logger())
 	router.Use(gin.Recovery())
@@ -67,7 +100,7 @@ func main() {
 		AllowCredentials: true,
 	}))
 
-	routes.Register(router, pool, jwtManager, cfg) // ← updated signature
+	routes.Register(router, pool, jwtManager, cfg, otpSvc, authRepo) // ← updated signature
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.ServerPort),
