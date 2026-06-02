@@ -27,6 +27,35 @@ var (
 
 const pgExclusionViolation = "23P01"
 
+// Actor roles recorded in the status_transitions audit trail (Architecture
+// Principle 4). They map onto status_transitions.actor_role (VARCHAR(20)).
+const (
+	ActorPlayer = "player"
+	ActorOwner  = "owner"
+	ActorAdmin  = "admin"
+	ActorSystem = "system"
+)
+
+// reasonBookingCreated is the audit reason stored for the implicit
+// creation → confirmed transition under instant booking.
+const reasonBookingCreated = "player created booking (instant confirmation)"
+
+// CancelBookingParams carries everything needed to cancel a confirmed booking
+// and audit the transition. ActorID is nil when the system (not a user) acts.
+type CancelBookingParams struct {
+	BookingID int64
+	ActorID   *int64
+	ActorRole string
+	Reason    string
+}
+
+// BookingContact holds the data required to notify the player about a booking
+// event: their E.164 phone (the message recipient) and the pitch name.
+type BookingContact struct {
+	Phone     string
+	PitchName string
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Interface
 // ─────────────────────────────────────────────────────────────────────────────
@@ -42,6 +71,15 @@ type BookingRepository interface {
 		newStatus models.BookingStatus,
 		allowedFrom []models.BookingStatus,
 	) (*models.Booking, error)
+
+	// CancelBooking transitions a confirmed booking to cancelled and records the
+	// transition in the audit trail, atomically. Cancelling releases the slot for
+	// re-booking (the anti-overlap EXCLUDE constraint ignores cancelled rows).
+	CancelBooking(ctx context.Context, params CancelBookingParams) (*models.Booking, error)
+
+	// GetBookingContact returns the player's phone and the pitch name for a
+	// booking — the inputs a notification channel needs to reach the player.
+	GetBookingContact(ctx context.Context, bookingID int64) (*BookingContact, error)
 }
 
 type bookingRepo struct {
@@ -119,6 +157,18 @@ func (r *bookingRepo) CreateBooking(
 			return nil, ErrDoubleBooking
 		}
 		return nil, fmt.Errorf("CreateBooking: insert: %w", err)
+	}
+
+	// Audit the implicit creation → confirmed transition (Architecture
+	// Principle 4). from_status is NULL for the initial event; the actor is the
+	// player who created the booking. Recorded in the same transaction so a
+	// booking can never exist without its creation audit row.
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO status_transitions
+			(booking_id, from_status, to_status, actor_id, actor_role, reason)
+		VALUES ($1, NULL, 'confirmed', $2, $3, $4)
+	`, b.ID, req.UserID, ActorPlayer, reasonBookingCreated); err != nil {
+		return nil, fmt.Errorf("CreateBooking: record transition: %w", err)
 	}
 
 	if err = tx.Commit(ctx); err != nil {
@@ -314,4 +364,115 @@ func (r *bookingRepo) UpdateBookingStatus(
 	}
 
 	return nil, ErrInvalidStatusTransition
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CancelBooking
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CancelBooking transitions a confirmed booking to cancelled and records the
+// transition in status_transitions, both in a single transaction so the audit
+// trail can never drift from the booking state. Only confirmed → cancelled is
+// permitted (instant booking has no pending state). Setting status to cancelled
+// releases the slot: the anti-double-booking EXCLUDE constraint is defined
+// WHERE (status <> 'cancelled'), so the slot is immediately bookable again.
+func (r *bookingRepo) CancelBooking(
+	ctx context.Context,
+	p CancelBookingParams,
+) (*models.Booking, error) {
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("CancelBooking: begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	var b models.Booking
+
+	err = tx.QueryRow(ctx, `
+		UPDATE bookings
+		SET status = 'cancelled'
+		WHERE id = $1 AND status = 'confirmed'
+		RETURNING
+			id,
+			pitch_id,
+			player_id,
+			lower(booking_range) AS start_time,
+			upper(booking_range) AS end_time,
+			status,
+			total_price,
+			created_at
+	`, p.BookingID).Scan(
+		&b.ID, &b.PitchID, &b.UserID,
+		&b.StartTime, &b.EndTime,
+		&b.Status, &b.TotalPrice,
+		&b.CreatedAt,
+	)
+
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return nil, fmt.Errorf("CancelBooking: update: %w", err)
+		}
+
+		// No row updated: either the booking does not exist, or it was not in a
+		// cancellable (confirmed) state. Disambiguate for a precise error.
+		var exists bool
+		if scanErr := tx.QueryRow(ctx,
+			`SELECT EXISTS(SELECT 1 FROM bookings WHERE id = $1)`,
+			p.BookingID,
+		).Scan(&exists); scanErr != nil {
+			return nil, fmt.Errorf("CancelBooking: exists check: %w", scanErr)
+		}
+		if !exists {
+			return nil, ErrBookingNotFound
+		}
+		return nil, ErrInvalidStatusTransition
+	}
+
+	// Audit the confirmed → cancelled transition. actor_id is NULL when ActorID
+	// is nil (system action); actor_role and reason capture who acted and why.
+	if _, err = tx.Exec(ctx, `
+		INSERT INTO status_transitions
+			(booking_id, from_status, to_status, actor_id, actor_role, reason)
+		VALUES ($1, 'confirmed', 'cancelled', $2, $3, $4)
+	`, b.ID, p.ActorID, p.ActorRole, p.Reason); err != nil {
+		return nil, fmt.Errorf("CancelBooking: record transition: %w", err)
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("CancelBooking: commit: %w", err)
+	}
+
+	return &b, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GetBookingContact
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GetBookingContact returns the player's phone (E.164) and the pitch name for a
+// booking, joining users and pitches. A missing phone is surfaced as an empty
+// string (the caller decides whether a notification can be dispatched).
+func (r *bookingRepo) GetBookingContact(
+	ctx context.Context,
+	bookingID int64,
+) (*BookingContact, error) {
+
+	var c BookingContact
+	err := r.db.QueryRow(ctx, `
+		SELECT COALESCE(u.phone, ''), COALESCE(p.name, '')
+		FROM bookings b
+		JOIN pitches p ON p.id = b.pitch_id
+		JOIN users   u ON u.id = b.player_id
+		WHERE b.id = $1
+	`, bookingID).Scan(&c.Phone, &c.PitchName)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrBookingNotFound
+		}
+		return nil, fmt.Errorf("GetBookingContact: %w", err)
+	}
+
+	return &c, nil
 }

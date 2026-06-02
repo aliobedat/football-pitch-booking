@@ -166,36 +166,6 @@ func (h *BookingHandler) GetPitchAvailability(c *gin.Context) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PATCH /api/v1/bookings/:id/confirm                                   ← NEW
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ConfirmBooking transitions a booking from 'pending' → 'confirmed'.
-// In production this endpoint will be protected by owner-role middleware.
-// A confirmed booking is a binding commitment from the pitch owner.
-func (h *BookingHandler) ConfirmBooking(c *gin.Context) {
-	bookingID, ok := parseIDParam(c, "id")
-	if !ok {
-		return
-	}
-
-	booking, err := h.repo.UpdateBookingStatus(
-		c.Request.Context(),
-		bookingID,
-		models.StatusConfirmed,
-		[]models.BookingStatus{models.StatusPending}, // only pending → confirmed is legal
-	)
-	if err != nil {
-		h.handleBookingError(c, err)
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "booking confirmed",
-		"data":    booking,
-	})
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
 // PATCH /api/v1/bookings/:id/cancel                                    ← NEW
 // ─────────────────────────────────────────────────────────────────────────────
 

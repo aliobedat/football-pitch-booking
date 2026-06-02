@@ -85,12 +85,6 @@ func Register(
 			bookingHandler.GetAllBookings,
 		)
 
-		// Only pitch owners can confirm a booking
-		protected.PATCH("/bookings/:id/confirm",
-			middleware.RequireRole("owner", "admin"),
-			bookingHandler.ConfirmBooking,
-		)
-
 		// Both players and owners can cancel (handler enforces ownership logic)
 		protected.PATCH("/bookings/:id/cancel",
 			middleware.RequireRole("player", "owner"),
