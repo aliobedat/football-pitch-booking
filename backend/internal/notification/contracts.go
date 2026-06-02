@@ -35,7 +35,10 @@ const (
 	DeliveryQueued    DeliveryStatus = "queued"
 	DeliverySent      DeliveryStatus = "sent"
 	DeliveryDelivered DeliveryStatus = "delivered"
-	DeliveryFailed    DeliveryStatus = "failed"
+	// DeliveryRead is reported asynchronously by the provider's status webhook
+	// once the recipient has read the message; no synchronous Send returns it.
+	DeliveryRead   DeliveryStatus = "read"
+	DeliveryFailed DeliveryStatus = "failed"
 )
 
 // Payload is the typed body of an OutboundMessage. Each MessageKind has exactly

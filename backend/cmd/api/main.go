@@ -21,6 +21,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/config"
 	"github.com/ali/football-pitch-api/internal/database"
 	"github.com/ali/football-pitch-api/internal/notification"
+	"github.com/ali/football-pitch-api/internal/notification/outbox"
 	"github.com/ali/football-pitch-api/internal/otp"
 	"github.com/ali/football-pitch-api/internal/repository"
 	"github.com/ali/football-pitch-api/internal/routes"
@@ -83,6 +84,9 @@ func main() {
 		notification.WithChannel(notification.ChannelFake, notification.NewFakeChannel()),
 		notification.WithChannel(notification.ChannelSMS, sms),
 		notification.WithOptInChecker(notification.OptInFunc(authRepo.HasOptedIn)),
+		// Opt-out gate (PART 6): a user who withdrew consent receives NOTHING,
+		// regardless of message kind. Backed by users.opt_out via authRepo.
+		notification.WithOptOutChecker(notification.OptOutFunc(authRepo.HasOptedOut)),
 	}
 
 	if wa, waErr := notification.NewWhatsAppChannel(cfg.WhatsApp); waErr != nil {
@@ -100,14 +104,42 @@ func main() {
 
 	notifier := notification.NewService(activeChannel, channelOpts...)
 
+	// OTP stays SYNCHRONOUS through the service: a one-time code is time-sensitive,
+	// so it must be dispatched (and its opt-in/opt-out gates evaluated) inline, not
+	// deferred behind the retry/backoff queue.
 	otpSvc := otp.New(notifier, otpStore, otpStore, otpHasher, otp.DefaultConfig())
+
+	// ── Durable notification outbox (PART 6) ──────────────────────────────────
+	// The Postgres-backed outbox persists each async message as a job; a worker
+	// drains it through the SAME NotificationService (so the opt-out/opt-in gates
+	// and active channel are unchanged), retrying transient failures with
+	// exponential backoff and dead-lettering permanent ones. The store also backs
+	// the delivery-status webhook (message_deliveries).
+	outboxStore := outbox.NewPostgresStore(pool)
+	failureMonitor := outbox.NewFailureMonitor(5*time.Minute, 0.5, 20)
+	outboxWorker := outbox.NewWorker(outboxStore, notifier, outbox.Config{},
+		outbox.WithDeliveryStore(outboxStore),
+		outbox.WithFailureMonitor(failureMonitor),
+	)
 
 	// ── Booking orchestration wiring (PART 5/5.1) ─────────────────────────────
 	// The BookingService persists each state transition with its audit row and
-	// routes the player notification through the same NotificationService used
-	// for OTP. The HTTP handlers create/cancel exclusively through this service.
+	// routes the player notification through the durable outbox: an Enqueuer drops
+	// in wherever a notifier is expected, turning best-effort booking events into
+	// queued, retried jobs the worker delivers. The HTTP handlers create/cancel
+	// exclusively through this service.
 	bookingRepo := repository.NewBookingRepository(pool)
-	bookingSvc := booking.NewService(bookingRepo, notifier)
+	bookingNotifier := outbox.NewEnqueuer(outboxStore)
+	bookingSvc := booking.NewService(bookingRepo, bookingNotifier)
+
+	// Drain the outbox in the background until shutdown cancels workerCtx.
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	defer stopWorker()
+	go func() {
+		if err := outboxWorker.Run(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("[OUTBOX] worker exited: %v", err)
+		}
+	}()
 
 	router := gin.New()
 	router.Use(gin.Logger())
@@ -130,7 +162,9 @@ func main() {
 		AllowCredentials: true,
 	}))
 
-	routes.Register(router, pool, jwtManager, cfg, otpSvc, authRepo, bookingSvc) // ← updated signature
+	// deliveryStore (outboxStore) backs the WhatsApp status webhook; optOutStore
+	// (authRepo) backs the consent-withdrawal endpoint.
+	routes.Register(router, pool, jwtManager, cfg, otpSvc, authRepo, bookingSvc, outboxStore, authRepo)
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%s", cfg.ServerPort),
@@ -152,6 +186,7 @@ func main() {
 	<-quit
 
 	log.Println("[SERVER] Shutdown signal received — draining connections...")
+	stopWorker() // stop claiming new outbox jobs before draining HTTP
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
