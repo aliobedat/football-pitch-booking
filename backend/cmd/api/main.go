@@ -68,14 +68,36 @@ func main() {
 		log.Fatalf("[FATAL] Invalid notification channel configuration: %v", err)
 	}
 
-	// Only the Fake adapter exists today; real SMS/WhatsApp adapters arrive in
-	// PART 4 and register here under their own names. The opt-in gate reads
-	// consent from the users table via authRepo.
-	notifier := notification.NewService(
-		activeChannel,
+	// Register every delivery adapter under its channel name; the Service routes
+	// to whichever matches activeChannel. The opt-in gate reads consent from the
+	// users table via authRepo.
+	//
+	// The SMS adapter doubles as the fallback target for WhatsApp: when the
+	// WhatsApp channel is selected we register a FallbackChannel that tries the
+	// Meta Cloud API first and transparently falls back to SMS on failure (e.g.
+	// an unapproved AUTHENTICATION template while Meta verification is pending).
+	sms := notification.NewSmsChannel()
+
+	channelOpts := []notification.Option{
 		notification.WithChannel(notification.ChannelFake, notification.NewFakeChannel()),
+		notification.WithChannel(notification.ChannelSMS, sms),
 		notification.WithOptInChecker(notification.OptInFunc(authRepo.HasOptedIn)),
-	)
+	}
+
+	if wa, waErr := notification.NewWhatsAppChannel(cfg.WhatsApp); waErr != nil {
+		// Missing credentials are fatal only if WhatsApp is the active channel;
+		// otherwise we simply skip registration so FAKE/SMS deployments run clean.
+		if activeChannel == notification.ChannelWhatsApp {
+			log.Fatalf("[FATAL] NOTIFICATION_CHANNEL=WHATSAPP but WhatsApp is not configured: %v", waErr)
+		}
+		log.Printf("[NOTIFY] WhatsApp channel not configured (%v) — skipping registration", waErr)
+	} else {
+		channelOpts = append(channelOpts,
+			notification.WithChannel(notification.ChannelWhatsApp,
+				notification.NewFallbackChannel(wa, sms)))
+	}
+
+	notifier := notification.NewService(activeChannel, channelOpts...)
 
 	otpSvc := otp.New(notifier, otpStore, otpStore, otpHasher, otp.DefaultConfig())
 
