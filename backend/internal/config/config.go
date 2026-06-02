@@ -11,9 +11,36 @@ type Config struct {
 	AppEnv     string
 	ServerPort string
 	DB         DBConfig
-	JWT        JWTConfig // ← NEW
-	BcryptCost int       // ← NEW
-	OTP        OTPConfig // ← NEW (PART 3B)
+	JWT        JWTConfig      // ← NEW
+	BcryptCost int            // ← NEW
+	OTP        OTPConfig      // ← NEW (PART 3B)
+	WhatsApp   WhatsAppConfig // ← NEW (PART 4)
+}
+
+// WhatsAppConfig holds Meta WhatsApp Cloud API credentials plus the names of the
+// pre-approved message templates the WhatsApp adapter renders against.
+//
+// These values are OPTIONAL at load time: deployments running the FAKE or SMS
+// channel need not set them, so we never panic when they are absent (unlike the
+// hard-required DB/JWT/OTP secrets). The WhatsApp adapter validates the values it
+// actually needs when it is constructed and at send time — a missing template,
+// for example, is treated as a delivery failure that triggers the SMS fallback.
+//
+// Credentials come exclusively from the environment and are never hardcoded.
+type WhatsAppConfig struct {
+	Token      string // WHATSAPP_TOKEN — Meta Cloud API bearer token
+	PhoneID    string // WHATSAPP_PHONE_ID — sender phone-number id
+	APIBaseURL string // WHATSAPP_API_BASE_URL — Graph API base (default https://graph.facebook.com)
+	APIVersion string // WHATSAPP_API_VERSION — Graph API version (default v21.0)
+	Templates  WhatsAppTemplates
+}
+
+// WhatsAppTemplates names the approved templates, one per outbound message kind.
+type WhatsAppTemplates struct {
+	Language         string // WHATSAPP_TEMPLATE_LANG — BCP-47 code (default en)
+	OTP              string // WHATSAPP_OTP_TEMPLATE — AUTHENTICATION-category template
+	BookingConfirmed string // WHATSAPP_BOOKING_CONFIRMED_TEMPLATE — UTILITY-category template
+	BookingCancelled string // WHATSAPP_BOOKING_CANCELLED_TEMPLATE — UTILITY-category template
 }
 
 // OTPConfig holds the configuration for the phone-first OTP flow.
@@ -100,7 +127,27 @@ func Load() *Config {
 		OTP: OTPConfig{
 			Pepper: otpPepper,
 		},
-		DB: loadDBConfig(int32(maxConns), int32(minConns)),
+		WhatsApp: loadWhatsAppConfig(),
+		DB:       loadDBConfig(int32(maxConns), int32(minConns)),
+	}
+}
+
+// loadWhatsAppConfig reads the optional Meta WhatsApp Cloud API settings from the
+// environment. Nothing here is required — absence is normal for FAKE/SMS
+// deployments — so we default the endpoint coordinates and leave credentials and
+// template names empty when unset.
+func loadWhatsAppConfig() WhatsAppConfig {
+	return WhatsAppConfig{
+		Token:      getEnv("WHATSAPP_TOKEN", ""),
+		PhoneID:    getEnv("WHATSAPP_PHONE_ID", ""),
+		APIBaseURL: getEnv("WHATSAPP_API_BASE_URL", "https://graph.facebook.com"),
+		APIVersion: getEnv("WHATSAPP_API_VERSION", "v21.0"),
+		Templates: WhatsAppTemplates{
+			Language:         getEnv("WHATSAPP_TEMPLATE_LANG", "en"),
+			OTP:              getEnv("WHATSAPP_OTP_TEMPLATE", ""),
+			BookingConfirmed: getEnv("WHATSAPP_BOOKING_CONFIRMED_TEMPLATE", ""),
+			BookingCancelled: getEnv("WHATSAPP_BOOKING_CANCELLED_TEMPLATE", ""),
+		},
 	}
 }
 
