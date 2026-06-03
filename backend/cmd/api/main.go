@@ -160,17 +160,41 @@ func main() {
 	router.Use(gin.Logger())
 	router.Use(gin.Recovery())
 
-	allowedOrigins := map[string]bool{"http://localhost:3000": true}
+	// Allowed CORS origins. The browser's `Origin` header never carries a
+	// trailing slash or surrounding space, and the lookup below is exact-match,
+	// so every configured origin is normalised the same way (trim space, drop a
+	// trailing "/"). A mismatched origin makes gin-contrib/cors abort the
+	// preflight 403 with NO Access-Control-Allow-Origin header — which surfaces
+	// in the browser as "No 'Access-Control-Allow-Origin' header is present".
+	normalizeOrigin := func(o string) string {
+		return strings.TrimRight(strings.TrimSpace(o), "/")
+	}
+	allowedOrigins := map[string]bool{
+		// Local dev frontend.
+		"http://localhost:3000": true,
+		// Production frontend (Vercel). Hardcoded as a fallback so the deploy
+		// works even if CORS_ALLOWED_ORIGINS is unset/misconfigured on Railway;
+		// the env var below can still add more origins (e.g. preview URLs).
+		"https://football-pitch-booking-liart.vercel.app": true,
+	}
 	if raw := os.Getenv("CORS_ALLOWED_ORIGINS"); raw != "" {
 		for _, o := range strings.Split(raw, ",") {
-			if trimmed := strings.TrimSpace(o); trimmed != "" {
+			if trimmed := normalizeOrigin(o); trimmed != "" {
 				allowedOrigins[trimmed] = true
 			}
 		}
 	}
 
+	// Surface the effective allow-list in the boot logs so a CORS failure can be
+	// diagnosed from Railway logs without redeploying.
+	origins := make([]string, 0, len(allowedOrigins))
+	for o := range allowedOrigins {
+		origins = append(origins, o)
+	}
+	log.Printf("[CORS] allowed origins: %s", strings.Join(origins, ", "))
+
 	router.Use(cors.New(cors.Config{
-		AllowOriginFunc:  func(origin string) bool { return allowedOrigins[origin] },
+		AllowOriginFunc:  func(origin string) bool { return allowedOrigins[normalizeOrigin(origin)] },
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-CSRF-Token"},
 		ExposeHeaders:    []string{"Content-Length"},
