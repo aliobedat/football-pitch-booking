@@ -27,6 +27,7 @@ func testWhatsAppConfig(baseURL string) config.WhatsAppConfig {
 			OTP:              "malaeb_otp",
 			BookingConfirmed: "malaeb_booking_confirmed",
 			BookingCancelled: "malaeb_booking_cancelled",
+			BookingReminder:  "malaeb_booking_reminder",
 		},
 	}
 }
@@ -145,6 +146,7 @@ func TestWhatsAppChannel_BookingTemplates(t *testing.T) {
 	}{
 		{KindBookingConfirmed, "malaeb_booking_confirmed", 3},
 		{KindBookingCancelled, "malaeb_booking_cancelled", 3},
+		{KindBookingReminder, "malaeb_booking_reminder", 3},
 	}
 
 	for _, c := range cases {

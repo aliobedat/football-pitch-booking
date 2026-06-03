@@ -235,6 +235,30 @@ func (w *WhatsAppChannel) buildRequest(msg OutboundMessage) (waRequest, error) {
 			},
 		}, nil
 
+	case BookingReminderPayload:
+		// UTILITY-category reminder template (PART 7): variable params are the
+		// pitch name and the booking's start/end, echoing the confirmation copy.
+		name := w.cfg.Templates.BookingReminder
+		if name == "" {
+			return waRequest{}, fmt.Errorf("%w: %s", ErrWhatsAppNoTemplate, KindBookingReminder)
+		}
+		return waRequest{
+			MessagingProduct: "whatsapp",
+			To:               to,
+			Type:             "template",
+			Template: waTemplate{
+				Name:     name,
+				Language: lang,
+				Components: []waComponent{
+					{Type: "body", Parameters: []waParameter{
+						{Type: "text", Text: p.PitchName},
+						{Type: "text", Text: p.StartTime.Format(bookingTimeLayout)},
+						{Type: "text", Text: p.EndTime.Format(bookingTimeLayout)},
+					}},
+				},
+			},
+		}, nil
+
 	default:
 		return waRequest{}, fmt.Errorf("%w: %s", ErrWhatsAppUnsupportedKind, msg.Kind)
 	}

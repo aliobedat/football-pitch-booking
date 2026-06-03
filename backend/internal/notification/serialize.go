@@ -74,6 +74,12 @@ func UnmarshalOutbound(data []byte) (OutboundMessage, error) {
 			return OutboundMessage{}, decodeErr(env.Kind, err)
 		}
 		payload = p
+	case KindBookingReminder:
+		var p BookingReminderPayload
+		if err := json.Unmarshal(env.Payload, &p); err != nil {
+			return OutboundMessage{}, decodeErr(env.Kind, err)
+		}
+		payload = p
 	default:
 		return OutboundMessage{}, fmt.Errorf("%w: unknown kind %q", ErrInvalidMessage, env.Kind)
 	}

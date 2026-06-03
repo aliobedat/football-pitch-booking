@@ -24,6 +24,8 @@ func sampleMessage(kind MessageKind) OutboundMessage {
 		p = BookingRejectedPayload{BookingID: 1, PitchName: "Pitch A", StartTime: start, EndTime: end, Reason: "slot taken"}
 	case KindBookingCancelled:
 		p = BookingCancelledPayload{BookingID: 1, PitchName: "Pitch A", StartTime: start, EndTime: end, Reason: "owner cancelled"}
+	case KindBookingReminder:
+		p = BookingReminderPayload{BookingID: 1, PitchName: "Pitch A", StartTime: start, EndTime: end}
 	default:
 		p = nil
 	}

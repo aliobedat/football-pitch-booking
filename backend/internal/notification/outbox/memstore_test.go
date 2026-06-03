@@ -20,10 +20,31 @@ type memStore struct {
 	mu     sync.Mutex
 	jobs   map[int64]*Job
 	nextID int64
+	now    func() time.Time
 }
 
-func newMemStore() *memStore {
-	return &memStore{jobs: make(map[int64]*Job)}
+// memStoreOption configures a memStore.
+type memStoreOption func(*memStore)
+
+// withMemClock injects the time source memStore uses to default a job's
+// AvailableAt at enqueue time. A store and the worker draining it must share one
+// clock, otherwise a job enqueued with the real wall clock can land just after a
+// fixed test "now" and never satisfy ClaimDue's next_attempt_at <= now predicate
+// — a timing-dependent flake. Defaults to time.Now when unset.
+func withMemClock(now func() time.Time) memStoreOption {
+	return func(m *memStore) {
+		if now != nil {
+			m.now = now
+		}
+	}
+}
+
+func newMemStore(opts ...memStoreOption) *memStore {
+	m := &memStore{jobs: make(map[int64]*Job), now: time.Now}
+	for _, o := range opts {
+		o(m)
+	}
+	return m
 }
 
 func (m *memStore) Enqueue(_ context.Context, j NewJob) (int64, error) {
@@ -32,7 +53,7 @@ func (m *memStore) Enqueue(_ context.Context, j NewJob) (int64, error) {
 
 	available := j.AvailableAt
 	if available.IsZero() {
-		available = time.Now()
+		available = m.now()
 	}
 	maxAttempts := j.MaxAttempts
 	if maxAttempts <= 0 {
