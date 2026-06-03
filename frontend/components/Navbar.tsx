@@ -75,26 +75,20 @@ export default function Navbar() {
               </button>
             </div>
           ) : (
-            <>
-              <Link
-                href="/login"
-                className="hidden sm:block text-[12px] text-white/40 hover:text-white/70 transition-colors duration-150"
-              >
-                تسجيل الدخول
-              </Link>
-              <Link
-                href="/register"
-                className={[
-                  'flex items-center gap-2 px-4 py-2 rounded-lg',
-                  'text-[12px] font-semibold',
-                  'bg-[#0f4c3a] text-emerald-400 border border-emerald-500/20',
-                  'hover:bg-[#1a6b52] hover:text-emerald-300 transition-all duration-200',
-                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500',
-                ].join(' ')}
-              >
-                ابدأ الآن
-              </Link>
-            </>
+            // Phone-first: a single OTP entry point. The first verification both
+            // signs in and creates the account, so there is no separate register.
+            <Link
+              href="/login"
+              className={[
+                'flex items-center gap-2 px-4 py-2 rounded-lg',
+                'text-[12px] font-semibold',
+                'bg-[#0f4c3a] text-emerald-400 border border-emerald-500/20',
+                'hover:bg-[#1a6b52] hover:text-emerald-300 transition-all duration-200',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500',
+              ].join(' ')}
+            >
+              ابدأ الآن
+            </Link>
           )}
         </div>
       </nav>

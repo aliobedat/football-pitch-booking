@@ -47,14 +47,14 @@ func Register(
 	v1.POST("/webhooks/whatsapp", webhookHandler.Receive)
 	authRoutes := v1.Group("/auth")
 	{
-		// Phone-first auth (PART 3B): the primary login path.
+		// Phone-first OTP is the SOLE login path. Email/password auth has been
+		// removed (Step C).
 		authRoutes.POST("/request-otp", phoneAuthHandler.RequestOTP)
 		authRoutes.POST("/verify-otp", phoneAuthHandler.VerifyOTP)
 
-		// Email/password auth (legacy / secondary identity).
-		authRoutes.POST("/register", authHandler.Register)
-		authRoutes.POST("/login", authHandler.Login)
-		authRoutes.POST("/refresh", authHandler.Refresh)
+		// Refresh is cookie-authenticated and state-changing (token rotation), so
+		// it is CSRF-protected even though it lives outside the protected group.
+		authRoutes.POST("/refresh", middleware.RequireCSRF(), authHandler.Refresh)
 	}
 
 	// ════════════════════════════════════════════════════════════════════════
@@ -62,9 +62,15 @@ func Register(
 	// ════════════════════════════════════════════════════════════════════════
 	protected := v1.Group("/")
 	protected.Use(middleware.RequireAuth(jwtManager))
+	// Double-submit CSRF: enforced for unsafe methods on cookie-authenticated
+	// requests; safe methods and Bearer-authenticated callers pass through.
+	protected.Use(middleware.RequireCSRF())
 	{
 		// Auth actions that require identity
 		protected.POST("/auth/logout", authHandler.Logout)
+
+		// Current-user profile — session rehydration for cookie-based auth.
+		protected.GET("/auth/me", phoneAuthHandler.GetCurrentUser)
 
 		// Notification consent (PART 6): a user withdraws consent for themselves.
 		protected.POST("/notifications/opt-out", notificationHandler.OptOut)

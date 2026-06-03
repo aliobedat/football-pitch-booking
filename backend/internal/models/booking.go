@@ -11,12 +11,12 @@ const (
 	StatusCancelled BookingStatus = "cancelled"
 )
 
-// الهيكل الأساسي للحجز (تم تحديث PlayerID إلى UserID)
+// الهيكل الأساسي للحجز. PlayerID يطابق عمود player_id في قاعدة البيانات.
 type Booking struct {
 	ID         int64         `json:"id"`
 	PitchID    int64         `json:"pitch_id"`
 	PitchName  string        `json:"pitch_name,omitempty"`
-	UserID     int64         `json:"user_id"` // 👈 هون كان الإيرور
+	PlayerID   int64         `json:"player_id"`
 	StartTime  time.Time     `json:"start_time"`
 	EndTime    time.Time     `json:"end_time"`
 	Status     BookingStatus `json:"status"`
@@ -31,7 +31,7 @@ type CreateBookingRequest struct {
 	EndTime    time.Time `json:"end_time" binding:"required"`
 	TotalPrice float64   `json:"total_price" binding:"required"`
 	
-	UserID     int64     `json:"-"` // يتم تعبئته من التوكن (مخفي عن المستخدم)
+	PlayerID   int64     `json:"-"` // يتم تعبئته من التوكن (مخفي عن المستخدم)
 }
 
 // AdminBooking is the enriched booking record returned to owners/admins.
@@ -40,7 +40,7 @@ type AdminBooking struct {
 	ID         int64         `json:"id"`
 	PitchID    int64         `json:"pitch_id"`
 	PitchName  string        `json:"pitch_name"`
-	UserID     int64         `json:"user_id"`
+	PlayerID   int64         `json:"player_id"`
 	UserName   string        `json:"user_name"`
 	UserEmail  string        `json:"user_email"`
 	StartTime  time.Time     `json:"start_time"`

@@ -24,6 +24,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/models"
 	"github.com/ali/football-pitch-api/internal/notification"
 	"github.com/ali/football-pitch-api/internal/otp"
+	"github.com/ali/football-pitch-api/internal/repository"
 )
 
 const (
@@ -92,6 +93,18 @@ func (f *fakeAuthStore) StoreRefreshToken(_ context.Context, _ int, _ string, _ 
 	defer f.mu.Unlock()
 	f.refreshN++
 	return nil
+}
+
+// FindByID backs GET /auth/me. It scans the phone-keyed map for a matching id.
+func (f *fakeAuthStore) FindByID(_ context.Context, id int) (*models.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, u := range f.users {
+		if u.ID == id {
+			return u, nil
+		}
+	}
+	return nil, repository.ErrUserNotFound
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -166,6 +179,36 @@ func (h *harness) do(t *testing.T, method, path string, body any, bearer string)
 	return rec
 }
 
+// doCookies issues a request carrying the given cookies, exercising the
+// cookie-based auth path the browser uses (the httpOnly access cookie).
+func (h *harness) doCookies(t *testing.T, method, path string, body any, cookies []*http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	var buf bytes.Buffer
+	if body != nil {
+		if err := json.NewEncoder(&buf).Encode(body); err != nil {
+			t.Fatalf("encode body: %v", err)
+		}
+	}
+	req := httptest.NewRequest(method, path, &buf)
+	req.Header.Set("Content-Type", "application/json")
+	for _, ck := range cookies {
+		req.AddCookie(ck)
+	}
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, req)
+	return rec
+}
+
+// cookieByName returns the named cookie set on the response, or nil if absent.
+func cookieByName(rec *httptest.ResponseRecorder, name string) *http.Cookie {
+	for _, ck := range rec.Result().Cookies() {
+		if ck.Name == name {
+			return ck
+		}
+	}
+	return nil
+}
+
 // lastOTPCode returns the plaintext code from the most recent message the Fake
 // channel recorded.
 func (h *harness) lastOTPCode(t *testing.T) string {
@@ -210,11 +253,12 @@ func TestFullLifecycle(t *testing.T) {
 		t.Fatalf("verify-otp: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
+	// The session now arrives as httpOnly cookies, NOT in the body. The body
+	// carries only the (non-sensitive) user profile and expiry.
 	var verifyResp struct {
 		Data struct {
-			AccessToken  string `json:"access_token"`
-			RefreshToken string `json:"refresh_token"`
-			User         struct {
+			ExpiresIn int `json:"expires_in_seconds"`
+			User      struct {
 				ID    int    `json:"id"`
 				Phone string `json:"phone"`
 				Role  string `json:"role"`
@@ -224,17 +268,29 @@ func TestFullLifecycle(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &verifyResp); err != nil {
 		t.Fatalf("decode verify response: %v", err)
 	}
-	if verifyResp.Data.AccessToken == "" || verifyResp.Data.RefreshToken == "" {
-		t.Fatalf("expected access + refresh tokens, got %+v", verifyResp.Data)
-	}
 	if verifyResp.Data.User.Phone != phone || verifyResp.Data.User.Role != "player" {
 		t.Fatalf("unexpected user in response: %+v", verifyResp.Data.User)
 	}
 
-	// 3. Protected route accepts the issued session.
-	rec = h.do(t, http.MethodGet, "/me", nil, verifyResp.Data.AccessToken)
+	// The access + refresh tokens must be delivered as httpOnly cookies and must
+	// NOT leak anywhere into the response body.
+	access := cookieByName(rec, "malaab_access")
+	refresh := cookieByName(rec, "malaab_refresh")
+	if access == nil || access.Value == "" || !access.HttpOnly {
+		t.Fatalf("expected an httpOnly malaab_access cookie, got %+v", access)
+	}
+	if refresh == nil || refresh.Value == "" || !refresh.HttpOnly {
+		t.Fatalf("expected an httpOnly malaab_refresh cookie, got %+v", refresh)
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(access.Value)) {
+		t.Fatal("access token leaked into the response body")
+	}
+
+	// 3. Protected route accepts the session presented via cookie.
+	sessionCookies := rec.Result().Cookies()
+	rec = h.doCookies(t, http.MethodGet, "/me", nil, sessionCookies)
 	if rec.Code != http.StatusOK {
-		t.Fatalf("protected route with token: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+		t.Fatalf("protected route with session cookie: status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
 
 	// 4. Protected route rejects an unauthenticated call.
@@ -243,7 +299,7 @@ func TestFullLifecycle(t *testing.T) {
 		t.Fatalf("protected route without token: status = %d, want 401", rec.Code)
 	}
 
-	// 5. ...and a garbage token.
+	// 5. ...and a garbage bearer token.
 	rec = h.do(t, http.MethodGet, "/me", nil, "not-a-real-jwt")
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("protected route with bad token: status = %d, want 401", rec.Code)

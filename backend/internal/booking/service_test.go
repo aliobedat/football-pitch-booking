@@ -89,7 +89,7 @@ func sampleBooking() *models.Booking {
 	return &models.Booking{
 		ID:         42,
 		PitchID:    7,
-		UserID:     3,
+		PlayerID:     3,
 		StartTime:  start,
 		EndTime:    start.Add(time.Hour),
 		Status:     models.StatusConfirmed,
@@ -119,7 +119,7 @@ func TestCreate_DispatchesBookingConfirmed(t *testing.T) {
 	notifier := &fakeNotifier{}
 	svc := newService(store, notifier)
 
-	got, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, UserID: 3})
+	got, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, PlayerID: 3})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
@@ -156,7 +156,7 @@ func TestCreate_StoreErrorIsReturnedAndNothingDispatched(t *testing.T) {
 	notifier := &fakeNotifier{}
 	svc := newService(store, notifier)
 
-	got, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, UserID: 3})
+	got, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, PlayerID: 3})
 	if !errors.Is(err, boom) {
 		t.Fatalf("err = %v, want %v", err, boom)
 	}
@@ -295,7 +295,7 @@ func TestCreate_NotifierFailureDoesNotFailBooking(t *testing.T) {
 	notifier := &fakeNotifier{err: errors.New("provider unreachable")}
 	svc := newService(store, notifier)
 
-	got, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, UserID: 3})
+	got, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, PlayerID: 3})
 	if err != nil {
 		t.Fatalf("Create returned error %v, want nil — the confirmed booking must stand despite a delivery failure", err)
 	}
@@ -315,7 +315,7 @@ func TestDispatch_MissingPhoneSkipsSend(t *testing.T) {
 	notifier := &fakeNotifier{}
 	svc := newService(store, notifier)
 
-	got, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, UserID: 3})
+	got, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, PlayerID: 3})
 	if err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestDispatch_ContactLookupErrorSkipsSend(t *testing.T) {
 	notifier := &fakeNotifier{}
 	svc := newService(store, notifier)
 
-	got, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, UserID: 3})
+	got, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, PlayerID: 3})
 	if err != nil {
 		t.Fatalf("Create returned error %v, want nil — a contact lookup failure must not undo the booking", err)
 	}
@@ -366,7 +366,7 @@ func TestService_DispatchesThroughRealNotificationService(t *testing.T) {
 	)
 	svc := newService(store, notifier)
 
-	if _, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, UserID: 3}); err != nil {
+	if _, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, PlayerID: 3}); err != nil {
 		t.Fatalf("Create returned error: %v", err)
 	}
 

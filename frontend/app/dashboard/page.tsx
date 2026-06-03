@@ -23,7 +23,7 @@ interface AdminBooking {
   id:          number;
   pitch_id:    number;
   pitch_name:  string;
-  user_id:     number;
+  player_id:   number;
   user_name:   string;
   user_email:  string;
   start_time:  string;

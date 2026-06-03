@@ -48,6 +48,11 @@ type AuthRepository interface {
 	// Called after a successful OTP verification.
 	EnsureVerifiedUser(ctx context.Context, phone string) (*models.User, error)
 
+	// FindByID loads a user by primary key, surfacing nullable phone-first
+	// columns as empty strings. Returns ErrUserNotFound when no row matches.
+	// Backs GET /auth/me (cookie-session rehydration).
+	FindByID(ctx context.Context, userID int) (*models.User, error)
+
 	// StoreRefreshToken persists the SHA-256 hash of a newly issued refresh token.
 	StoreRefreshToken(ctx context.Context, userID int, tokenHash string, expiresAt time.Time) error
 }
@@ -141,14 +146,35 @@ func (r *authRepo) EnsureVerifiedUser(ctx context.Context, phone string) (*model
 			phone_verified = TRUE,
 			updated_at     = NOW()
 		RETURNING id, COALESCE(full_name,''), COALESCE(email,''), COALESCE(phone,''),
-		          COALESCE(password_hash,''), role, created_at, updated_at
+		          role, created_at, updated_at
 	`, phone).Scan(
 		&u.ID, &u.FullName, &u.Email, &u.Phone,
-		&u.PasswordHash, &u.Role,
-		&u.CreatedAt, &u.UpdatedAt,
+		&u.Role, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("EnsureVerifiedUser: %w", err)
+	}
+	return &u, nil
+}
+
+// FindByID loads a user by id. The COALESCE on the nullable phone-first columns
+// surfaces a NULL as an empty string so the model never holds a NULL.
+func (r *authRepo) FindByID(ctx context.Context, userID int) (*models.User, error) {
+	var u models.User
+	err := r.db.QueryRow(ctx, `
+		SELECT id, COALESCE(full_name,''), COALESCE(email,''), COALESCE(phone,''),
+		       role, created_at, updated_at
+		FROM   users
+		WHERE  id = $1
+	`, userID).Scan(
+		&u.ID, &u.FullName, &u.Email, &u.Phone,
+		&u.Role, &u.CreatedAt, &u.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("FindByID: %w", err)
 	}
 	return &u, nil
 }

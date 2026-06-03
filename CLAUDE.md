@@ -1,3 +1,5 @@
+CRITICAL: ALWAYS read PROJECT_HANDOFF.md before making any architectural or frontend changes.
+
 # PROJECT CONTEXT
 
 ## Product

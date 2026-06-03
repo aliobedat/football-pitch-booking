@@ -10,16 +10,16 @@ const (
 	RoleAdmin  UserRole = "admin"
 )
 
-// User mirrors the users table. PasswordHash is never serialised to JSON.
+// User mirrors the users table. Phone-first OTP is the sole auth method, so
+// there is no password field; email is an optional/secondary identifier.
 type User struct {
-	ID           int       `json:"id"`
-	FullName     string    `json:"full_name"`
-	Email        string    `json:"email"`
-	Phone        string    `json:"phone,omitempty"`
-	PasswordHash string    `json:"-"`
-	Role         UserRole  `json:"role"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID        int       `json:"id"`
+	FullName  string    `json:"full_name"`
+	Email     string    `json:"email"`
+	Phone     string    `json:"phone,omitempty"`
+	Role      UserRole  `json:"role"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // SafeUser is the public-facing representation of a user — no sensitive fields.
