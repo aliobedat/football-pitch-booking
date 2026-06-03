@@ -157,8 +157,6 @@ func main() {
 	}()
 
 	router := gin.New()
-	router.Use(gin.Logger())
-	router.Use(gin.Recovery())
 
 	// Allowed CORS origins. The browser's `Origin` header never carries a
 	// trailing slash or surrounding space, and the lookup below is exact-match,
@@ -193,6 +191,11 @@ func main() {
 	}
 	log.Printf("[CORS] allowed origins: %s", strings.Join(origins, ", "))
 
+	// CORS is registered FIRST so the Access-Control-* headers are applied to
+	// every response — including 404/405 and any later middleware abort — before
+	// anything else in the chain runs. (Gin folds engine-level middleware into
+	// the NoRoute chain regardless of order, but front-loading CORS removes all
+	// ambiguity and is the conventional placement.)
 	router.Use(cors.New(cors.Config{
 		AllowOriginFunc:  func(origin string) bool { return allowedOrigins[normalizeOrigin(origin)] },
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
@@ -200,6 +203,17 @@ func main() {
 		ExposeHeaders:    []string{"Content-Length"},
 		AllowCredentials: true,
 	}))
+	router.Use(gin.Logger())
+	router.Use(gin.Recovery())
+
+	// Log every unmatched route. Remember the API is served under /api/v1 — a 404
+	// on a bare path (e.g. /auth/request-otp without the prefix) means the caller
+	// dropped the prefix, usually a frontend NEXT_PUBLIC_API_URL missing /api/v1.
+	router.NoRoute(func(c *gin.Context) {
+		log.Printf("[404] no route: %s %s (origin=%q)",
+			c.Request.Method, c.Request.URL.Path, c.Request.Header.Get("Origin"))
+		c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "path": c.Request.URL.Path})
+	})
 
 	// deliveryStore (outboxStore) backs the WhatsApp status webhook; optOutStore
 	// (authRepo) backs the consent-withdrawal endpoint.
