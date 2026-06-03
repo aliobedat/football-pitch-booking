@@ -27,9 +27,9 @@ const (
 //	protected := v1.Group("/").Use(middleware.RequireAuth(jwtManager))
 func RequireAuth(jwtManager *auth.JWTManager) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		tokenString, ok := extractBearerToken(c)
+		tokenString, ok := extractToken(c)
 		if !ok {
-			abortUnauthorized(c, "missing_token", "authorization header is required (Bearer <token>)")
+			abortUnauthorized(c, "missing_token", "a valid session cookie or bearer token is required")
 			return
 		}
 
@@ -114,6 +114,22 @@ func GetUserRole(c *gin.Context) string {
 // ─────────────────────────────────────────────────────────────────────────────
 // Private helpers
 // ─────────────────────────────────────────────────────────────────────────────
+
+// accessCookieName is the httpOnly cookie carrying the access JWT for browser
+// clients. It mirrors handlers.cookieAccess (duplicated, not imported, because
+// handlers depends on middleware — importing it back would be a cycle).
+const accessCookieName = "malaab_access"
+
+// extractToken pulls the access token from the session cookie first (the browser
+// path), then falls back to the Authorization header for non-browser API clients
+// and tests. Cookie-first keeps the httpOnly-cookie migration transparent to
+// handlers while preserving header auth for programmatic callers.
+func extractToken(c *gin.Context) (string, bool) {
+	if cookie, err := c.Cookie(accessCookieName); err == nil && cookie != "" {
+		return cookie, true
+	}
+	return extractBearerToken(c)
+}
 
 // extractBearerToken parses the Authorization header and returns the raw token.
 // Returns false if the header is absent or not in "Bearer <token>" format.

@@ -3,10 +3,7 @@ package handlers
 import (
 	"errors"
 	"net/http"
-	"regexp"
-	"strings"
 	"time"
-	"unicode"
 
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -17,9 +14,10 @@ import (
 	"github.com/ali/football-pitch-api/internal/repository"
 )
 
-var emailRegex = regexp.MustCompile(`^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$`)
-
-// AuthHandler handles registration, login, token refresh, and logout.
+// AuthHandler owns the session lifecycle shared by every login path: refreshing
+// the token pair and logging out. Identity itself is established exclusively by
+// the phone-first OTP flow (see PhoneAuthHandler) — there is no email/password
+// authentication.
 type AuthHandler struct {
 	userRepo   repository.UserRepository
 	jwtManager *auth.JWTManager
@@ -34,181 +32,40 @@ func NewAuthHandler(db *pgxpool.Pool, jwtManager *auth.JWTManager, cfg *config.C
 	}
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Request / Response types (local to this file)
-// ─────────────────────────────────────────────────────────────────────────────
-
-type registerRequest struct {
-	FullName string `json:"full_name" binding:"required"`
-	Email    string `json:"email"     binding:"required"`
-	Password string `json:"password"  binding:"required"`
-	// Role is intentionally ignored — all self-registrations become 'player'.
-	// Owners and admins are promoted manually in the database.
-}
-
-type loginRequest struct {
-	Email    string `json:"email"    binding:"required"`
-	Password string `json:"password" binding:"required"`
-}
-
-type refreshRequest struct {
-	RefreshToken string `json:"refresh_token" binding:"required"`
-}
-
+// authResponse is the body returned on successful authentication. It carries NO
+// tokens: the access + refresh JWTs are delivered exclusively as httpOnly
+// cookies (see issueSessionCookies), so they never reach JavaScript. The client
+// keeps only the non-sensitive expiry for UX and the user profile for display.
 type authResponse struct {
-	AccessToken  string          `json:"access_token"`
-	RefreshToken string          `json:"refresh_token"`
-	ExpiresIn    int             `json:"expires_in_seconds"`
-	User         models.SafeUser `json:"user"`
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/v1/auth/register
-// ─────────────────────────────────────────────────────────────────────────────
-
-func (h *AuthHandler) Register(c *gin.Context) {
-	var req registerRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "invalid_request", "message": err.Error(),
-		})
-		return
-	}
-
-	// ── Input validation ─────────────────────────────────────────────────────
-	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
-	req.FullName = strings.TrimSpace(req.FullName)
-
-	if validationErrs := validateRegistration(req); len(validationErrs) > 0 {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{
-			"error":  "validation_failed",
-			"fields": validationErrs,
-		})
-		return
-	}
-
-	// ── Hash password ─────────────────────────────────────────────────────────
-	hash, err := auth.HashPassword(req.Password, h.cfg.BcryptCost)
-	if err != nil {
-		c.Error(err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "internal_error", "message": "registration failed, please try again",
-		})
-		return
-	}
-
-	// ── Persist user ──────────────────────────────────────────────────────────
-	user, err := h.userRepo.CreateUser(c.Request.Context(), repository.CreateUserParams{
-		FullName:     req.FullName,
-		Email:        req.Email,
-		Phone:        "",
-		PasswordHash: hash,
-		Role:         models.RolePlayer, // all self-registrations are 'player'
-	})
-	if err != nil {
-		if errors.Is(err, repository.ErrEmailTaken) {
-			// Use a generic message — do not confirm the email exists
-			c.JSON(http.StatusConflict, gin.H{
-				"error":   "registration_failed",
-				"message": "an account with that email address already exists",
-			})
-			return
-		}
-		c.Error(err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "internal_error", "message": "registration failed, please try again",
-		})
-		return
-	}
-
-	// ── Issue tokens (auto-login on registration) ─────────────────────────────
-	resp, err := h.issueTokenPair(c, user)
-	if err != nil {
-		return // issueTokenPair writes the error response
-	}
-
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "account created successfully",
-		"data":    resp,
-	})
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// POST /api/v1/auth/login
-// ─────────────────────────────────────────────────────────────────────────────
-
-func (h *AuthHandler) Login(c *gin.Context) {
-	var req loginRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "invalid_request", "message": err.Error(),
-		})
-		return
-	}
-
-	req.Email = strings.ToLower(strings.TrimSpace(req.Email))
-
-	// ── Attempt to find user ──────────────────────────────────────────────────
-	user, err := h.userRepo.FindByEmail(c.Request.Context(), req.Email)
-	if err != nil {
-		if errors.Is(err, repository.ErrUserNotFound) {
-			// User not found — run dummy bcrypt to prevent timing-based
-			// email enumeration. An attacker timing this endpoint would see
-			// the same ~300ms latency whether or not the email exists.
-			auth.DummyVerify()
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"error": "invalid_credentials", "message": "invalid email or password",
-			})
-			return
-		}
-		c.Error(err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "internal_error", "message": "login failed, please try again",
-		})
-		return
-	}
-
-	// ── Verify password ───────────────────────────────────────────────────────
-	if err := auth.VerifyPassword(user.PasswordHash, req.Password); err != nil {
-		// Same message as "not found" — prevents distinguishing the two cases
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error": "invalid_credentials", "message": "invalid email or password",
-		})
-		return
-	}
-
-	// ── Issue tokens ──────────────────────────────────────────────────────────
-	resp, err := h.issueTokenPair(c, user)
-	if err != nil {
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "login successful",
-		"data":    resp,
-	})
+	ExpiresIn int             `json:"expires_in_seconds"`
+	User      models.SafeUser `json:"user"`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/v1/auth/refresh
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Refresh validates a presented refresh token, revokes it (one-time use),
-// and issues a fresh access + refresh token pair.
+// Refresh validates the presented refresh token (read from its httpOnly
+// cookie), revokes it (one-time use), and issues a fresh access + refresh pair.
 func (h *AuthHandler) Refresh(c *gin.Context) {
-	var req refreshRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error": "invalid_request", "message": err.Error(),
+	// The refresh token rides in an httpOnly cookie set at sign-in — never the
+	// request body, so it stays out of JavaScript's reach.
+	rawRefresh, err := c.Cookie(cookieRefresh)
+	if err != nil || rawRefresh == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "invalid_token", "message": "refresh token is missing",
 		})
 		return
 	}
 
-	tokenHash := auth.HashRefreshToken(req.RefreshToken)
+	tokenHash := auth.HashRefreshToken(rawRefresh)
 
 	user, err := h.userRepo.FindAndConsumeRefreshToken(c.Request.Context(), tokenHash)
 	if err != nil {
 		if errors.Is(err, repository.ErrRefreshTokenInvalid) {
+			// Stale/replayed token: scrub the cookies so the browser stops
+			// presenting a dead session.
+			clearSessionCookies(c, h.cfg)
 			c.JSON(http.StatusUnauthorized, gin.H{
 				"error":   "invalid_token",
 				"message": "refresh token is invalid or has expired",
@@ -224,7 +81,7 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 
 	resp, err := h.issueTokenPair(c, user)
 	if err != nil {
-		return
+		return // issueTokenPair writes the error response
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -237,9 +94,9 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 // POST /api/v1/auth/logout
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Logout revokes all refresh tokens for the authenticated user.
-// The access token will expire naturally — implement a token denylist
-// (e.g., Redis) if immediate access token invalidation is required.
+// Logout revokes all refresh tokens for the authenticated user and clears the
+// session cookies. The access token will expire naturally — implement a token
+// denylist if immediate access-token invalidation is required.
 func (h *AuthHandler) Logout(c *gin.Context) {
 	userID := c.GetInt("malaab.user_id")
 
@@ -251,6 +108,9 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 		return
 	}
 
+	// Expire the session cookies so the browser is left clean.
+	clearSessionCookies(c, h.cfg)
+
 	c.JSON(http.StatusOK, gin.H{"message": "logged out successfully"})
 }
 
@@ -258,9 +118,10 @@ func (h *AuthHandler) Logout(c *gin.Context) {
 // Private helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
-// issueTokenPair generates both an access and refresh token for a user,
-// persists the refresh token hash, and returns the full auth response.
-// On any error it writes the HTTP response itself and returns a non-nil error.
+// issueTokenPair generates an access token, generates + persists a refresh
+// token, mints a CSRF token, delivers all three as cookies, and returns the
+// token-free auth response. On any error it writes the HTTP response itself and
+// returns a non-nil error.
 func (h *AuthHandler) issueTokenPair(c *gin.Context, user *models.User) (*authResponse, error) {
 	accessToken, err := h.jwtManager.GenerateAccessToken(user.ID, string(user.Role))
 	if err != nil {
@@ -280,6 +141,15 @@ func (h *AuthHandler) issueTokenPair(c *gin.Context, user *models.User) (*authRe
 		return nil, err
 	}
 
+	csrfToken, err := newCSRFToken()
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "internal_error", "message": "could not establish a secure session",
+		})
+		return nil, err
+	}
+
 	refreshExpiresAt := time.Now().Add(h.cfg.JWT.RefreshExpiry)
 	if err = h.userRepo.StoreRefreshToken(
 		c.Request.Context(), user.ID, refreshHash, refreshExpiresAt,
@@ -291,58 +161,12 @@ func (h *AuthHandler) issueTokenPair(c *gin.Context, user *models.User) (*authRe
 		return nil, err
 	}
 
+	// Deliver the JWTs as httpOnly cookies plus the readable CSRF token; the
+	// response body carries no token.
+	issueSessionCookies(c, h.cfg, accessToken, rawRefresh, csrfToken, string(user.Role))
+
 	return &authResponse{
-		AccessToken:  accessToken,
-		RefreshToken: rawRefresh,
-		ExpiresIn:    int(h.cfg.JWT.AccessExpiry.Seconds()),
-		User:         user.Safe(),
+		ExpiresIn: int(h.cfg.JWT.AccessExpiry.Seconds()),
+		User:      user.Safe(),
 	}, nil
-}
-
-// validateRegistration returns a map of field → error message for invalid inputs.
-// Returning all errors at once gives clients a better UX than fail-on-first.
-func validateRegistration(req registerRequest) map[string]string {
-	errs := make(map[string]string)
-
-	if len(req.FullName) < 2 || len(req.FullName) > 100 {
-		errs["full_name"] = "must be between 2 and 100 characters"
-	}
-
-	if !emailRegex.MatchString(req.Email) {
-		errs["email"] = "must be a valid email address"
-	}
-
-	if pwErr := validatePassword(req.Password); pwErr != "" {
-		errs["password"] = pwErr
-	}
-
-	return errs
-}
-
-// validatePassword enforces password complexity.
-// Minimum: 8 characters, 1 uppercase, 1 lowercase, 1 digit.
-func validatePassword(pw string) string {
-	if len(pw) < 8 {
-		return "must be at least 8 characters"
-	}
-	if len(pw) > 128 {
-		return "must not exceed 128 characters"
-	}
-
-	var hasUpper, hasLower, hasDigit bool
-	for _, ch := range pw {
-		switch {
-		case unicode.IsUpper(ch):
-			hasUpper = true
-		case unicode.IsLower(ch):
-			hasLower = true
-		case unicode.IsDigit(ch):
-			hasDigit = true
-		}
-	}
-
-	if !hasUpper || !hasLower || !hasDigit {
-		return "must contain at least one uppercase letter, one lowercase letter, and one digit"
-	}
-	return ""
 }

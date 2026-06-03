@@ -1,68 +1,84 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useState,
+  useEffect,
+  useCallback,
+  type ReactNode,
+} from 'react';
 import api from '@/lib/api';
 
-interface User {
+export interface User {
   id: number;
   full_name: string;
   email: string;
+  phone?: string;
   role: 'player' | 'owner' | 'admin';
 }
 
 interface AuthContextType {
   user: User | null;
-  accessToken: string | null;
   isAuthenticated: boolean;
   isLoading: boolean;
-  login: (data: any) => void;
+  // login is called after a successful auth response. The backend has already
+  // set the httpOnly session cookies; we only adopt the returned profile into
+  // in-memory state. No token is ever stored client-side.
+  login: (user: User) => void;
   logout: () => Promise<void>;
+  // refreshUser re-fetches the current profile from /auth/me (e.g. after a
+  // profile edit). It is also how the session is rehydrated on first load.
+  refreshUser: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [user, setUser] = useState<User | null>(null);
-  const [accessToken, setAccessToken] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    const token = localStorage.getItem('accessToken');
-    const storedUser = localStorage.getItem('user');
-    if (token && storedUser) {
-      setAccessToken(token);
-      setUser(JSON.parse(storedUser));
+  const refreshUser = useCallback(async () => {
+    try {
+      // Ask the server who we are; the httpOnly access cookie authenticates us.
+      // _silent so a logged-out visitor on a public page is not redirected.
+      const { data } = await api.get<{ data: User }>('/auth/me', { _silent: true });
+      setUser(data.data);
+    } catch {
+      setUser(null);
     }
-    setIsLoading(false);
   }, []);
 
-  const login = (authData: any) => {
-    const { access_token, refresh_token, user: userData } = authData;
-    localStorage.setItem('accessToken', access_token);
-    localStorage.setItem('refreshToken', refresh_token);
-    localStorage.setItem('user', JSON.stringify(userData));
-    // Lightweight role cookie so Next.js edge middleware can guard /dashboard
-    // without touching the JWT. The real role is enforced by the backend JWT.
-    document.cookie = `malaab_role=${userData.role}; path=/; max-age=${60 * 60 * 24 * 7}; SameSite=Lax`;
-    setAccessToken(access_token);
-    setUser(userData);
-  };
+  useEffect(() => {
+    // Rehydrate the session on first mount. There is no token to read from
+    // storage anymore — we recover identity from the cookie via /auth/me.
+    (async () => {
+      await refreshUser();
+      setIsLoading(false);
+    })();
+  }, [refreshUser]);
 
-  const logout = async () => {
-    try { await api.post('/auth/logout'); } catch (err) {}
-    finally {
-      localStorage.removeItem('accessToken');
-      localStorage.removeItem('refreshToken');
-      localStorage.removeItem('user');
-      document.cookie = 'malaab_role=; path=/; max-age=0';
+  const login = useCallback((u: User) => {
+    setUser(u);
+  }, []);
+
+  const logout = useCallback(async () => {
+    try {
+      await api.post('/auth/logout'); // clears the httpOnly cookies server-side
+    } catch {
+      // ignore — we still clear local state below
+    } finally {
       setUser(null);
-      setAccessToken(null);
-      window.location.href = '/login';
+      if (typeof window !== 'undefined') {
+        window.location.href = '/login';
+      }
     }
-  };
+  }, []);
 
   return (
-    <AuthContext.Provider value={{ user, accessToken, isAuthenticated: !!user, isLoading, login, logout }}>
+    <AuthContext.Provider
+      value={{ user, isAuthenticated: !!user, isLoading, login, logout, refreshUser }}
+    >
       {children}
     </AuthContext.Provider>
   );

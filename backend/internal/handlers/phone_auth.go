@@ -20,9 +20,11 @@ import (
 
 	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/config"
+	"github.com/ali/football-pitch-api/internal/middleware"
 	"github.com/ali/football-pitch-api/internal/models"
 	"github.com/ali/football-pitch-api/internal/notification"
 	"github.com/ali/football-pitch-api/internal/otp"
+	"github.com/ali/football-pitch-api/internal/repository"
 )
 
 // e164Regex mirrors the users_phone_e164_chk DB constraint: a leading '+', a
@@ -40,6 +42,9 @@ type PhoneAuthStore interface {
 	SetOptIn(ctx context.Context, phone string, optIn bool) error
 	EnsureVerifiedUser(ctx context.Context, phone string) (*models.User, error)
 	StoreRefreshToken(ctx context.Context, userID int, tokenHash string, expiresAt time.Time) error
+	// FindByID loads the user behind the current session cookie, backing
+	// GET /auth/me so the client can rehydrate without ever reading a token.
+	FindByID(ctx context.Context, userID int) (*models.User, error)
 }
 
 // PhoneAuthHandler serves the OTP request/verify endpoints.
@@ -185,6 +190,41 @@ func (h *PhoneAuthHandler) VerifyOTP(c *gin.Context) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GET /api/v1/auth/me
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GetCurrentUser returns the authenticated user's profile. RequireAuth resolves
+// the session from the httpOnly access cookie and injects the user id; this
+// endpoint lets the client rehydrate its in-memory user on page load without
+// ever holding a token itself.
+func (h *PhoneAuthHandler) GetCurrentUser(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized", "message": "authentication is required",
+		})
+		return
+	}
+
+	user, err := h.store.FindByID(c.Request.Context(), userID)
+	if err != nil {
+		if errors.Is(err, repository.ErrUserNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "user_not_found", "message": "no user exists for this session",
+			})
+			return
+		}
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "internal_error", "message": "could not load your profile, please try again",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": user.Safe()})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Private helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -210,6 +250,15 @@ func (h *PhoneAuthHandler) issueTokenPair(c *gin.Context, user *models.User) (*a
 		return nil, err
 	}
 
+	csrfToken, err := newCSRFToken()
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "internal_error", "message": "could not establish a secure session",
+		})
+		return nil, err
+	}
+
 	refreshExpiresAt := time.Now().Add(h.cfg.JWT.RefreshExpiry)
 	if err = h.store.StoreRefreshToken(c.Request.Context(), user.ID, refreshHash, refreshExpiresAt); err != nil {
 		c.Error(err)
@@ -219,11 +268,13 @@ func (h *PhoneAuthHandler) issueTokenPair(c *gin.Context, user *models.User) (*a
 		return nil, err
 	}
 
+	// Deliver the JWTs as httpOnly cookies plus the readable CSRF token; the
+	// response body carries no token.
+	issueSessionCookies(c, h.cfg, accessToken, rawRefresh, csrfToken, string(user.Role))
+
 	return &authResponse{
-		AccessToken:  accessToken,
-		RefreshToken: rawRefresh,
-		ExpiresIn:    int(h.cfg.JWT.AccessExpiry.Seconds()),
-		User:         user.Safe(),
+		ExpiresIn: int(h.cfg.JWT.AccessExpiry.Seconds()),
+		User:      user.Safe(),
 	}, nil
 }
 

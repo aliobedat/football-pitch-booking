@@ -91,7 +91,7 @@ func sampleHandlerBooking() *models.Booking {
 	return &models.Booking{
 		ID:         42,
 		PitchID:    7,
-		UserID:     3,
+		PlayerID:   3,
 		StartTime:  start,
 		EndTime:    start.Add(time.Hour),
 		Status:     models.StatusConfirmed,
@@ -116,7 +116,7 @@ func validCreateBody() map[string]any {
 // CreateBooking
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestCreateBooking_RoutesThroughServiceAndStampsUserID(t *testing.T) {
+func TestCreateBooking_RoutesThroughServiceAndStampsPlayerID(t *testing.T) {
 	svc := &fakeBookingService{booking: sampleHandlerBooking()}
 	h := &BookingHandler{service: svc}
 	r := newBookingRouter(h, 3, "player")
@@ -130,8 +130,8 @@ func TestCreateBooking_RoutesThroughServiceAndStampsUserID(t *testing.T) {
 		t.Fatalf("service.Create called %d times, want 1", svc.createCalls)
 	}
 	// The authenticated user id from the token must be stamped onto the request.
-	if svc.lastCreateReq.UserID != 3 {
-		t.Errorf("create req UserID = %d, want 3", svc.lastCreateReq.UserID)
+	if svc.lastCreateReq.PlayerID != 3 {
+		t.Errorf("create req PlayerID = %d, want 3", svc.lastCreateReq.PlayerID)
 	}
 	if svc.lastCreateReq.PitchID != 7 {
 		t.Errorf("create req PitchID = %d, want 7", svc.lastCreateReq.PitchID)

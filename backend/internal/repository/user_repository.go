@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ali/football-pitch-api/internal/models"
@@ -19,45 +17,30 @@ import (
 // ─────────────────────────────────────────────────────────────────────────────
 
 var (
-	ErrUserNotFound      = errors.New("user: not found")
-	ErrEmailTaken        = errors.New("user: email address is already registered")
+	ErrUserNotFound        = errors.New("user: not found")
 	ErrRefreshTokenInvalid = errors.New("user: refresh token is invalid or expired")
 )
-
-const pgUniqueViolation = "23505"
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Interface
 // ─────────────────────────────────────────────────────────────────────────────
 
+// UserRepository owns the refresh-token lifecycle shared by every session,
+// regardless of how it was established. Email/password identity has been removed
+// (phone-first OTP is the sole login); what remains here is token storage,
+// one-time consumption (rotation), and bulk revocation.
 type UserRepository interface {
-	// FindByEmail returns the full user row including password_hash.
-	// Used exclusively by the login flow — never exposed in responses.
-	FindByEmail(ctx context.Context, email string) (*models.User, error)
-
-	// CreateUser inserts a new user and returns the safe public record.
-	CreateUser(ctx context.Context, params CreateUserParams) (*models.User, error)
-
 	// StoreRefreshToken persists the SHA-256 hash of a new refresh token.
 	StoreRefreshToken(ctx context.Context, userID int, tokenHash string, expiresAt time.Time) error
 
 	// FindAndConsumeRefreshToken looks up a token hash, validates it is not
-	// expired or revoked, marks it as revoked (one-time use), and returns
-	// the associated user. All in a single transaction.
+	// expired or revoked, marks it as revoked (one-time use), and returns the
+	// associated user. All in a single transaction.
 	FindAndConsumeRefreshToken(ctx context.Context, tokenHash string) (*models.User, error)
 
 	// RevokeAllUserRefreshTokens invalidates every active refresh token for a
-	// user — used on logout-all-devices or after a password change.
+	// user — used on logout.
 	RevokeAllUserRefreshTokens(ctx context.Context, userID int) error
-}
-
-// CreateUserParams carries validated data for user creation.
-type CreateUserParams struct {
-	FullName     string
-	Email        string
-	Phone        string
-	PasswordHash string
-	Role         models.UserRole
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,68 +55,10 @@ func NewUserRepository(db *pgxpool.Pool) UserRepository {
 	return &userRepo{db: db}
 }
 
-// FindByEmail retrieves the full user record by email.
-// Email is normalised to lowercase before querying — matches the storage format.
-func (r *userRepo) FindByEmail(ctx context.Context, email string) (*models.User, error) {
-	var u models.User
-
-	err := r.db.QueryRow(ctx, `
-		SELECT id, full_name, email, phone, password_hash, role, created_at, updated_at
-		FROM   users
-		WHERE  email = $1
-	`, strings.ToLower(strings.TrimSpace(email))).Scan(
-		&u.ID, &u.FullName, &u.Email, &u.Phone,
-		&u.PasswordHash, &u.Role,
-		&u.CreatedAt, &u.UpdatedAt,
-	)
-
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrUserNotFound
-		}
-		return nil, fmt.Errorf("FindByEmail: %w", err)
-	}
-
-	return &u, nil
-}
-
-// CreateUser inserts a new user within a transaction.
-// The email uniqueness constraint on the DB is the ultimate guard;
-// we translate the violation into a typed sentinel for the handler.
-func (r *userRepo) CreateUser(ctx context.Context, params CreateUserParams) (*models.User, error) {
-	var u models.User
-
-	err := r.db.QueryRow(ctx, `
-		INSERT INTO users (full_name, email, phone, password_hash, role)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, full_name, email, COALESCE(phone,''), password_hash, role, created_at, updated_at
-	`,
-		params.FullName,
-		strings.ToLower(strings.TrimSpace(params.Email)), // normalise on write
-		params.Phone,
-		params.PasswordHash,
-		string(params.Role),
-	).Scan(
-		&u.ID, &u.FullName, &u.Email, &u.Phone,
-		&u.PasswordHash, &u.Role,
-		&u.CreatedAt, &u.UpdatedAt,
-	)
-
-	if err != nil {
-		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
-			return nil, ErrEmailTaken
-		}
-		return nil, fmt.Errorf("CreateUser: %w", err)
-	}
-
-	return &u, nil
-}
-
 // StoreRefreshToken persists a hashed refresh token associated with a user.
 func (r *userRepo) StoreRefreshToken(
-	ctx       context.Context,
-	userID    int,
+	ctx context.Context,
+	userID int,
 	tokenHash string,
 	expiresAt time.Time,
 ) error {
@@ -141,7 +66,6 @@ func (r *userRepo) StoreRefreshToken(
 		INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
 		VALUES ($1, $2, $3)
 	`, userID, tokenHash, expiresAt)
-
 	if err != nil {
 		return fmt.Errorf("StoreRefreshToken: %w", err)
 	}
@@ -150,11 +74,11 @@ func (r *userRepo) StoreRefreshToken(
 
 // FindAndConsumeRefreshToken validates and atomically revokes a refresh token.
 //
-// Atomic revocation prevents refresh token replay attacks: if a token is
-// stolen and used by an attacker first, the legitimate user's subsequent
-// use will fail, alerting them to the compromise.
+// Atomic revocation prevents refresh token replay attacks: if a token is stolen
+// and used by an attacker first, the legitimate user's subsequent use will fail,
+// alerting them to the compromise.
 func (r *userRepo) FindAndConsumeRefreshToken(
-	ctx       context.Context,
+	ctx context.Context,
 	tokenHash string,
 ) (*models.User, error) {
 
@@ -164,10 +88,9 @@ func (r *userRepo) FindAndConsumeRefreshToken(
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// Lock the refresh token row and validate it in one query
+	// Lock the refresh token row and validate it in one query.
 	var tokenID int
 	var userID int
-
 	err = tx.QueryRow(ctx, `
 		SELECT id, user_id
 		FROM   refresh_tokens
@@ -176,7 +99,6 @@ func (r *userRepo) FindAndConsumeRefreshToken(
 		  AND  expires_at  > NOW()
 		FOR UPDATE
 	`, tokenHash).Scan(&tokenID, &userID)
-
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrRefreshTokenInvalid
@@ -184,7 +106,7 @@ func (r *userRepo) FindAndConsumeRefreshToken(
 		return nil, fmt.Errorf("FindAndConsumeRefreshToken: find token: %w", err)
 	}
 
-	// Revoke the token — one-time use enforced
+	// Revoke the token — one-time use enforced.
 	if _, err = tx.Exec(ctx,
 		`UPDATE refresh_tokens SET revoked = TRUE WHERE id = $1`,
 		tokenID,
@@ -192,16 +114,17 @@ func (r *userRepo) FindAndConsumeRefreshToken(
 		return nil, fmt.Errorf("FindAndConsumeRefreshToken: revoke: %w", err)
 	}
 
-	// Fetch the associated user
+	// Fetch the associated user. Nullable phone-first columns (full_name, email,
+	// phone) are COALESCEd so a NULL never breaks the Scan.
 	var u models.User
 	err = tx.QueryRow(ctx, `
-		SELECT id, full_name, email, COALESCE(phone,''), password_hash, role, created_at, updated_at
+		SELECT id, COALESCE(full_name,''), COALESCE(email,''), COALESCE(phone,''),
+		       role, created_at, updated_at
 		FROM   users
 		WHERE  id = $1
 	`, userID).Scan(
 		&u.ID, &u.FullName, &u.Email, &u.Phone,
-		&u.PasswordHash, &u.Role,
-		&u.CreatedAt, &u.UpdatedAt,
+		&u.Role, &u.CreatedAt, &u.UpdatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("FindAndConsumeRefreshToken: fetch user: %w", err)
@@ -215,7 +138,7 @@ func (r *userRepo) FindAndConsumeRefreshToken(
 }
 
 // RevokeAllUserRefreshTokens invalidates all active tokens for a user.
-// Call this on: logout-all-devices, password change, account suspension.
+// Call this on logout or account suspension.
 func (r *userRepo) RevokeAllUserRefreshTokens(ctx context.Context, userID int) error {
 	_, err := r.db.Exec(ctx, `
 		UPDATE refresh_tokens
@@ -223,7 +146,6 @@ func (r *userRepo) RevokeAllUserRefreshTokens(ctx context.Context, userID int) e
 		WHERE  user_id  = $1
 		  AND  revoked  = FALSE
 	`, userID)
-
 	if err != nil {
 		return fmt.Errorf("RevokeAllUserRefreshTokens: %w", err)
 	}

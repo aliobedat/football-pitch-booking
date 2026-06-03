@@ -55,8 +55,8 @@ func (h *BookingHandler) CreateBooking(c *gin.Context) {
 
 	userID := int64(middleware.GetUserID(c))
 	
-	// إضافة رقم المستخدم للطلب قبل ما نبعثه للداتا بيس
-	req.UserID = userID 
+	// إضافة رقم اللاعب للطلب قبل ما نبعثه للداتا بيس
+	req.PlayerID = userID
 
 	now := time.Now().UTC()
 

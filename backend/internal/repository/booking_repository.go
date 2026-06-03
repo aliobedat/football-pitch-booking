@@ -141,11 +141,11 @@ func (r *bookingRepo) CreateBooking(
 			total_price,
 			created_at
 	`,
-		req.PitchID, req.UserID,
+		req.PitchID, req.PlayerID,
 		req.StartTime.UTC(), req.EndTime.UTC(),
 		totalPrice,
 	).Scan(
-		&b.ID, &b.PitchID, &b.UserID,
+		&b.ID, &b.PitchID, &b.PlayerID,
 		&b.StartTime, &b.EndTime,
 		&b.Status, &b.TotalPrice,
 		&b.CreatedAt,
@@ -167,7 +167,7 @@ func (r *bookingRepo) CreateBooking(
 		INSERT INTO status_transitions
 			(booking_id, from_status, to_status, actor_id, actor_role, reason)
 		VALUES ($1, NULL, 'confirmed', $2, $3, $4)
-	`, b.ID, req.UserID, ActorPlayer, reasonBookingCreated); err != nil {
+	`, b.ID, req.PlayerID, ActorPlayer, reasonBookingCreated); err != nil {
 		return nil, fmt.Errorf("CreateBooking: record transition: %w", err)
 	}
 
@@ -246,7 +246,7 @@ func (r *bookingRepo) GetUserBookings(ctx context.Context, userID int64) ([]mode
 		var b models.Booking
 		if err := rows.Scan(
 			&b.ID, &b.PitchID, &b.PitchName,
-			&b.UserID, &b.StartTime, &b.EndTime,
+			&b.PlayerID, &b.StartTime, &b.EndTime,
 			&b.Status, &b.TotalPrice, &b.CreatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("GetUserBookings: scan: %w", err)
@@ -287,7 +287,7 @@ func (r *bookingRepo) GetAllBookings(ctx context.Context, ownerID int64) ([]mode
 		var b models.AdminBooking
 		if err := rows.Scan(
 			&b.ID, &b.PitchID, &b.PitchName,
-			&b.UserID, &b.UserName, &b.UserEmail,
+			&b.PlayerID, &b.UserName, &b.UserEmail,
 			&b.StartTime, &b.EndTime,
 			&b.Status, &b.TotalPrice, &b.CreatedAt,
 		); err != nil {
@@ -335,7 +335,7 @@ func (r *bookingRepo) UpdateBookingStatus(
 	`, bookingID, string(newStatus), allowed).Scan(
 		&b.ID,
 		&b.PitchID,
-		&b.UserID,
+		&b.PlayerID,
 		&b.StartTime,
 		&b.EndTime,
 		&b.Status,
@@ -403,7 +403,7 @@ func (r *bookingRepo) CancelBooking(
 			total_price,
 			created_at
 	`, p.BookingID).Scan(
-		&b.ID, &b.PitchID, &b.UserID,
+		&b.ID, &b.PitchID, &b.PlayerID,
 		&b.StartTime, &b.EndTime,
 		&b.Status, &b.TotalPrice,
 		&b.CreatedAt,

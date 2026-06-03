@@ -18,7 +18,7 @@ interface Booking {
   id: number;
   pitch_id: number;
   pitch_name: string;
-  user_id: number;
+  player_id: number;
   start_time: string;
   end_time: string;
   status: BookingStatus;
