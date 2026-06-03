@@ -38,7 +38,7 @@ func newTestWorker(store Store, sender Sender, now time.Time) (*Worker, *memDeli
 
 func TestWorker_Success(t *testing.T) {
 	now := time.Now()
-	store := newMemStore()
+	store := newMemStore(withMemClock(fixedClock(now)))
 	id, _ := store.Enqueue(context.Background(), NewJob{
 		Recipient: testRecipient, Kind: "booking_confirmed", Envelope: validEnvelope(t), MaxAttempts: 3,
 	})
@@ -70,7 +70,7 @@ func TestWorker_Success(t *testing.T) {
 
 func TestWorker_TransientFailure_Reschedules(t *testing.T) {
 	now := time.Now()
-	store := newMemStore()
+	store := newMemStore(withMemClock(fixedClock(now)))
 	id, _ := store.Enqueue(context.Background(), NewJob{
 		Recipient: testRecipient, Kind: "booking_confirmed", Envelope: validEnvelope(t), MaxAttempts: 3,
 	})
@@ -104,7 +104,7 @@ func TestWorker_TransientFailure_Reschedules(t *testing.T) {
 
 func TestWorker_ExhaustedAttempts_DeadLetters(t *testing.T) {
 	now := time.Now()
-	store := newMemStore()
+	store := newMemStore(withMemClock(fixedClock(now)))
 	// MaxAttempts=1: the single claim bumps attempts to 1 (== max), so a failure
 	// has no budget left and must dead-letter rather than reschedule.
 	id, _ := store.Enqueue(context.Background(), NewJob{
@@ -128,7 +128,7 @@ func TestWorker_ExhaustedAttempts_DeadLetters(t *testing.T) {
 
 func TestWorker_OptedOut_Blocks_NoAlert(t *testing.T) {
 	now := time.Now()
-	store := newMemStore()
+	store := newMemStore(withMemClock(fixedClock(now)))
 	id, _ := store.Enqueue(context.Background(), NewJob{
 		Recipient: testRecipient, Kind: "booking_confirmed", Envelope: validEnvelope(t), MaxAttempts: 3,
 	})
@@ -155,7 +155,7 @@ func TestWorker_OptedOut_Blocks_NoAlert(t *testing.T) {
 
 func TestWorker_UnknownChannel_DeadLettersImmediately(t *testing.T) {
 	now := time.Now()
-	store := newMemStore()
+	store := newMemStore(withMemClock(fixedClock(now)))
 	// MaxAttempts is generous, but an unregistered channel is a deployment fault
 	// that can never self-heal per-recipient → dead-letter at once, no retries.
 	id, _ := store.Enqueue(context.Background(), NewJob{
@@ -182,7 +182,7 @@ func TestWorker_UnknownChannel_DeadLettersImmediately(t *testing.T) {
 
 func TestWorker_UndecodableEnvelope_Blocks(t *testing.T) {
 	now := time.Now()
-	store := newMemStore()
+	store := newMemStore(withMemClock(fixedClock(now)))
 	id, _ := store.Enqueue(context.Background(), NewJob{
 		Recipient: testRecipient, Kind: "booking_confirmed", Envelope: []byte("}{not json"), MaxAttempts: 3,
 	})
@@ -204,7 +204,7 @@ func TestWorker_UndecodableEnvelope_Blocks(t *testing.T) {
 
 func TestWorker_SkipsJobsNotYetDue(t *testing.T) {
 	now := time.Now()
-	store := newMemStore()
+	store := newMemStore(withMemClock(fixedClock(now)))
 	// Available one hour in the future — ClaimDue must not pick it up yet.
 	store.Enqueue(context.Background(), NewJob{
 		Recipient: testRecipient, Kind: "booking_confirmed", Envelope: validEnvelope(t),

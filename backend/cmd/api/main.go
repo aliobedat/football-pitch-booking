@@ -132,12 +132,27 @@ func main() {
 	bookingNotifier := outbox.NewEnqueuer(outboxStore)
 	bookingSvc := booking.NewService(bookingRepo, bookingNotifier)
 
-	// Drain the outbox in the background until shutdown cancels workerCtx.
+	// ── Automated 24-hour reminder worker (PART 7) ────────────────────────────
+	// A background runner periodically claims confirmed bookings starting within
+	// the next 24h that have not been reminded (SELECT ... FOR UPDATE SKIP LOCKED,
+	// safe for future horizontal scaling), marks each reminded, and enqueues a
+	// durable booking_reminder onto the SAME outbox — so the existing worker above
+	// delivers it through the unchanged gates and active channel.
+	reminderRepo := repository.NewReminderRepository(pool)
+	reminderWorker := booking.NewReminderWorker(reminderRepo, booking.ReminderConfig{})
+
+	// Drain the outbox and scan for reminders in the background until shutdown
+	// cancels workerCtx.
 	workerCtx, stopWorker := context.WithCancel(context.Background())
 	defer stopWorker()
 	go func() {
 		if err := outboxWorker.Run(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("[OUTBOX] worker exited: %v", err)
+		}
+	}()
+	go func() {
+		if err := reminderWorker.Run(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("[REMINDER] worker exited: %v", err)
 		}
 	}()
 

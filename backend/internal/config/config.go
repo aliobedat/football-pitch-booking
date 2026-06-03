@@ -46,6 +46,7 @@ type WhatsAppTemplates struct {
 	OTP              string // WHATSAPP_OTP_TEMPLATE — AUTHENTICATION-category template
 	BookingConfirmed string // WHATSAPP_BOOKING_CONFIRMED_TEMPLATE — UTILITY-category template
 	BookingCancelled string // WHATSAPP_BOOKING_CANCELLED_TEMPLATE — UTILITY-category template
+	BookingReminder  string // WHATSAPP_BOOKING_REMINDER_TEMPLATE — UTILITY-category template (PART 7)
 }
 
 // OTPConfig holds the configuration for the phone-first OTP flow.
@@ -153,6 +154,7 @@ func loadWhatsAppConfig() WhatsAppConfig {
 			OTP:              getEnv("WHATSAPP_OTP_TEMPLATE", ""),
 			BookingConfirmed: getEnv("WHATSAPP_BOOKING_CONFIRMED_TEMPLATE", ""),
 			BookingCancelled: getEnv("WHATSAPP_BOOKING_CANCELLED_TEMPLATE", ""),
+			BookingReminder:  getEnv("WHATSAPP_BOOKING_REMINDER_TEMPLATE", ""),
 		},
 	}
 }

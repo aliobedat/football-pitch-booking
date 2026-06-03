@@ -10,7 +10,7 @@ import (
 // accepts every kind, records it, and returns a successful result with a
 // prefixed provider id — never an error.
 func TestSmsChannel_AlwaysSucceeds(t *testing.T) {
-	kinds := []MessageKind{KindOTP, KindBookingConfirmed, KindBookingRejected, KindBookingCancelled}
+	kinds := []MessageKind{KindOTP, KindBookingConfirmed, KindBookingRejected, KindBookingCancelled, KindBookingReminder}
 	sms := NewSmsChannel(SmsSilent())
 
 	for _, kind := range kinds {
@@ -29,8 +29,8 @@ func TestSmsChannel_AlwaysSucceeds(t *testing.T) {
 	if sms.Count() != len(kinds) {
 		t.Errorf("Count = %d, want %d", sms.Count(), len(kinds))
 	}
-	if last, ok := sms.Last(); !ok || last.Kind != KindBookingCancelled {
-		t.Errorf("Last = (%v, %v), want last cancelled message", last.Kind, ok)
+	if last, ok := sms.Last(); !ok || last.Kind != KindBookingReminder {
+		t.Errorf("Last = (%v, %v), want last reminder message", last.Kind, ok)
 	}
 
 	sms.Reset()

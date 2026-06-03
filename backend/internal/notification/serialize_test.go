@@ -19,6 +19,7 @@ func TestMarshalUnmarshalOutbound_RoundTrip(t *testing.T) {
 		{Recipient: recipient, Kind: KindBookingConfirmed, Payload: BookingConfirmedPayload{BookingID: 1, PitchName: "Pitch A", StartTime: start, EndTime: end}},
 		{Recipient: recipient, Kind: KindBookingRejected, Payload: BookingRejectedPayload{BookingID: 2, PitchName: "Pitch B", StartTime: start, EndTime: end, Reason: "slot taken"}},
 		{Recipient: recipient, Kind: KindBookingCancelled, Payload: BookingCancelledPayload{BookingID: 3, PitchName: "Pitch C", StartTime: start, EndTime: end, Reason: "owner cancelled"}},
+		{Recipient: recipient, Kind: KindBookingReminder, Payload: BookingReminderPayload{BookingID: 4, PitchName: "Pitch D", StartTime: start, EndTime: end}},
 	}
 
 	for _, want := range cases {

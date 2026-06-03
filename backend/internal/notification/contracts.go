@@ -26,6 +26,11 @@ const (
 	KindBookingConfirmed MessageKind = "booking_confirmed"
 	KindBookingRejected  MessageKind = "booking_rejected"
 	KindBookingCancelled MessageKind = "booking_cancelled"
+	// KindBookingReminder is the automated 24h-ahead reminder for a confirmed
+	// booking (PART 7). Like the other booking events it is a UTILITY-category
+	// template, not an AUTHENTICATION message, so it is NOT subject to the
+	// opt-in gate (only the opt-out gate blocks it).
+	KindBookingReminder MessageKind = "booking_reminder"
 )
 
 // DeliveryStatus is the outcome a channel reports for a single send attempt.
@@ -93,6 +98,19 @@ type BookingCancelledPayload struct {
 
 // Kind reports the message kind this payload belongs to.
 func (BookingCancelledPayload) Kind() MessageKind { return KindBookingCancelled }
+
+// BookingReminderPayload describes the automated 24h-ahead reminder for a
+// confirmed booking (PART 7). It carries the same booking coordinates as the
+// confirmation so the reminder template can echo the pitch and time slot.
+type BookingReminderPayload struct {
+	BookingID int64
+	PitchName string
+	StartTime time.Time
+	EndTime   time.Time
+}
+
+// Kind reports the message kind this payload belongs to.
+func (BookingReminderPayload) Kind() MessageKind { return KindBookingReminder }
 
 // OutboundMessage is a single channel-agnostic message handed to a channel for
 // delivery. Recipient is always an E.164 phone number (e.g. +9627XXXXXXXX);
