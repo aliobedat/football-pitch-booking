@@ -13,7 +13,7 @@ The audit that produced the first version of this document flagged three conflic
 | # | Original conflict | Resolution |
 |---|-------------------|-----------|
 | 1 | JWTs stored in `localStorage` (CLAUDE.md required httpOnly cookies) | **Cookies.** Access + refresh JWTs are now delivered ONLY as httpOnly cookies (`malaab_access`, `malaab_refresh`). No token ever reaches JavaScript. localStorage token storage is gone. |
-| 2 | No CSRF protection anywhere | **Implemented.** Double-submit-cookie CSRF (`malaab_csrf` readable cookie + `X-CSRF-Token` header), enforced by `middleware.RequireCSRF` on cookie-authenticated unsafe methods. SameSite=Strict on all session cookies as a second layer. |
+| 2 | No CSRF protection anywhere | **Implemented.** Double-submit-cookie CSRF (`malaab_csrf` readable cookie + `X-CSRF-Token` header), enforced by `middleware.RequireCSRF` on cookie-authenticated unsafe methods. (Was `SameSite=Strict` as a second layer; the decoupled Vercel/Railway deploy now requires `SameSite=None` in prod, so the double-submit token is the sole cross-site CSRF defence — see §2 cookie policy.) |
 | 3 | CLAUDE.md product text said admin "confirms/rejects" bookings, but code auto-confirms | **Code is authoritative.** Instant booking (auto-`confirmed`, no pending step) is the locked decision per Architecture Principle 3. The CLAUDE.md product blurb is the stale text, not the code. |
 
 **The legacy email/password auth path has also been removed** (Step C). Phone-first OTP is now the sole login method, matching Architecture Principle 1.
@@ -24,7 +24,7 @@ The audit that produced the first version of this document flagged three conflic
 
 - `go.mod` declares `go 1.26.3` — verify the actual installed Go toolchain; this looks like a typo from the original scaffold.
 - `booking_status` enum still includes `rejected`, `completed`, `no_show` — none of these transitions are wired in any handler or service. Wire them or drop them from the enum.
-- `lib/api.ts` `isAuthEndpoint()` still lists `/auth/login` — harmless dead reference now that email login is gone; remove on next frontend touch.
+- ~~`lib/api.ts` `isAuthEndpoint()` still lists `/auth/login`~~ **Removed** (Frontend PART 2 cleanup) — email login is gone.
 
 ---
 
@@ -102,7 +102,7 @@ handlers   handlers   handlers
 - Sign-in (OTP verify) and refresh both call `issueTokenPair`, which mints access + refresh JWTs and a CSRF token and sets them via `issueSessionCookies` (`handlers/cookies.go`).
 - `malaab_access` / `malaab_refresh` are **httpOnly** (never readable by JS). `malaab_role`, `malaab_expiry`, `malaab_csrf` are readable companions (non-secret) for UX, the Next.js edge guard, and the CSRF echo.
 - `malaab_refresh` is path-scoped to `/api/v1/auth` so the long-lived secret isn't sent on every request.
-- Cookies are `Secure` only when `APP_ENV=production`; `SameSite=Strict` always.
+- Cookie `SameSite`/`Secure` are environment-derived via `cookieSecurity(cfg)` in `handlers/cookies.go`: **production → `SameSite=None` + `Secure=true`** (required so the cookies ride cross-site from the Vercel frontend to the Railway backend; `None` mandates `Secure`, satisfied by Railway TLS); **dev/local → `SameSite=Lax` + `Secure=false`** (localhost:3000→8080 is same-site, and plain-HTTP dev would otherwise drop `Secure` cookies). Because production no longer gets the `SameSite=Strict` transport-layer backstop, **cross-site CSRF defence relies purely on the double-submit token** (`malaab_csrf` cookie ↔ `X-CSRF-Token` header, enforced by `middleware.RequireCSRF`). `X-CSRF-Token` is in the backend CORS `AllowHeaders` so the header survives the cross-origin preflight.
 - `RequireAuth` reads the access token from the cookie first, then falls back to `Authorization: Bearer` for programmatic/test clients.
 
 **Frontend → Backend:** `NEXT_PUBLIC_API_URL` (default `http://localhost:8080/api/v1`). Axios uses `withCredentials: true`; a request interceptor echoes `malaab_csrf` into `X-CSRF-Token` on POST/PUT/PATCH/DELETE. A single-flight response interceptor calls `/auth/refresh` once on 401 and retries. `AuthContext` holds only the in-memory user, rehydrated on load via `GET /auth/me`.
@@ -275,7 +275,7 @@ CSRF: state-changing cookie-authenticated requests must send `X-CSRF-Token` equa
 
 **Phone-first OTP is the SOLE login.** `EnsureVerifiedUser` upserts a user row keyed by phone on successful OTP verify. Email/password auth was removed in Step C; `email` remains as an optional secondary identifier only.
 
-**httpOnly-cookie sessions (LOCKED — was the #1 conflict).** Access + refresh JWTs are delivered only as httpOnly cookies and never appear in a response body or in JavaScript. `handlers/cookies.go` owns all cookie plumbing. Do NOT reintroduce localStorage token storage. Cookie `Secure` flag is gated on `APP_ENV=production`.
+**httpOnly-cookie sessions (LOCKED — was the #1 conflict).** Access + refresh JWTs are delivered only as httpOnly cookies and never appear in a response body or in JavaScript. `handlers/cookies.go` owns all cookie plumbing. Do NOT reintroduce localStorage token storage. Cookie `SameSite`/`Secure` are environment-derived via `cookieSecurity(cfg)`: prod → `None`+`Secure` (cross-site Vercel↔Railway); dev → `Lax`+insecure. With `SameSite=None` in prod, the double-submit CSRF token is the sole cross-site CSRF defence.
 
 **CSRF double-submit (LOCKED — was the #2 conflict).** `middleware.RequireCSRF` (constant-time compare of `malaab_csrf` cookie vs. `X-CSRF-Token` header). Exempt: safe methods and Bearer-authenticated requests. Applied to the whole protected group and explicitly to `/auth/refresh` (which lives outside that group). The frontend interceptor in `lib/api.ts` echoes the cookie automatically.
 
@@ -317,7 +317,7 @@ CSRF: state-changing cookie-authenticated requests must send `X-CSRF-Token` equa
 - **`booking_status` enum** has `rejected`, `completed`, `no_show` with no code path. Dead weight or future work.
 - **`data/` vs `repository/` packages:** pitches still use the older `data.PitchModel` pattern; bookings now use `repository.BookingRepository` (the legacy `data/bookings.go` was deleted in Step C). Pitches are the remaining inconsistency to migrate.
 - **`go.mod` version** (`1.26.3`) is suspicious — verify the installed toolchain.
-- **Cookie `Secure` flag** is off unless `APP_ENV=production`. Production MUST set it (and terminate TLS at the proxy — there is no in-app HTTPS).
+- **Cookie `SameSite`/`Secure` are env-gated** (`cookieSecurity(cfg)`): prod → `SameSite=None`+`Secure=true`, dev → `SameSite=Lax`+`Secure=false`. Production MUST set `APP_ENV=production` — otherwise cookies fall through to `Lax`+insecure and will NOT be sent on cross-site requests from the Vercel frontend, silently breaking the session. TLS is terminated at the proxy (Railway); there is no in-app HTTPS.
 - **Access-token denylist absent:** logout revokes refresh tokens and clears cookies, but a stolen access token stays valid up to 15 minutes. A Redis/DB denylist would close this.
 - **WhatsApp webhook signature** (`X-Hub-Signature-256`) is not yet validated — only the verify-token handshake is secured.
 - **`OTP_HMAC_PEPPER` in `.env.example`** is a placeholder; generate an independent secret per environment and never reuse `JWT_SECRET`.

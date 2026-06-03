@@ -54,7 +54,6 @@ function isAuthEndpoint(url?: string): boolean {
   if (!url) return false;
   return (
     url.includes('/auth/refresh') ||
-    url.includes('/auth/login') ||
     url.includes('/auth/request-otp') ||
     url.includes('/auth/verify-otp')
   );

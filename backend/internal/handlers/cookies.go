@@ -35,16 +35,36 @@ const (
 	refreshCookiePath = "/api/v1/auth"
 )
 
+// cookieSecurity returns the SameSite mode and Secure flag for session cookies,
+// derived from the deployment environment.
+//
+//   - Production: SameSite=None + Secure. The frontend (Vercel) and backend
+//     (Railway) live on different sites, so the browser only attaches the
+//     session cookies to those cross-site requests under SameSite=None. The
+//     spec requires Secure whenever SameSite=None, which is satisfied because
+//     Railway terminates TLS. The double-submit CSRF token (and the
+//     RequireCSRF middleware) carries the CSRF defence that SameSite=Strict
+//     previously provided at the transport layer.
+//   - Dev/local: SameSite=Lax + insecure. localhost:3000 → localhost:8080 is
+//     same-site, and plain HTTP dev would drop Secure cookies entirely, so Lax
+//     without Secure keeps local development working.
+func cookieSecurity(cfg *config.Config) (http.SameSite, bool) {
+	if cfg.AppEnv == "production" {
+		return http.SameSiteNoneMode, true
+	}
+	return http.SameSiteLaxMode, false
+}
+
 // issueSessionCookies writes the httpOnly access + refresh cookies plus their
-// readable role/expiry companions. SameSite=Strict (plus Secure in production)
-// gives CSRF resistance at the transport layer; the double-submit CSRF token
-// layers an explicit defence on top of that.
+// readable role/expiry companions. The SameSite mode and Secure flag come from
+// cookieSecurity (cross-site None+Secure in production, Lax in dev); the
+// double-submit CSRF token layers an explicit defence on top of that.
 func issueSessionCookies(c *gin.Context, cfg *config.Config, accessToken, rawRefresh, csrfToken, role string) {
-	secure := cfg.AppEnv == "production"
+	sameSite, secure := cookieSecurity(cfg)
 	accessMaxAge := int(cfg.JWT.AccessExpiry.Seconds())
 	refreshMaxAge := int(cfg.JWT.RefreshExpiry.Seconds())
 
-	c.SetSameSite(http.SameSiteStrictMode)
+	c.SetSameSite(sameSite)
 
 	// httpOnly cookies — the JWTs never touch JavaScript.
 	c.SetCookie(cookieAccess, accessToken, accessMaxAge, "/", "", secure, true)
@@ -76,8 +96,8 @@ func newCSRFToken() (string, error) {
 // The path of each delete MUST match the path it was set with, or the browser
 // keeps the original cookie.
 func clearSessionCookies(c *gin.Context, cfg *config.Config) {
-	secure := cfg.AppEnv == "production"
-	c.SetSameSite(http.SameSiteStrictMode)
+	sameSite, secure := cookieSecurity(cfg)
+	c.SetSameSite(sameSite)
 	c.SetCookie(cookieAccess, "", -1, "/", "", secure, true)
 	c.SetCookie(cookieRefresh, "", -1, refreshCookiePath, "", secure, true)
 	c.SetCookie(cookieRole, "", -1, "/", "", secure, false)
