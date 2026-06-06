@@ -30,6 +30,7 @@ import (
 // atomically.
 type Store interface {
 	CreateBooking(ctx context.Context, req models.CreateBookingRequest) (*models.Booking, error)
+	CreateBookingIdempotent(ctx context.Context, req models.CreateBookingRequest, idem models.IdempotencyParams) (*models.Booking, bool, error)
 	CancelBooking(ctx context.Context, params repository.CancelBookingParams) (*models.Booking, error)
 	GetBookingContact(ctx context.Context, bookingID int64) (*repository.BookingContact, error)
 }
@@ -91,6 +92,21 @@ func NewService(store Store, notifier Notifier, opts ...Option) *Service {
 // error (no notification is sent). Notification is best-effort — a delivery
 // failure is logged but does not undo the confirmed booking.
 func (s *Service) Create(ctx context.Context, req models.CreateBookingRequest) (*models.Booking, error) {
+	// Idempotent path: when the handler attached an Idempotency-Key, route through
+	// the store's idempotent create so a double-tap / retry replays the original
+	// booking. On a replay no new booking was created, so the confirmation
+	// notification MUST be suppressed — otherwise a retry would re-notify.
+	if req.Idempotency != nil {
+		b, replayed, err := s.store.CreateBookingIdempotent(ctx, req, *req.Idempotency)
+		if err != nil {
+			return nil, err
+		}
+		if !replayed {
+			s.dispatch(ctx, b, notification.KindBookingConfirmed, "")
+		}
+		return b, nil
+	}
+
 	b, err := s.store.CreateBooking(ctx, req)
 	if err != nil {
 		return nil, err

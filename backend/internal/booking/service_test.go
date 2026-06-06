@@ -28,11 +28,19 @@ type fakeStore struct {
 	cancelErr  error
 	contactErr error
 
-	createCalls      int
-	cancelCalls      int
-	contactCalls     int
-	lastCreateReq    models.CreateBookingRequest
-	lastCancelParams repository.CancelBookingParams
+	// idempotentReplayed is what CreateBookingIdempotent reports as its replayed
+	// flag (and idempotentErr its error), so tests can drive the replay-vs-fresh
+	// notification behaviour.
+	idempotentReplayed bool
+	idempotentErr      error
+
+	createCalls           int
+	idempotentCreateCalls int
+	cancelCalls           int
+	contactCalls          int
+	lastCreateReq         models.CreateBookingRequest
+	lastIdem              models.IdempotencyParams
+	lastCancelParams      repository.CancelBookingParams
 }
 
 func (f *fakeStore) CreateBooking(_ context.Context, req models.CreateBookingRequest) (*models.Booking, error) {
@@ -42,6 +50,16 @@ func (f *fakeStore) CreateBooking(_ context.Context, req models.CreateBookingReq
 		return nil, f.createErr
 	}
 	return f.booking, nil
+}
+
+func (f *fakeStore) CreateBookingIdempotent(_ context.Context, req models.CreateBookingRequest, idem models.IdempotencyParams) (*models.Booking, bool, error) {
+	f.idempotentCreateCalls++
+	f.lastCreateReq = req
+	f.lastIdem = idem
+	if f.idempotentErr != nil {
+		return nil, false, f.idempotentErr
+	}
+	return f.booking, f.idempotentReplayed, nil
 }
 
 func (f *fakeStore) CancelBooking(_ context.Context, p repository.CancelBookingParams) (*models.Booking, error) {
@@ -147,6 +165,64 @@ func TestCreate_DispatchesBookingConfirmed(t *testing.T) {
 	if payload.BookingID != b.ID || payload.PitchName != testPitchName ||
 		!payload.StartTime.Equal(b.StartTime) || !payload.EndTime.Equal(b.EndTime) {
 		t.Errorf("payload = %+v, does not match booking %+v / pitch %q", payload, b, testPitchName)
+	}
+}
+
+// TestCreate_Idempotent_FreshDispatches: with an Idempotency-Key, a FRESH (not
+// replayed) create routes through the idempotent store path and still notifies.
+func TestCreate_Idempotent_FreshDispatches(t *testing.T) {
+	b := sampleBooking()
+	store := &fakeStore{
+		booking:            b,
+		contact:            &repository.BookingContact{Phone: testPhone, PitchName: testPitchName},
+		idempotentReplayed: false,
+	}
+	notifier := &fakeNotifier{}
+	svc := newService(store, notifier)
+
+	req := models.CreateBookingRequest{
+		PitchID: 7, PlayerID: 3,
+		Idempotency: &models.IdempotencyParams{Key: "k-1", Endpoint: "POST /bookings", Fingerprint: "fp"},
+	}
+	if _, err := svc.Create(context.Background(), req); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if store.idempotentCreateCalls != 1 || store.createCalls != 0 {
+		t.Errorf("routing wrong: idempotent=%d plain=%d, want 1/0", store.idempotentCreateCalls, store.createCalls)
+	}
+	if store.lastIdem.Key != "k-1" {
+		t.Errorf("idem key not threaded: %+v", store.lastIdem)
+	}
+	if len(notifier.sent) != 1 {
+		t.Errorf("fresh idempotent create sent %d notifications, want 1", len(notifier.sent))
+	}
+}
+
+// TestCreate_Idempotent_ReplaySuppressesNotification: a REPLAYED booking returns
+// the original but must NOT re-notify — otherwise a retry double-notifies.
+func TestCreate_Idempotent_ReplaySuppressesNotification(t *testing.T) {
+	b := sampleBooking()
+	store := &fakeStore{
+		booking:            b,
+		contact:            &repository.BookingContact{Phone: testPhone, PitchName: testPitchName},
+		idempotentReplayed: true,
+	}
+	notifier := &fakeNotifier{}
+	svc := newService(store, notifier)
+
+	req := models.CreateBookingRequest{
+		PitchID: 7, PlayerID: 3,
+		Idempotency: &models.IdempotencyParams{Key: "k-1", Endpoint: "POST /bookings", Fingerprint: "fp"},
+	}
+	got, err := svc.Create(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Create (replay): %v", err)
+	}
+	if got != b {
+		t.Errorf("replay returned %+v, want original %+v", got, b)
+	}
+	if len(notifier.sent) != 0 {
+		t.Errorf("replay sent %d notifications, want 0 (suppressed)", len(notifier.sent))
 	}
 }
 

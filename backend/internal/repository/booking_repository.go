@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -26,6 +27,14 @@ var (
 	ErrPitchNotBookable        = errors.New("booking: pitch is deactivated or deleted and cannot be booked")
 	ErrBookingNotFound         = errors.New("booking: booking does not exist")
 	ErrInvalidStatusTransition = errors.New("booking: status transition is not permitted")
+
+	// ErrIdempotencyInProgress means a booking attempt with this idempotency key is
+	// still in flight (a committed 'pending' claim that has not completed) — the
+	// caller should retry shortly. Mapped to 409.
+	ErrIdempotencyInProgress = errors.New("booking: a request with this idempotency key is already in progress")
+	// ErrIdempotencyKeyConflict means the idempotency key was reused with a
+	// DIFFERENT request body (fingerprint mismatch) — a client bug. Mapped to 422.
+	ErrIdempotencyKeyConflict = errors.New("booking: idempotency key reused with a different request")
 )
 
 const pgExclusionViolation = "23P01"
@@ -65,6 +74,20 @@ type BookingContact struct {
 
 type BookingRepository interface {
 	CreateBooking(ctx context.Context, req models.CreateBookingRequest) (*models.Booking, error)
+
+	// CreateBookingIdempotent creates a booking under an idempotency key (see
+	// models.IdempotencyParams), in ONE transaction with the key's claim+completion
+	// so the booking and its idempotency record commit together. replayed is true
+	// when the original booking is returned from a prior completed attempt (no new
+	// booking created, so the caller must skip side effects like notifications). It
+	// returns ErrIdempotencyKeyConflict (key reused with a different body) or
+	// ErrIdempotencyInProgress (a committed pending claim) for those cases.
+	CreateBookingIdempotent(ctx context.Context, req models.CreateBookingRequest, idem models.IdempotencyParams) (booking *models.Booking, replayed bool, err error)
+
+	// DeleteExpiredIdempotencyKeys prunes idempotency rows past their TTL and
+	// returns how many were removed. Safe to call periodically.
+	DeleteExpiredIdempotencyKeys(ctx context.Context, now time.Time) (int64, error)
+
 	GetBookedSlots(ctx context.Context, pitchID int, date time.Time) ([]models.AvailabilitySlot, error)
 	GetUserBookings(ctx context.Context, userID int64) ([]models.Booking, error)
 
@@ -112,6 +135,23 @@ func (r *bookingRepo) CreateBooking(
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
+	b, err := insertConfirmedBookingTx(ctx, tx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("CreateBooking: commit: %w", err)
+	}
+	return b, nil
+}
+
+// insertConfirmedBookingTx performs the pitch-lock + bookability guard + booking
+// insert + creation-audit INSIDE the caller's transaction, returning the created
+// confirmed booking. It neither begins nor commits — the caller owns the tx — so
+// the same body backs both the plain create path and the idempotent one, keeping
+// a single source of truth for the slot-conflict (EXCLUDE) and audit invariants.
+func insertConfirmedBookingTx(ctx context.Context, tx pgx.Tx, req models.CreateBookingRequest) (*models.Booking, error) {
 	var pricePerHour float64
 	var pitchName string
 	var isActive bool
@@ -128,7 +168,7 @@ func (r *bookingRepo) CreateBooking(
 	// insert. The WHERE clause matches the pitch by id only (no active/deleted
 	// predicate) so a non-bookable pitch is still resolved and can be told apart
 	// from a genuinely missing id.
-	err = tx.QueryRow(ctx, `
+	err := tx.QueryRow(ctx, `
 		SELECT name, price_per_hour, is_active, deleted_at
 		FROM pitches
 		WHERE id = $1
@@ -199,11 +239,122 @@ func (r *bookingRepo) CreateBooking(
 		return nil, fmt.Errorf("CreateBooking: record transition: %w", err)
 	}
 
-	if err = tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("CreateBooking: commit: %w", err)
-	}
-
 	return &b, nil
+}
+
+// idempotencyTTL is how long an idempotency key remains in force. A key is a
+// random UUID per booking ATTEMPT, so 24h comfortably covers any client retry
+// window while bounding storage; expired rows are pruned by
+// DeleteExpiredIdempotencyKeys.
+const idempotencyTTL = 24 * time.Hour
+
+// CreateBookingIdempotent runs the booking insert under an idempotency key, in
+// ONE transaction with the key's claim and completion. See the interface doc for
+// the contract. Concurrency model: the claim is `INSERT ... ON CONFLICT DO
+// NOTHING`, which WAITS on a concurrent uncommitted claim for the same key and
+// then observes its committed outcome — so a genuine double-tap serialises and
+// the loser REPLAYS the winner's booking (no duplicate, no 409 in the common
+// case). ErrIdempotencyInProgress guards a committed 'pending' claim (a prior
+// attempt that crashed between claim and completion).
+func (r *bookingRepo) CreateBookingIdempotent(
+	ctx context.Context,
+	req models.CreateBookingRequest,
+	idem models.IdempotencyParams,
+) (*models.Booking, bool, error) {
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("CreateBookingIdempotent: begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	now := time.Now().UTC()
+
+	// Claim the key with a pending row. On conflict (key already exists for this
+	// user) nothing is inserted and QueryRow returns ErrNoRows.
+	var claimedID int64
+	claimErr := tx.QueryRow(ctx, `
+		INSERT INTO booking_idempotency_keys
+			(idem_key, user_id, endpoint, fingerprint, status, created_at, expires_at)
+		VALUES ($1, $2, $3, $4, 'pending', $5, $6)
+		ON CONFLICT (user_id, idem_key) DO NOTHING
+		RETURNING id
+	`, idem.Key, req.PlayerID, idem.Endpoint, idem.Fingerprint, now, now.Add(idempotencyTTL)).Scan(&claimedID)
+
+	switch {
+	case claimErr == nil:
+		// We own the claim — create the booking and complete the record. A booking
+		// error (e.g. ErrDoubleBooking) rolls the whole tx back, including the claim,
+		// so the key is not burned and the client may retry.
+		b, err := insertConfirmedBookingTx(ctx, tx, req)
+		if err != nil {
+			return nil, false, err
+		}
+		snapshot, err := json.Marshal(b)
+		if err != nil {
+			return nil, false, fmt.Errorf("CreateBookingIdempotent: snapshot response: %w", err)
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE booking_idempotency_keys
+			SET status = 'completed', booking_id = $2, response = $3
+			WHERE id = $1
+		`, claimedID, b.ID, snapshot); err != nil {
+			return nil, false, fmt.Errorf("CreateBookingIdempotent: complete: %w", err)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return nil, false, fmt.Errorf("CreateBookingIdempotent: commit: %w", err)
+		}
+		return b, false, nil
+
+	case errors.Is(claimErr, pgx.ErrNoRows):
+		// Key already exists (committed by a prior/concurrent attempt). Inspect it.
+		var status, fingerprint string
+		var response []byte
+		if err := tx.QueryRow(ctx, `
+			SELECT status, fingerprint, response
+			FROM booking_idempotency_keys
+			WHERE user_id = $1 AND idem_key = $2
+		`, req.PlayerID, idem.Key).Scan(&status, &fingerprint, &response); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				// The conflicting row disappeared (the other attempt rolled back) between
+				// our claim and this read — treat as in-progress; the client retries.
+				return nil, false, ErrIdempotencyInProgress
+			}
+			return nil, false, fmt.Errorf("CreateBookingIdempotent: load existing: %w", err)
+		}
+
+		// A reused key with a different request body is a client bug, regardless of
+		// the prior attempt's state.
+		if fingerprint != idem.Fingerprint {
+			return nil, false, ErrIdempotencyKeyConflict
+		}
+
+		switch status {
+		case "completed":
+			var b models.Booking
+			if err := json.Unmarshal(response, &b); err != nil {
+				return nil, false, fmt.Errorf("CreateBookingIdempotent: decode replay: %w", err)
+			}
+			return &b, true, nil // replayed — caller MUST skip notification
+		case "pending":
+			return nil, false, ErrIdempotencyInProgress
+		default:
+			return nil, false, fmt.Errorf("CreateBookingIdempotent: unexpected status %q", status)
+		}
+
+	default:
+		return nil, false, fmt.Errorf("CreateBookingIdempotent: claim: %w", claimErr)
+	}
+}
+
+// DeleteExpiredIdempotencyKeys prunes idempotency rows past their TTL.
+func (r *bookingRepo) DeleteExpiredIdempotencyKeys(ctx context.Context, now time.Time) (int64, error) {
+	ct, err := r.db.Exec(ctx,
+		`DELETE FROM booking_idempotency_keys WHERE expires_at <= $1`, now.UTC())
+	if err != nil {
+		return 0, fmt.Errorf("DeleteExpiredIdempotencyKeys: %w", err)
+	}
+	return ct.RowsAffected(), nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

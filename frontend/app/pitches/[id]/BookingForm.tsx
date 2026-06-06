@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { CalendarDays, CheckCircle2 } from 'lucide-react';
 import axios from 'axios';
@@ -308,10 +308,25 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
 
   // ── Submit — re-validates against server before confirming ────────────────
 
+  // Synchronous re-entry guard: blocks a double-tap from firing two POSTs before
+  // React re-renders the disabled button. Combined with the per-attempt
+  // Idempotency-Key below, a duplicate booking cannot be created.
+  const inFlightRef = useRef(false);
+
   async function handleSubmit() {
     if (!canSubmit || !actualStartStr || !actualEndStr) return;
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
     setSubmitting(true);
     setApiError(null);
+
+    // One idempotency key per booking ATTEMPT. The backend dedupes on it, so a
+    // network retry (the axios 401→refresh path reuses this same request config)
+    // replays the original booking instead of creating a second one.
+    const idempotencyKey =
+      (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
     // Fresh availability check to catch race-condition double-bookings
     try {
@@ -322,6 +337,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
         setApiError('تم حجز هذا الوقت للتو — يرجى اختيار وقت آخر');
         setBaseHour(null);
         setSubmitting(false);
+        inFlightRef.current = false;
         return;
       }
     } catch {
@@ -334,6 +350,8 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
         start_time:  buildDateTime(selDayStr, actualStartStr).toISOString(),
         end_time:    buildDateTime(selDayStr, actualEndStr).toISOString(),
         total_price: total,
+      }, {
+        headers: { 'Idempotency-Key': idempotencyKey },
       });
       setSuccess(true);
       setTimeout(() => router.push('/bookings'), 1800);
@@ -354,6 +372,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
       }
     } finally {
       setSubmitting(false);
+      inFlightRef.current = false;
     }
   }
 

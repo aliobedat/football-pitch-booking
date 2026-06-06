@@ -2,10 +2,13 @@ package handlers
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -15,6 +18,24 @@ import (
 	"github.com/ali/football-pitch-api/internal/models"
 	"github.com/ali/football-pitch-api/internal/repository"
 )
+
+// idempotencyHeader is the request header carrying the client's per-attempt UUID.
+const idempotencyHeader = "Idempotency-Key"
+
+// bookingEndpoint labels the idempotency record's origin (audit/debug only).
+const bookingEndpoint = "POST /api/v1/bookings"
+
+// bookingFingerprint hashes the SEMANTIC content of a booking request (pitch +
+// time range) so the same idempotency key reused with a different booking is
+// detected (→ 422). total_price is excluded: the server recomputes it, so it is
+// not part of the request's identity. The user is scoped separately (per-user
+// key), so it is not hashed here.
+func bookingFingerprint(req models.CreateBookingRequest) string {
+	canonical := fmt.Sprintf("pitch=%d;start=%d;end=%d",
+		req.PitchID, req.StartTime.UTC().UnixNano(), req.EndTime.UTC().UnixNano())
+	sum := sha256.Sum256([]byte(canonical))
+	return hex.EncodeToString(sum[:])
+}
 
 // BookingService is the orchestration seam the handler depends on for state
 // transitions (PART 5). *booking.Service satisfies it: each call persists the
@@ -54,9 +75,20 @@ func (h *BookingHandler) CreateBooking(c *gin.Context) {
 	}
 
 	userID := int64(middleware.GetUserID(c))
-	
+
 	// إضافة رقم اللاعب للطلب قبل ما نبعثه للداتا بيس
 	req.PlayerID = userID
+
+	// Idempotency: when the client supplies an Idempotency-Key, attach it so a
+	// double-tap / retry replays the original booking instead of creating a second
+	// one. Absent header → legacy non-idempotent path (unchanged behaviour).
+	if key := strings.TrimSpace(c.GetHeader(idempotencyHeader)); key != "" {
+		req.Idempotency = &models.IdempotencyParams{
+			Key:         key,
+			Endpoint:    bookingEndpoint,
+			Fingerprint: bookingFingerprint(req),
+		}
+	}
 
 	now := time.Now().UTC()
 
@@ -278,6 +310,16 @@ func (h *BookingHandler) handleBookingError(c *gin.Context, err error) {
 		c.JSON(http.StatusConflict, gin.H{
 			"error":   "invalid_transition",
 			"message": "the booking's current status does not permit this operation",
+		})
+	case errors.Is(err, repository.ErrIdempotencyInProgress):
+		c.JSON(http.StatusConflict, gin.H{
+			"error":   "request_in_progress",
+			"message": "a booking request with this idempotency key is already being processed",
+		})
+	case errors.Is(err, repository.ErrIdempotencyKeyConflict):
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "idempotency_key_conflict",
+			"message": "this idempotency key was already used for a different booking request",
 		})
 	default:
 		c.Error(err)

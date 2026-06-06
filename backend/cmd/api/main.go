@@ -156,6 +156,30 @@ func main() {
 		}
 	}()
 
+	// Idempotency-key TTL cleanup (PART: booking idempotency). Booking attempts
+	// record a per-user Idempotency-Key for ~24h to dedupe double-taps/retries;
+	// this background sweep prunes expired rows so the table stays small. It is
+	// pure storage hygiene — correctness does not depend on it (expired keys are
+	// random UUIDs that are never reused) — so a failed sweep only logs.
+	go func() {
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
+		for {
+			if n, err := bookingRepo.DeleteExpiredIdempotencyKeys(workerCtx, time.Now()); err != nil {
+				if workerCtx.Err() == nil {
+					log.Printf("[IDEMPOTENCY] cleanup error: %v", err)
+				}
+			} else if n > 0 {
+				log.Printf("[IDEMPOTENCY] pruned %d expired key(s)", n)
+			}
+			select {
+			case <-workerCtx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+
 	router := gin.New()
 
 	// Allowed CORS origins. The browser's `Origin` header never carries a

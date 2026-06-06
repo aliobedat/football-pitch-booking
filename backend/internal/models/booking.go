@@ -30,8 +30,24 @@ type CreateBookingRequest struct {
 	StartTime  time.Time `json:"start_time" binding:"required"`
 	EndTime    time.Time `json:"end_time" binding:"required"`
 	TotalPrice float64   `json:"total_price" binding:"required"`
-	
-	PlayerID   int64     `json:"-"` // يتم تعبئته من التوكن (مخفي عن المستخدم)
+
+	PlayerID int64 `json:"-"` // يتم تعبئته من التوكن (مخفي عن المستخدم)
+
+	// Idempotency is set by the handler from the Idempotency-Key request header
+	// (nil when absent). When present, booking creation is routed through the
+	// idempotent path so a double-tap / retry replays the original booking instead
+	// of creating a second one. Never bound from the JSON body.
+	Idempotency *IdempotencyParams `json:"-"`
+}
+
+// IdempotencyParams carries everything the idempotent create path needs to claim,
+// fingerprint, and (on replay) match a booking attempt. Keys are user-scoped (the
+// user id is the request's PlayerID); Fingerprint is a hash of the canonical
+// request so a reused key with a different body is rejected rather than replayed.
+type IdempotencyParams struct {
+	Key         string
+	Endpoint    string
+	Fingerprint string
 }
 
 // AdminBooking is the enriched booking record returned to owners/admins.
