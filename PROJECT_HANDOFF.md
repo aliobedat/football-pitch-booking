@@ -18,6 +18,7 @@ _Last updated: 2026-06-06 — read-only system audit reconciled this handoff aga
 | Backend CORS | Allows `http://localhost:3000` only (hardcoded + `CORS_ALLOWED_ORIGINS` in `backend/.env`) |
 | `APP_ENV` | `development` → cookies are `SameSite=Lax` + `Secure=false` (works over plain-HTTP localhost) |
 | Notification channel | `NOTIFICATION_CHANNEL=FAKE` → OTP code is **printed to the backend console**, no real WhatsApp/SMS needed |
+| OTP routing (local) | **`NOTIFY_OTP_ROUTE=FAKE`** — REQUIRED locally. The default OTP route is `twilio_sms`, so without Twilio creds boot **fails by design** (the safety assertion refuses a route where OTP has no real sender). Set this to route OTP to the console Fake adapter. See §8. |
 
 **Local run (two terminals):**
 ```bash
@@ -31,7 +32,7 @@ npm run dev
 
 Frontend: <http://localhost:3000> · Backend API: <http://localhost:8080/api/v1>
 
-**Login locally:** request an OTP from the login page, then read the code from the backend console line `[NOTIFY:FAKE] >>> OTP for +962... is 123456 <<<` and enter it.
+**Login locally:** ensure **`NOTIFY_OTP_ROUTE=FAKE`** is set in `backend/.env` (see the routing note above), request an OTP from the login page, then read the code from the backend console line `[NOTIFY:FAKE] >>> OTP for +962... is 123456 <<<` and enter it.
 
 > The production cookie policy (`SameSite=None`+`Secure`, Vercel↔Railway) described later in §2/§6 still documents how a future deploy must be configured — it is **dormant** while local-only. The hardcoded Vercel origin in `cmd/api/main.go` is harmless and left in place for that eventual redeploy.
 
@@ -370,6 +371,8 @@ CSRF: state-changing cookie-authenticated requests must send `X-CSRF-Token` equa
 - **`OTP_HMAC_PEPPER` in `.env.example`** is a placeholder; generate an independent secret per environment and never reuse `JWT_SECRET`.
 - **`description` pitch field silently dropped** (audit 2026-06-06): collected in the dashboard form and rendered on pitch-detail, but not wired in the Go data layer — entered descriptions are lost. See audit §4.
 - **`POST /notifications/opt-out` is orphaned** (audit 2026-06-06): implemented and registered, but no frontend consumer — consent withdrawal is unreachable from the UI.
+- An app-level opt-out gate is active and read by the notifier (users.opt_out). However, the writer for this flag (the STOP-keyword webhook handler) is not yet built. It is scheduled to be wired alongside the WhatsApp webhook signature validation in the Meta go-live workstream.
+- **Notification routing (MVP auth channel):** `NotificationService.Send` resolves a config-driven type→sink policy at send time (`NOTIFY_OTP_ROUTE` / `NOTIFY_BOOKING_ROUTE` / `NOTIFY_DEFAULT_ROUTE`). Closed-beta defaults: OTP → `twilio_sms` (real send), booking events → `log_only` (non-delivering sink, zero budget), unmapped kinds → fail-safe `log_only`. A startup assertion (`ValidateRouting`) **fails boot if OTP does not resolve to a registered, real delivery adapter** — a silent OTP→log route is a login outage. **Local-dev DX:** a box without Twilio creds must set `NOTIFY_OTP_ROUTE=FAKE` or boot fails. Twilio creds (`TWILIO_ACCOUNT_SID/AUTH_TOKEN/FROM_NUMBER`) are all-or-nothing (partial config fails fast). The global OTP daily cap (`OTP_GLOBAL_DAILY_CAP`, default 50) is aligned with the Twilio trial ceiling.
 
 ---
 
