@@ -180,6 +180,35 @@ func TestWhatsAppChannel_BookingTemplates(t *testing.T) {
 	}
 }
 
+// TestWhatsAppChannel_RendersAmmanLocalTime locks in the timezone fix: booking
+// timestamps in UTILITY templates are rendered in Asia/Amman civil time, not UTC.
+// sampleMessage's start is 18:00 UTC, which is 21:00 in Amman (UTC+3) — the player
+// must read 21:00, never 18:00.
+func TestWhatsAppChannel_RendersAmmanLocalTime(t *testing.T) {
+	var gotReq waRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotReq)
+		_, _ = w.Write([]byte(`{"messages":[{"id":"wamid.OK"}]}`))
+	}))
+	defer srv.Close()
+
+	wa := newTestWhatsApp(t, srv, nil)
+	if _, err := wa.Send(context.Background(), sampleMessage(KindBookingConfirmed)); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+
+	params := gotReq.Template.Components[0].Parameters
+	if len(params) != 3 {
+		t.Fatalf("body params = %d, want 3", len(params))
+	}
+	// params[1] is the start time; 18:00Z → 21:00 Amman.
+	const wantStart = "Tue 02 Jun 2026 21:00"
+	if params[1].Text != wantStart {
+		t.Errorf("start param = %q, want %q (Amman-local, not UTC 18:00)", params[1].Text, wantStart)
+	}
+}
+
 // TestWhatsAppChannel_APIError maps a non-2xx Meta response to a failed result
 // wrapping ErrWhatsAppAPI (no panic, error surfaced for fallback).
 func TestWhatsAppChannel_APIError(t *testing.T) {

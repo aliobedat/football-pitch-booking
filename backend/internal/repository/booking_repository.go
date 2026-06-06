@@ -13,6 +13,7 @@ import (
 
 	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/models"
+	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -232,8 +233,13 @@ func (r *bookingRepo) GetBookedSlots(
 		return nil, ErrPitchNotFound
 	}
 
-	dayStart := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
-	dayEnd := dayStart.Add(24 * time.Hour)
+	// "A day" is the Asia/Amman CIVIL day, not a UTC day: a slot at 00:30 Amman is
+	// stored as 21:30-the-previous-day UTC, so UTC day bounds would wrongly exclude
+	// the first three hours of the local day (and include late-evening slots). Take
+	// the day's bounds as absolute UTC instants of the Amman calendar day; because
+	// booking_range stores UTC wall-clock instants, passing these UTC-zoned bounds
+	// and casting ::timestamp yields the correct naive-UTC comparison values.
+	dayStart, dayEnd := timeutil.AmmanDayBoundsUTC(date)
 
 	rows, err := r.db.Query(ctx, `
 		SELECT id, lower(booking_range) AS start_time, upper(booking_range) AS end_time, status

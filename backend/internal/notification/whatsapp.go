@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/ali/football-pitch-api/internal/config"
+	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
 // Errors surfaced by the WhatsApp adapter. Callers (notably FallbackChannel) can
@@ -48,8 +49,17 @@ const (
 	defaultWhatsAppAPIVersion = "v21.0"
 	defaultWhatsAppTimeout    = 10 * time.Second
 	// bookingTimeLayout renders booking timestamps for UTILITY template params.
+	// Times are rendered in Asia/Amman civil time (see fmtBookingTime) — the
+	// stored instants are UTC, but the player must read their LOCAL booking time.
 	bookingTimeLayout = "Mon 02 Jan 2006 15:04"
 )
+
+// fmtBookingTime renders an absolute (UTC) booking instant in Asia/Amman civil
+// time for a human-facing template parameter. Never format the raw UTC instant
+// directly — a player in Jordan would see a time three hours off.
+func fmtBookingTime(t time.Time) string {
+	return timeutil.InAmman(t).Format(bookingTimeLayout)
+}
 
 // WhatsAppChannel delivers through the Meta WhatsApp Cloud API. It satisfies
 // NotificationChannel and is safe for concurrent use (the underlying http.Client
@@ -206,8 +216,8 @@ func (w *WhatsAppChannel) buildRequest(msg OutboundMessage) (waRequest, error) {
 				Components: []waComponent{
 					{Type: "body", Parameters: []waParameter{
 						{Type: "text", Text: p.PitchName},
-						{Type: "text", Text: p.StartTime.Format(bookingTimeLayout)},
-						{Type: "text", Text: p.EndTime.Format(bookingTimeLayout)},
+						{Type: "text", Text: fmtBookingTime(p.StartTime)},
+						{Type: "text", Text: fmtBookingTime(p.EndTime)},
 					}},
 				},
 			},
@@ -228,7 +238,7 @@ func (w *WhatsAppChannel) buildRequest(msg OutboundMessage) (waRequest, error) {
 				Components: []waComponent{
 					{Type: "body", Parameters: []waParameter{
 						{Type: "text", Text: p.PitchName},
-						{Type: "text", Text: p.StartTime.Format(bookingTimeLayout)},
+						{Type: "text", Text: fmtBookingTime(p.StartTime)},
 						{Type: "text", Text: p.Reason},
 					}},
 				},
@@ -252,8 +262,8 @@ func (w *WhatsAppChannel) buildRequest(msg OutboundMessage) (waRequest, error) {
 				Components: []waComponent{
 					{Type: "body", Parameters: []waParameter{
 						{Type: "text", Text: p.PitchName},
-						{Type: "text", Text: p.StartTime.Format(bookingTimeLayout)},
-						{Type: "text", Text: p.EndTime.Format(bookingTimeLayout)},
+						{Type: "text", Text: fmtBookingTime(p.StartTime)},
+						{Type: "text", Text: fmtBookingTime(p.EndTime)},
 					}},
 				},
 			},

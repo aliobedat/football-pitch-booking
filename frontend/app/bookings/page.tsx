@@ -7,6 +7,7 @@ import api from '@/lib/api';
 import Navbar from '@/components/Navbar';
 import { useAuth } from '@/context/AuthContext';
 import { CalendarDays, Clock, CreditCard, MapPin } from 'lucide-react';
+import { formatDate as fmtDateAmman, formatTime as fmtTimeAmman } from '@/lib/format';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -45,21 +46,14 @@ const STATUS_CONFIG: Record<BookingStatus, { label: string; classes: string }> =
   },
 };
 
+// Render in Asia/Amman civil time via the shared, timezone-pinned helpers — never
+// the browser's local zone (a player abroad must still see Amman time).
 function formatDate(iso: string): string {
-  return new Date(iso).toLocaleDateString('ar-JO', {
-    weekday: 'long',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
-  });
+  return fmtDateAmman(iso, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' });
 }
 
 function formatTime(iso: string): string {
-  return new Date(iso).toLocaleTimeString('ar-JO', {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: true,
-  });
+  return fmtTimeAmman(iso, { hour: '2-digit', minute: '2-digit', hour12: true });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

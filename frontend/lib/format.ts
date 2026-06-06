@@ -14,6 +14,13 @@
 const LOCALE = 'ar-JO';
 const LATN = 'latn' as const;
 
+// Malaeb is a Jordan product: every user-facing timestamp is rendered in Amman
+// civil time, NEVER the browser's local zone. The server is the source of truth
+// (it sends UTC ISO-8601), and a player travelling abroad must still see their
+// booking in Amman time. Pinning the IANA zone here guarantees that everywhere
+// these helpers are used. Do not format dates/times outside these helpers.
+const TIME_ZONE = 'Asia/Amman';
+
 /** Format a plain number with Latin digits (e.g. 1,250 → "1,250"). */
 export function formatNumber(
   value: number,
@@ -51,11 +58,12 @@ export function formatDate(
   if (Number.isNaN(d.getTime())) return '';
   return new Intl.DateTimeFormat(LOCALE, {
     numberingSystem: LATN,
+    timeZone: TIME_ZONE,
     ...options,
   }).format(d);
 }
 
-/** Format an ISO date string as an Arabic time with Latin digits. */
+/** Format an ISO date string as an Arabic time with Latin digits, in Amman time. */
 export function formatTime(
   iso: string,
   options: Intl.DateTimeFormatOptions = { hour: '2-digit', minute: '2-digit', hour12: true },
@@ -64,6 +72,7 @@ export function formatTime(
   if (Number.isNaN(d.getTime())) return '';
   return new Intl.DateTimeFormat(LOCALE, {
     numberingSystem: LATN,
+    timeZone: TIME_ZONE,
     ...options,
   }).format(d);
 }
