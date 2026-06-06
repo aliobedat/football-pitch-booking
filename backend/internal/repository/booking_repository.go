@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/models"
 )
 
@@ -21,6 +22,7 @@ import (
 var (
 	ErrDoubleBooking           = errors.New("booking: time slot conflicts with an existing reservation")
 	ErrPitchNotFound           = errors.New("booking: pitch not found or not available")
+	ErrPitchNotBookable        = errors.New("booking: pitch is deactivated or deleted and cannot be booked")
 	ErrBookingNotFound         = errors.New("booking: booking does not exist")
 	ErrInvalidStatusTransition = errors.New("booking: status transition is not permitted")
 )
@@ -64,7 +66,11 @@ type BookingRepository interface {
 	CreateBooking(ctx context.Context, req models.CreateBookingRequest) (*models.Booking, error)
 	GetBookedSlots(ctx context.Context, pitchID int, date time.Time) ([]models.AvailabilitySlot, error)
 	GetUserBookings(ctx context.Context, userID int64) ([]models.Booking, error)
-	GetAllBookings(ctx context.Context, ownerID int64) ([]models.AdminBooking, error)
+
+	// GetAllBookings lists bookings scoped to the actor: an admin sees every
+	// booking on the platform, an owner sees only bookings whose pitch they own
+	// (the ownership predicate is applied in SQL via the pitches join).
+	GetAllBookings(ctx context.Context, actor auth.Actor) ([]models.AdminBooking, error)
 	UpdateBookingStatus(
 		ctx context.Context,
 		bookingID int,
@@ -107,20 +113,41 @@ func (r *bookingRepo) CreateBooking(
 
 	var pricePerHour float64
 	var pitchName string
+	var isActive bool
+	var deletedAt *time.Time
 
-	// جلب سعر الملعب لحساب التكلفة الإجمالية
+	// جلب سعر الملعب لحساب التكلفة الإجمالية، مع قفل صف الملعب للتحقق من توفّره.
+	//
+	// Resolve and LOCK the target pitch row (FOR UPDATE) inside the booking
+	// transaction. The lock serialises against the is_active toggle and the
+	// soft-delete UPDATE, so a pitch cannot be deactivated or deleted in the
+	// window between this bookability check and the INSERT below (no TOCTOU race).
+	// The bookability flags are fetched here — not via a separate pre-flight
+	// SELECT — so the predicate is evaluated under the same lock that protects the
+	// insert. The WHERE clause matches the pitch by id only (no active/deleted
+	// predicate) so a non-bookable pitch is still resolved and can be told apart
+	// from a genuinely missing id.
 	err = tx.QueryRow(ctx, `
-		SELECT name, price_per_hour
+		SELECT name, price_per_hour, is_active, deleted_at
 		FROM pitches
 		WHERE id = $1
-		FOR SHARE
-	`, req.PitchID).Scan(&pitchName, &pricePerHour)
+		FOR UPDATE
+	`, req.PitchID).Scan(&pitchName, &pricePerHour, &isActive, &deletedAt)
 
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrPitchNotFound
 		}
 		return nil, fmt.Errorf("CreateBooking: fetch pitch: %w", err)
+	}
+
+	// Bookability guard: a deactivated or soft-deleted pitch must not accept
+	// bookings even via a handcrafted request that bypasses the read-layer filter.
+	// Aborting here — before any booking row, slot hold, audit row, or
+	// notification side effect — leaves the transaction with zero effect on
+	// rollback.
+	if !isActive || deletedAt != nil {
+		return nil, ErrPitchNotBookable
 	}
 
 	durationHours := req.EndTime.Sub(req.StartTime).Hours()
@@ -187,6 +214,23 @@ func (r *bookingRepo) GetBookedSlots(
 	pitchID int,
 	date time.Time,
 ) ([]models.AvailabilitySlot, error) {
+
+	// Player-facing availability is gated on the pitch being active and not
+	// soft-deleted: a deactivated pitch exposes no availability (ErrPitchNotFound
+	// → 404), so it cannot be booked through this surface. Owner/admin listings
+	// use a different path and are unaffected.
+	var active bool
+	switch err := r.db.QueryRow(ctx,
+		`SELECT is_active FROM pitches WHERE id = $1 AND deleted_at IS NULL`,
+		pitchID,
+	).Scan(&active); {
+	case errors.Is(err, pgx.ErrNoRows):
+		return nil, ErrPitchNotFound
+	case err != nil:
+		return nil, fmt.Errorf("GetBookedSlots: pitch lookup: %w", err)
+	case !active:
+		return nil, ErrPitchNotFound
+	}
 
 	dayStart := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.UTC)
 	dayEnd := dayStart.Add(24 * time.Hour)
@@ -263,8 +307,18 @@ func (r *bookingRepo) GetUserBookings(ctx context.Context, userID int64) ([]mode
 // GetAllBookings
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (r *bookingRepo) GetAllBookings(ctx context.Context, ownerID int64) ([]models.AdminBooking, error) {
-	rows, err := r.db.Query(ctx, `
+func (r *bookingRepo) GetAllBookings(ctx context.Context, actor auth.Actor) ([]models.AdminBooking, error) {
+	// Owner scoping is the pitches join: owners get an extra ownership predicate,
+	// admins get none (every booking). Booking history is preserved across pitch
+	// soft-deletion, so no deleted_at filter is applied here.
+	pitchJoin := "INNER JOIN pitches p ON p.id = b.pitch_id"
+	args := []any{}
+	if !actor.IsAdmin() {
+		args = append(args, actor.UserID)
+		pitchJoin = fmt.Sprintf("INNER JOIN pitches p ON p.id = b.pitch_id AND p.owner_id = $%d", len(args))
+	}
+
+	rows, err := r.db.Query(ctx, fmt.Sprintf(`
 		SELECT
 			b.id,
 			b.pitch_id,    COALESCE(p.name,      '') AS pitch_name,
@@ -273,10 +327,10 @@ func (r *bookingRepo) GetAllBookings(ctx context.Context, ownerID int64) ([]mode
 			lower(b.booking_range) AS start_time, upper(b.booking_range) AS end_time,
 			b.status, b.total_price, b.created_at
 		FROM bookings b
-		INNER JOIN pitches p ON p.id = b.pitch_id AND p.owner_id = $1
+		%s
 		LEFT JOIN  users   u ON u.id = b.player_id
 		ORDER BY b.created_at DESC
-	`, ownerID)
+	`, pitchJoin), args...)
 	if err != nil {
 		return nil, fmt.Errorf("GetAllBookings: query: %w", err)
 	}
@@ -387,8 +441,65 @@ func (r *bookingRepo) CancelBooking(
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	var b models.Booking
+	// ── Ownership-scoped resolve + lock ──────────────────────────────────────
+	// The target booking is resolved (and row-locked) WITH the actor's ownership
+	// predicate so a caller can never act on a booking outside their scope:
+	//   - admin  → any booking (no predicate)
+	//   - owner  → only bookings whose pitch they own (pitches.owner_id)
+	//   - player → only their own bookings (bookings.player_id)
+	// A non-matching booking yields pgx.ErrNoRows → ErrBookingNotFound → 404, so
+	// existence of another owner's/player's booking is never leaked (no 403). The
+	// lock (FOR UPDATE OF b) serialises concurrent cancels, keeping the operation
+	// idempotent-safe. Because resolution fails BEFORE any mutation, a rejected
+	// cancel performs zero side effects (no slot release, no audit row; the
+	// notification is dispatched by the service only after this returns success).
+	pitchJoin := "JOIN pitches pt ON pt.id = b.pitch_id"
+	where := "b.id = $1"
+	args := []any{p.BookingID}
 
+	switch p.ActorRole {
+	case ActorAdmin, ActorSystem:
+		// Unscoped: privileged actors may cancel any booking.
+	case ActorOwner:
+		if p.ActorID == nil {
+			return nil, ErrBookingNotFound
+		}
+		args = append(args, *p.ActorID)
+		where += fmt.Sprintf(" AND pt.owner_id = $%d", len(args))
+	case ActorPlayer:
+		if p.ActorID == nil {
+			return nil, ErrBookingNotFound
+		}
+		args = append(args, *p.ActorID)
+		where += fmt.Sprintf(" AND b.player_id = $%d", len(args))
+	default:
+		// Unknown/empty role is categorically unscopable — deny without leaking.
+		return nil, ErrBookingNotFound
+	}
+
+	var currentStatus string
+	err = tx.QueryRow(ctx, fmt.Sprintf(`
+		SELECT b.status
+		FROM bookings b
+		%s
+		WHERE %s
+		FOR UPDATE OF b
+	`, pitchJoin, where), args...).Scan(&currentStatus)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrBookingNotFound // not found OR not in the actor's scope
+		}
+		return nil, fmt.Errorf("CancelBooking: resolve: %w", err)
+	}
+
+	// State-machine guard: only confirmed → cancelled is permitted (instant
+	// booking has no pending state). An already-cancelled or otherwise
+	// non-cancellable booking returns 409 with no side effects (idempotent-safe).
+	if currentStatus != string(models.StatusConfirmed) {
+		return nil, ErrInvalidStatusTransition
+	}
+
+	var b models.Booking
 	err = tx.QueryRow(ctx, `
 		UPDATE bookings
 		SET status = 'cancelled'
@@ -408,29 +519,15 @@ func (r *bookingRepo) CancelBooking(
 		&b.Status, &b.TotalPrice,
 		&b.CreatedAt,
 	)
-
 	if err != nil {
-		if !errors.Is(err, pgx.ErrNoRows) {
-			return nil, fmt.Errorf("CancelBooking: update: %w", err)
-		}
-
-		// No row updated: either the booking does not exist, or it was not in a
-		// cancellable (confirmed) state. Disambiguate for a precise error.
-		var exists bool
-		if scanErr := tx.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM bookings WHERE id = $1)`,
-			p.BookingID,
-		).Scan(&exists); scanErr != nil {
-			return nil, fmt.Errorf("CancelBooking: exists check: %w", scanErr)
-		}
-		if !exists {
-			return nil, ErrBookingNotFound
-		}
-		return nil, ErrInvalidStatusTransition
+		// The row is locked and was confirmed a statement ago, so a miss here is a
+		// genuine error rather than a concurrency race.
+		return nil, fmt.Errorf("CancelBooking: update: %w", err)
 	}
 
-	// Audit the confirmed → cancelled transition. actor_id is NULL when ActorID
-	// is nil (system action); actor_role and reason capture who acted and why.
+	// Audit the confirmed → cancelled transition with the ACTUAL canceller. actor_id
+	// is NULL only for a system action (ActorID nil); actor_role and reason capture
+	// who acted and why.
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO status_transitions
 			(booking_id, from_status, to_status, actor_id, actor_role, reason)

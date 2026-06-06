@@ -168,6 +168,30 @@ func TestCreate_StoreErrorIsReturnedAndNothingDispatched(t *testing.T) {
 	}
 }
 
+// TestCreate_PitchNotBookableYieldsNoSideEffect is the service-layer half of the
+// bookability guard: when the store rejects a create because the target pitch is
+// deactivated or soft-deleted (ErrPitchNotBookable), the Service returns the
+// error and dispatches NOTHING — no booking_confirmed message fires. The SQL half
+// (that a deactivated/deleted pitch actually resolves to ErrPitchNotBookable under
+// the row lock, with no booking row written and no slot held) is covered by the
+// live-DB integration test in internal/repository/booking_bookable_test.go.
+func TestCreate_PitchNotBookableYieldsNoSideEffect(t *testing.T) {
+	store := &fakeStore{createErr: repository.ErrPitchNotBookable}
+	notifier := &fakeNotifier{}
+	svc := newService(store, notifier)
+
+	got, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, PlayerID: 3})
+	if !errors.Is(err, repository.ErrPitchNotBookable) {
+		t.Fatalf("err = %v, want ErrPitchNotBookable", err)
+	}
+	if got != nil {
+		t.Errorf("Create returned %+v, want nil for a non-bookable pitch", got)
+	}
+	if len(notifier.sent) != 0 {
+		t.Errorf("notifier received %d messages, want 0 for a non-bookable pitch", len(notifier.sent))
+	}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Cancel
 // ─────────────────────────────────────────────────────────────────────────────
@@ -279,6 +303,32 @@ func TestCancel_StoreErrorIsReturnedAndNothingDispatched(t *testing.T) {
 	}
 	if len(notifier.sent) != 0 {
 		t.Errorf("notifier received %d messages, want 0 when cancellation fails", len(notifier.sent))
+	}
+}
+
+// TestCancel_NotOwnedYields404WithNoNotification is the service-layer half of the
+// IDOR guard: when the ownership-scoped store rejects a cancel as not-found (the
+// caller does not own the booking), the Service returns the error and dispatches
+// NOTHING — no booking_cancelled message reaches another owner's player. The SQL
+// half (that a foreign owner actually resolves to ErrBookingNotFound, and that no
+// slot is released / no audit row is written) is covered by the live-DB
+// integration test in internal/repository/booking_cancel_scoping_test.go.
+func TestCancel_NotOwnedYields404WithNoNotification(t *testing.T) {
+	store := &fakeStore{cancelErr: repository.ErrBookingNotFound}
+	notifier := &fakeNotifier{}
+	svc := newService(store, notifier)
+
+	got, err := svc.Cancel(context.Background(), repository.CancelBookingParams{
+		BookingID: 42, ActorID: int64Ptr(99), ActorRole: repository.ActorOwner,
+	})
+	if !errors.Is(err, repository.ErrBookingNotFound) {
+		t.Fatalf("err = %v, want ErrBookingNotFound", err)
+	}
+	if got != nil {
+		t.Errorf("Cancel returned %+v, want nil for a non-owned booking", got)
+	}
+	if len(notifier.sent) != 0 {
+		t.Errorf("notifier received %d messages, want 0 for a non-owned (404) cancel", len(notifier.sent))
 	}
 }
 

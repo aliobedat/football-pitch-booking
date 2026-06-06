@@ -5,6 +5,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ali/football-pitch-api/internal/auth"
+	"github.com/ali/football-pitch-api/internal/cloudinary"
 	"github.com/ali/football-pitch-api/internal/config"
 	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/handlers"
@@ -28,7 +29,14 @@ func Register(
 	authHandler := handlers.NewAuthHandler(db, jwtManager, cfg)
 	phoneAuthHandler := handlers.NewPhoneAuthHandler(otpSvc, authStore, jwtManager, cfg)
 	bookingHandler := handlers.NewBookingHandler(db, bookingSvc)
-	pitchHandler := &handlers.PitchHandler{Model: &data.PitchModel{DB: db}}
+	// The Cloudinary credentials are validated at config load (fail-fast), so the
+	// only error here would be a programming/SDK error — panic to fail fast,
+	// consistent with the other startup security assertions.
+	cldSvc, err := cloudinary.New(cfg.Cloudinary)
+	if err != nil {
+		panic("ROUTES: could not initialise Cloudinary service: " + err.Error())
+	}
+	pitchHandler := &handlers.PitchHandler{Model: &data.PitchModel{DB: db}, Cloudinary: cldSvc}
 	webhookHandler := handlers.NewWhatsAppWebhookHandler(deliveryStore, cfg.WhatsApp.WebhookVerifyToken)
 	notificationHandler := handlers.NewNotificationHandler(optOutStore)
 	v1 := r.Group("/api/v1")
@@ -86,6 +94,18 @@ func Register(
 			middleware.RequireRole("owner", "admin"),
 			pitchHandler.CreatePitch,
 		)
+		// Backend-signed direct-upload: hand the browser a signed payload to upload
+		// a pitch image straight to Cloudinary. Owner/admin only; players → 403.
+		protected.POST("/pitches/upload-signature",
+			middleware.RequireRole("owner", "admin"),
+			pitchHandler.UploadSignature,
+		)
+		// Persist the result of a completed direct upload (URL + public_id),
+		// actor-scoped, with the cloud-origin trust guard + old-asset cleanup.
+		protected.PATCH("/pitches/:id/image",
+			middleware.RequireRole("owner", "admin"),
+			pitchHandler.SetPitchImage,
+		)
 		protected.PATCH("/pitches/:id",
 			middleware.RequireRole("owner", "admin"),
 			pitchHandler.UpdatePitch,
@@ -93,6 +113,12 @@ func Register(
 		protected.DELETE("/pitches/:id",
 			middleware.RequireRole("owner", "admin"),
 			pitchHandler.DeletePitch,
+		)
+		// Activate / deactivate toggle — intent-revealing, separate from the
+		// full-object update. Players are categorically barred (403).
+		protected.PATCH("/pitches/:id/active",
+			middleware.RequireRole("owner", "admin"),
+			pitchHandler.ToggleActive,
 		)
 		protected.GET("/owner/pitches",
 			middleware.RequireRole("owner", "admin"),
@@ -105,9 +131,10 @@ func Register(
 			bookingHandler.GetAllBookings,
 		)
 
-		// Both players and owners can cancel (handler enforces ownership logic)
+		// Players, owners, and admins can cancel (handler enforces ownership logic;
+		// admins/owners cancel from the dashboard, players from their bookings page)
 		protected.PATCH("/bookings/:id/cancel",
-			middleware.RequireRole("player", "owner"),
+			middleware.RequireRole("player", "owner", "admin"),
 			bookingHandler.CancelBooking,
 		)
 	}

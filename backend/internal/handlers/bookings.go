@@ -121,8 +121,9 @@ func (h *BookingHandler) GetUserBookings(c *gin.Context) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *BookingHandler) GetAllBookings(c *gin.Context) {
-	ownerID := int64(middleware.GetUserID(c))
-	bookings, err := h.repo.GetAllBookings(c.Request.Context(), ownerID)
+	// Admin → all bookings; owner → only bookings for pitches they own. Scoping
+	// is enforced in SQL by the repository via the Actor.
+	bookings, err := h.repo.GetAllBookings(c.Request.Context(), middleware.GetActor(c))
 	if err != nil {
 		c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -166,6 +167,13 @@ func (h *BookingHandler) GetPitchAvailability(c *gin.Context) {
 
 	slots, err := h.repo.GetBookedSlots(c.Request.Context(), pitchID, date)
 	if err != nil {
+		if errors.Is(err, repository.ErrPitchNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error":   "pitch_not_found",
+				"message": "الملعب غير موجود أو غير متاح",
+			})
+			return
+		}
 		c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "internal_error", "message": "failed to retrieve availability data",
@@ -255,6 +263,11 @@ func (h *BookingHandler) handleBookingError(c *gin.Context, err error) {
 		c.JSON(http.StatusNotFound, gin.H{
 			"error":   "pitch_not_found",
 			"message": "the requested pitch does not exist or is not currently active",
+		})
+	case errors.Is(err, repository.ErrPitchNotBookable):
+		c.JSON(http.StatusConflict, gin.H{
+			"error":   "pitch_not_bookable",
+			"message": "الملعب غير متاح للحجز",
 		})
 	case errors.Is(err, repository.ErrBookingNotFound):
 		c.JSON(http.StatusNotFound, gin.H{

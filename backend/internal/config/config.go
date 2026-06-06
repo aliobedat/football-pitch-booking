@@ -15,6 +15,27 @@ type Config struct {
 	BcryptCost int            // ← NEW
 	OTP        OTPConfig      // ← NEW (PART 3B)
 	WhatsApp   WhatsAppConfig // ← NEW (PART 4)
+	Cloudinary CloudinaryConfig
+}
+
+// CloudinaryConfig holds the credentials and pinned upload target for
+// backend-signed direct uploads of pitch images (browser → Cloudinary). The API
+// SECRET is server-side only and is NEVER sent to the client — the backend uses
+// it solely to sign upload params and to destroy replaced assets.
+//
+// All three credentials are REQUIRED: the service fails fast on boot if any is
+// missing (see Load), consistent with the JWT/OTP startup assertions. CloudName
+// and APIKey are non-secret (they reach the browser in the signed payload);
+// APISecret is secret.
+//
+// UploadPreset and Folder are pinned into the signed params so a leaked signature
+// cannot redirect an upload to a different preset or folder.
+type CloudinaryConfig struct {
+	CloudName    string // CLOUDINARY_CLOUD_NAME  — non-secret
+	APIKey       string // CLOUDINARY_API_KEY     — non-secret
+	APISecret    string // CLOUDINARY_API_SECRET  — SECRET, backend-only
+	UploadPreset string // CLOUDINARY_UPLOAD_PRESET — signed preset (default malaeb_pitches)
+	Folder       string // CLOUDINARY_UPLOAD_FOLDER — pinned folder (default malaeb/pitches)
 }
 
 // WhatsAppConfig holds Meta WhatsApp Cloud API credentials plus the names of the
@@ -133,8 +154,24 @@ func Load() *Config {
 		OTP: OTPConfig{
 			Pepper: otpPepper,
 		},
-		WhatsApp: loadWhatsAppConfig(),
-		DB:       loadDBConfig(int32(maxConns), int32(minConns)),
+		WhatsApp:   loadWhatsAppConfig(),
+		Cloudinary: loadCloudinaryConfig(),
+		DB:         loadDBConfig(int32(maxConns), int32(minConns)),
+	}
+}
+
+// loadCloudinaryConfig reads the Cloudinary credentials for signed direct image
+// uploads. The three credentials are REQUIRED — a missing value panics at boot
+// (mustGetEnv), matching the JWT/OTP startup assertions, so a deploy can never
+// run with image upload half-configured. The preset and folder default to the
+// operator-provisioned signed preset and its pinned folder.
+func loadCloudinaryConfig() CloudinaryConfig {
+	return CloudinaryConfig{
+		CloudName:    mustGetEnv("CLOUDINARY_CLOUD_NAME"),
+		APIKey:       mustGetEnv("CLOUDINARY_API_KEY"),
+		APISecret:    mustGetEnv("CLOUDINARY_API_SECRET"),
+		UploadPreset: getEnv("CLOUDINARY_UPLOAD_PRESET", "malaeb_pitches"),
+		Folder:       getEnv("CLOUDINARY_UPLOAD_FOLDER", "malaeb/pitches"),
 	}
 }
 

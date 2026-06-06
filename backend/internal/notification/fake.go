@@ -52,6 +52,12 @@ func (f *FakeChannel) Send(_ context.Context, msg OutboundMessage) (DeliveryResu
 
 	if !f.silent {
 		log.Printf("[NOTIFY:FAKE] kind=%s recipient=%s provider_id=%s", msg.Kind, msg.Recipient, id)
+		// Dev affordance: this adapter only runs locally (NOTIFICATION_CHANNEL
+		// unset/FAKE), so echo the OTP code to the console — there is no real
+		// channel to deliver it, and a developer needs it to complete login.
+		if otp, ok := msg.Payload.(OTPPayload); ok {
+			log.Printf("[NOTIFY:FAKE] >>> OTP for %s is %s (valid %ds) <<<", msg.Recipient, otp.Code, otp.ExpiresInSeconds)
+		}
 	}
 
 	return DeliveryResult{

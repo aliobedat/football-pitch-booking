@@ -16,6 +16,7 @@ import (
 const (
 	ContextKeyUserID = "malaab.user_id"
 	ContextKeyRole   = "malaab.role"
+	ContextKeyActor  = "malaab.actor"
 )
 
 // RequireAuth validates the Bearer JWT in the Authorization header.
@@ -46,9 +47,12 @@ func RequireAuth(jwtManager *auth.JWTManager) gin.HandlerFunc {
 			return
 		}
 
-		// Inject validated identity into context for downstream handlers
+		// Inject validated identity into context for downstream handlers. The
+		// typed Actor is the canonical handle used for ownership scoping; the
+		// individual id/role keys are retained for existing callers.
 		c.Set(ContextKeyUserID, claims.UserID)
 		c.Set(ContextKeyRole, claims.Role)
+		c.Set(ContextKeyActor, auth.Actor{UserID: claims.UserID, Role: claims.Role})
 
 		c.Next()
 	}
@@ -109,6 +113,19 @@ func GetUserRole(c *gin.Context) string {
 	role, _ := c.Get(ContextKeyRole)
 	r, _ := role.(string)
 	return r
+}
+
+// GetActor retrieves the authenticated principal from the Gin context. It is the
+// handle handlers pass into the data layer for ownership scoping. Falls back to
+// assembling one from the id/role keys so it is robust even if only those were
+// set. Returns a zero Actor (UserID 0, empty Role) if RequireAuth has not run.
+func GetActor(c *gin.Context) auth.Actor {
+	if v, ok := c.Get(ContextKeyActor); ok {
+		if a, ok := v.(auth.Actor); ok {
+			return a
+		}
+	}
+	return auth.Actor{UserID: GetUserID(c), Role: GetUserRole(c)}
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

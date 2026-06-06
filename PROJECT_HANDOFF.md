@@ -2,7 +2,38 @@
 
 > **CRITICAL: Read this before making any architectural or frontend changes.**
 
-_Last updated: 2026-06-03 — after the auth-hardening pass (Steps C–E): httpOnly-cookie sessions, CSRF double-submit, and removal of legacy email/password auth. The two original critical conflicts are now **resolved in code**._
+_Last updated: 2026-06-06 — read-only system audit reconciled this handoff against the actual code (see `docs/SYSTEM_AUDIT_2026-06-06.md`). Verified reality: the full player booking flow AND the owner/admin dashboard are FULLY WIRED to live endpoints; build/vet/tsc are green. Stale schema (§4) and roadmap (§9) corrected. Prior update 2026-06-04 — deployment paused; project reverted to local-only development (see §0). Auth-hardening pass (Steps C–E): httpOnly-cookie sessions, CSRF double-submit, and removal of legacy email/password auth. The two original critical conflicts are **resolved in code**._
+
+---
+
+## 0. ⏸️ DEPLOYMENT PAUSED — LOCAL-ONLY DEVELOPMENT
+
+**As of 2026-06-04, the Vercel (frontend) and Railway (backend) deployment is paused.** The cross-site CORS/cookie configuration was causing too much friction. We are building all remaining features **purely locally** and will deploy cleanly to a proper domain once the project is finished.
+
+**What this means right now:**
+
+| Concern | Local-only setting |
+|---------|--------------------|
+| Frontend → backend URL | `frontend/.env.local` → `NEXT_PUBLIC_API_URL=http://localhost:8080/api/v1` |
+| Backend CORS | Allows `http://localhost:3000` only (hardcoded + `CORS_ALLOWED_ORIGINS` in `backend/.env`) |
+| `APP_ENV` | `development` → cookies are `SameSite=Lax` + `Secure=false` (works over plain-HTTP localhost) |
+| Notification channel | `NOTIFICATION_CHANNEL=FAKE` → OTP code is **printed to the backend console**, no real WhatsApp/SMS needed |
+
+**Local run (two terminals):**
+```bash
+# Terminal 1 — backend (from backend/)
+go run ./cmd/api
+
+# Terminal 2 — frontend (from frontend/)
+npm install   # first time only
+npm run dev
+```
+
+Frontend: <http://localhost:3000> · Backend API: <http://localhost:8080/api/v1>
+
+**Login locally:** request an OTP from the login page, then read the code from the backend console line `[NOTIFY:FAKE] >>> OTP for +962... is 123456 <<<` and enter it.
+
+> The production cookie policy (`SameSite=None`+`Secure`, Vercel↔Railway) described later in §2/§6 still documents how a future deploy must be configured — it is **dormant** while local-only. The hardcoded Vercel origin in `cmd/api/main.go` is harmless and left in place for that eventual redeploy.
 
 ---
 
@@ -22,8 +53,9 @@ The audit that produced the first version of this document flagged three conflic
 
 ## ❓ NEEDS CLARIFICATION (still open)
 
-- `go.mod` declares `go 1.26.3` — verify the actual installed Go toolchain; this looks like a typo from the original scaffold.
+- ~~`go.mod` declares `go 1.26.3` — verify the toolchain; looks like a typo~~ **Verified real** (audit 2026-06-06): `go version` → `go1.26.3 windows/amd64`. Not a typo.
 - `booking_status` enum still includes `rejected`, `completed`, `no_show` — none of these transitions are wired in any handler or service. Wire them or drop them from the enum.
+- **`description` pitch field is silently dropped** (audit 2026-06-06): the dashboard form collects it and the pitch-detail page renders it, but `data.CreatePitchRequest`/`UpdatePitchRequest` have no `Description` field and no SELECT reads the `description` column (present since migration 002). Wire it through or remove it from the UI. See audit §4.
 - ~~`lib/api.ts` `isAuthEndpoint()` still lists `/auth/login`~~ **Removed** (Frontend PART 2 cleanup) — email login is gone.
 
 ---
@@ -127,7 +159,9 @@ handlers   handlers   handlers
 
 ## 4. Database Schema
 
-**Current schema version: Migration 007** (run in order: 002 → 003 → 004 → 005 → 006 → 007)
+**Current schema version: Migration 009** (run in order: 002 → 003 → 004 → 005 → 006 → 007 → 008 → 009)
+
+> Audit 2026-06-06 added migrations **008** (pitch soft-delete `deleted_at` + `pitch_audit_log` table) and **009** (`pitches.image_public_id`), which the earlier "version 007" line predated.
 
 > Note: Migration 002 has no paired `.down.sql`. The base `pitches`/`bookings`/`users` tables predate migration 002 and are not reproduced in this repo's migration set — 002+ only alter them. Treat the live Neon schema (verified by the D.5 smoke test) as ground truth.
 
@@ -146,17 +180,30 @@ handlers   handlers   handlers
 | created_at / updated_at | TIMESTAMPTZ | |
 
 ### `pitches`
+> Corrected by the 2026-06-06 audit — the prior version of this table omitted most columns the code actually reads/writes (see `data/pitches.go:33-74`). Truth derived from migrations + the Go scan columns.
+
 | Column | Type | Notes |
 |--------|------|-------|
 | id | SERIAL PK | |
 | name | TEXT | |
 | neighborhood | TEXT | |
-| format | TEXT | e.g. "5v5", "7v7" |
+| surface | `pitch_surface` ENUM | e.g. `artificial_grass`/`natural_grass`/`futsal_court` |
+| format | `pitch_format` ENUM | e.g. خماسي / سباعي |
 | price_per_hour | NUMERIC | |
+| rating | NUMERIC | legacy column; live rating is computed by LEFT JOIN on `reviews` |
+| review_count | INT | legacy column; live count from `reviews` join |
 | is_featured | BOOL | |
+| amenities | TEXT[] | defaults `'{}'` |
+| pitch_hue | TEXT | UI accent colour, assigned at create |
+| latitude / longitude | NUMERIC | map coords (default 0) |
+| is_active | BOOL DEFAULT true | activate/deactivate toggle; players see only `is_active = true` |
 | owner_id | INT FK users | added in migration 002 |
-| description | TEXT DEFAULT '' | |
-| image_url | TEXT DEFAULT '' | |
+| description | TEXT DEFAULT '' | **present but NOT wired in Go** — never inserted or selected (audit §4) |
+| image_url | TEXT DEFAULT '' | migration 002 |
+| image_public_id | TEXT DEFAULT '' | migration 009 — Cloudinary destroy handle |
+| deleted_at | TIMESTAMPTZ NULL | migration 008 — soft delete; all read queries filter `deleted_at IS NULL` |
+
+> Related tables not previously listed: **`reviews`** (pre-002; LEFT-JOINed for rating/count) and **`pitch_audit_log`** (migration 008; records pitch activate/deactivate/delete with actor + role).
 
 ### `bookings`
 | Column | Type | Notes |
@@ -321,6 +368,8 @@ CSRF: state-changing cookie-authenticated requests must send `X-CSRF-Token` equa
 - **Access-token denylist absent:** logout revokes refresh tokens and clears cookies, but a stolen access token stays valid up to 15 minutes. A Redis/DB denylist would close this.
 - **WhatsApp webhook signature** (`X-Hub-Signature-256`) is not yet validated — only the verify-token handshake is secured.
 - **`OTP_HMAC_PEPPER` in `.env.example`** is a placeholder; generate an independent secret per environment and never reuse `JWT_SECRET`.
+- **`description` pitch field silently dropped** (audit 2026-06-06): collected in the dashboard form and rendered on pitch-detail, but not wired in the Go data layer — entered descriptions are lost. See audit §4.
+- **`POST /notifications/opt-out` is orphaned** (audit 2026-06-06): implemented and registered, but no frontend consumer — consent withdrawal is unreachable from the UI.
 
 ---
 
@@ -330,9 +379,9 @@ CSRF: state-changing cookie-authenticated requests must send `X-CSRF-Token` equa
 | Part | Goal | Status |
 |------|------|--------|
 | PART 1 | App shell + auth + pitch list + booking flow | done (now cookie-based; localStorage removed) |
-| PART 2 | OTP login/verify UI fully wired to cookie session + `/auth/me` rehydration | in progress (login page migrated; verify the full flow end-to-end) |
-| PART 3 | Booking flow: pitch detail page with calendar/slot picker, booking confirmation | not started |
-| PART 4 | Owner dashboard: booking list, cancel button, pitch management UI | not started |
+| PART 2 | OTP login/verify UI fully wired to cookie session + `/auth/me` rehydration | **done** (audit 2026-06-06 verified the full flow: request-otp → verify-otp → cookie session → `/auth/me` rehydration → single-flight refresh → logout) |
+| PART 3 | Booking flow: pitch detail page with calendar/slot picker, booking confirmation | **done** (audit 2026-06-06: `pitches/[id]/BookingForm.tsx` slot-picker → `GET /pitches/:id/availability` + `POST /bookings`, server-time-anchored, with success/confirmation screen — FULLY WIRED) |
+| PART 4 | Owner dashboard: booking list, cancel button, pitch management UI | **done** (audit 2026-06-06: `/admin/bookings`, cancel modal, pitch create/edit/delete, activate-toggle, Cloudinary image upload — all FULLY WIRED) |
 
 ### Backend (open items)
 - Wire `rejected`, `completed`, `no_show` status transitions or remove them from the enum.
