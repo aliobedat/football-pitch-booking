@@ -37,6 +37,22 @@ var (
 	ErrCodeMismatch = errors.New("otp: incorrect code")
 )
 
+// RateLimitError is returned by Request when a quota or the resend cooldown is
+// hit. It carries a Retry-After hint and unwraps to the matching sentinel
+// (ErrRateLimited or ErrResendTooSoon), so existing errors.Is(...) checks keep
+// working while the HTTP layer can also read RetryAfter to set the header.
+type RateLimitError struct {
+	// RetryAfter is a conservative hint for when the caller may try again: the
+	// remaining cooldown for a too-soon resend, or the tripped window for a quota.
+	RetryAfter time.Duration
+	sentinel   error
+}
+
+func (e *RateLimitError) Error() string { return e.sentinel.Error() }
+
+// Unwrap lets errors.Is(err, ErrRateLimited) / ErrResendTooSoon match.
+func (e *RateLimitError) Unwrap() error { return e.sentinel }
+
 // Code is the persisted state of an active one-time code for a single phone.
 // Only the keyed Hash is stored — never the plaintext. Attempts counts FAILED
 // verification tries and drives lockout.

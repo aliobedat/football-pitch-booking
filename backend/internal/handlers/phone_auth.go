@@ -11,8 +11,10 @@ package handlers
 import (
 	"context"
 	"errors"
+	"math"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -288,10 +290,12 @@ func (h *PhoneAuthHandler) writeRequestOTPError(c *gin.Context, err error) {
 			"message": "consent (opt_in) is required before a verification code can be sent",
 		})
 	case errors.Is(err, otp.ErrRateLimited):
+		setRetryAfter(c, err)
 		c.JSON(http.StatusTooManyRequests, gin.H{
 			"error": "rate_limited", "message": "too many requests, please try again later",
 		})
 	case errors.Is(err, otp.ErrResendTooSoon):
+		setRetryAfter(c, err)
 		c.JSON(http.StatusTooManyRequests, gin.H{
 			"error": "resend_too_soon", "message": "a code was just sent, please wait before requesting another",
 		})
@@ -333,6 +337,18 @@ func (h *PhoneAuthHandler) writeVerifyOTPError(c *gin.Context, err error) {
 			"error": "internal_error", "message": "could not verify the code, please try again",
 		})
 	}
+}
+
+// setRetryAfter sets the Retry-After header (whole seconds, rounded up, min 1)
+// when the rate-limit error carries a hint, so a throttled client knows how long
+// to back off. It never leaks anything beyond the delay.
+func setRetryAfter(c *gin.Context, err error) {
+	var rl *otp.RateLimitError
+	if !errors.As(err, &rl) || rl.RetryAfter <= 0 {
+		return
+	}
+	secs := max(int(math.Ceil(rl.RetryAfter.Seconds())), 1)
+	c.Header("Retry-After", strconv.Itoa(secs))
 }
 
 // normalizePhone coerces a user-supplied phone into canonical E.164, matching

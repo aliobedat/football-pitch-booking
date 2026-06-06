@@ -46,11 +46,33 @@ type Config struct {
 	MaxPerPhone int
 	// MaxPerIP is the max Request calls per source IP within RateWindow.
 	MaxPerIP int
+
+	// ── Layered anti-AIT caps (anti-toll-fraud / SMS-pumping) ────────────────
+	// Each cap below is applied as an ADDITIONAL sliding window when > 0, on top
+	// of the legacy MaxPerPhone/MaxPerIP burst windows above. Set to 0 to disable
+	// an individual layer. All are evaluated BEFORE a code is generated or sent,
+	// so a blocked request costs zero messages.
+
+	// MaxPerPhoneHour / MaxPerPhoneDay cap codes per E.164 number over a rolling
+	// hour / day — the primary defence against draining the budget on one number.
+	MaxPerPhoneHour int
+	MaxPerPhoneDay  int
+	// MaxPerIPMinute / MaxPerIPHour cap requests per source IP, catching an
+	// attacker cycling through many phone numbers from one origin.
+	MaxPerIPMinute int
+	MaxPerIPHour   int
+	// MaxGlobalHour / MaxGlobalDay are platform-wide ceilings on total OTP sends
+	// — a circuit-breaker backstop against distributed AIT (many phones, many
+	// IPs). When tripped, every request is rejected until the window drains.
+	MaxGlobalHour int
+	MaxGlobalDay  int
 }
 
 // DefaultConfig returns sensible production defaults: a 6-digit code valid for 5
-// minutes, locked out after 5 wrong tries, a 60s resend cooldown, and at most 5
-// requests per phone / 10 per IP within a 15-minute window.
+// minutes, locked out after 5 wrong tries, a 60s resend cooldown, a 15-minute
+// burst window (≤5/phone, ≤10/IP), and the layered anti-AIT caps — ≤5/hour and
+// ≤10/day per phone, ≤10/min and ≤30/hour per IP, and a platform-wide circuit
+// breaker of ≤500/hour and ≤2000/day total OTP sends.
 func DefaultConfig() Config {
 	return Config{
 		CodeLength:        6,
@@ -60,7 +82,27 @@ func DefaultConfig() Config {
 		RateWindow:        15 * time.Minute,
 		MaxPerPhone:       5,
 		MaxPerIP:          10,
+		MaxPerPhoneHour:   5,
+		MaxPerPhoneDay:    10,
+		MaxPerIPMinute:    10,
+		MaxPerIPHour:      30,
+		MaxGlobalHour:     500,
+		MaxGlobalDay:      2000,
 	}
+}
+
+// Global circuit-breaker bucket keys. They are platform-wide (not keyed by phone
+// or IP), so every accepted OTP request counts toward the same ceiling.
+const (
+	globalBucketHour = "global:otp:hour"
+	globalBucketDay  = "global:otp:day"
+)
+
+// rateRule is one sliding-window quota to evaluate before issuing a code.
+type rateRule struct {
+	key    string
+	max    int
+	window time.Duration
 }
 
 // Service implements notification.OtpService.
@@ -124,31 +166,31 @@ func (s *Service) Request(ctx context.Context, phone string) error {
 	}
 	now := s.now()
 
-	// Per-phone quota.
-	ok, err := s.limiter.Allow(ctx, "phone:"+phone, s.cfg.MaxPerPhone, s.cfg.RateWindow, now)
-	if err != nil {
-		return fmt.Errorf("otp: phone rate-limit check: %w", err)
-	}
-	if !ok {
-		return ErrRateLimited
-	}
-
-	// Per-IP quota (only when an IP is known; the HTTP layer supplies it).
-	if ip, present := ipFromContext(ctx); present {
-		ok, err := s.limiter.Allow(ctx, "ip:"+ip, s.cfg.MaxPerIP, s.cfg.RateWindow, now)
-		if err != nil {
-			return fmt.Errorf("otp: ip rate-limit check: %w", err)
-		}
-		if !ok {
-			return ErrRateLimited
-		}
-	}
-
-	// Resend cooldown: refuse if an active code was issued too recently.
+	// Resend cooldown FIRST: a rapid double-tap is refused with a precise
+	// Retry-After WITHOUT consuming a slot in any of the windowed quotas below
+	// (store.Get records nothing). This keeps an honest user's accidental
+	// re-tap from burning their hourly/daily budget.
 	if existing, found, err := s.store.Get(ctx, phone); err != nil {
 		return fmt.Errorf("otp: load existing code: %w", err)
-	} else if found && now.Sub(existing.CreatedAt) < s.cfg.ResendCooldown {
-		return ErrResendTooSoon
+	} else if found {
+		if elapsed := now.Sub(existing.CreatedAt); elapsed < s.cfg.ResendCooldown {
+			return &RateLimitError{RetryAfter: s.cfg.ResendCooldown - elapsed, sentinel: ErrResendTooSoon}
+		}
+	}
+
+	// Layered quotas (per-phone, per-IP, and the global circuit-breaker), ALL
+	// evaluated before any code is generated or delivered — so an over-quota or
+	// breaker-tripped request is rejected without consuming entropy or hitting the
+	// notification channel. The first breach wins; its window sizes the
+	// Retry-After hint returned to the client.
+	for _, r := range s.requestRules(ctx, phone) {
+		ok, err := s.limiter.Allow(ctx, r.key, r.max, r.window, now)
+		if err != nil {
+			return fmt.Errorf("otp: rate-limit %s: %w", r.key, err)
+		}
+		if !ok {
+			return &RateLimitError{RetryAfter: r.window, sentinel: ErrRateLimited}
+		}
 	}
 
 	// Generate and persist only the hash; the plaintext lives just long enough
@@ -186,6 +228,51 @@ func (s *Service) Request(ctx context.Context, phone string) error {
 	}
 
 	return nil
+}
+
+// requestRules assembles the ordered sliding-window quotas for one OTP request:
+// the legacy per-phone/per-IP burst windows, the layered hourly/daily per-phone
+// and per-minute/per-hour per-IP caps, and the platform-wide global breaker.
+// Each layer is included only when its cap is configured (> 0) and, for the IP
+// layers, only when the caller IP is known. Distinct bucket-key prefixes keep
+// the windows independent (one window's prune never deletes another's events).
+func (s *Service) requestRules(ctx context.Context, phone string) []rateRule {
+	c := s.cfg
+	rules := make([]rateRule, 0, 8)
+
+	// Per-phone.
+	if c.MaxPerPhone > 0 {
+		rules = append(rules, rateRule{"phone:" + phone, c.MaxPerPhone, c.RateWindow})
+	}
+	if c.MaxPerPhoneHour > 0 {
+		rules = append(rules, rateRule{"phone:h:" + phone, c.MaxPerPhoneHour, time.Hour})
+	}
+	if c.MaxPerPhoneDay > 0 {
+		rules = append(rules, rateRule{"phone:d:" + phone, c.MaxPerPhoneDay, 24 * time.Hour})
+	}
+
+	// Per-IP (only when the HTTP layer supplied one).
+	if ip, present := ipFromContext(ctx); present {
+		if c.MaxPerIP > 0 {
+			rules = append(rules, rateRule{"ip:" + ip, c.MaxPerIP, c.RateWindow})
+		}
+		if c.MaxPerIPMinute > 0 {
+			rules = append(rules, rateRule{"ip:m:" + ip, c.MaxPerIPMinute, time.Minute})
+		}
+		if c.MaxPerIPHour > 0 {
+			rules = append(rules, rateRule{"ip:h:" + ip, c.MaxPerIPHour, time.Hour})
+		}
+	}
+
+	// Global circuit breaker — platform-wide backstop against distributed AIT.
+	if c.MaxGlobalHour > 0 {
+		rules = append(rules, rateRule{globalBucketHour, c.MaxGlobalHour, time.Hour})
+	}
+	if c.MaxGlobalDay > 0 {
+		rules = append(rules, rateRule{globalBucketDay, c.MaxGlobalDay, 24 * time.Hour})
+	}
+
+	return rules
 }
 
 // Verify checks code against the active stored hash for phone. On success it
