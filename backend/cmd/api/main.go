@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -80,13 +81,46 @@ func main() {
 	// an unapproved AUTHENTICATION template while Meta verification is pending).
 	sms := notification.NewSmsChannel()
 
+	// Config-driven type→sink routing policy (MVP auth channel). Booking kinds all
+	// share the booking route; OTP has its own; unmapped kinds hit the fail-safe
+	// default (a non-delivering sink, so a new kind never burns messaging budget).
+	bookingRoute := notification.ChannelName(cfg.Notification.BookingRoute)
+	routePolicy := map[notification.MessageKind]notification.ChannelName{
+		notification.KindOTP:              notification.ChannelName(cfg.Notification.OTPRoute),
+		notification.KindBookingConfirmed: bookingRoute,
+		notification.KindBookingReminder:  bookingRoute,
+		notification.KindBookingCancelled: bookingRoute,
+		notification.KindBookingRejected:  bookingRoute,
+	}
+	defaultRoute := notification.ChannelName(cfg.Notification.DefaultRoute)
+
 	channelOpts := []notification.Option{
 		notification.WithChannel(notification.ChannelFake, notification.NewFakeChannel()),
 		notification.WithChannel(notification.ChannelSMS, sms),
+		// Non-delivering log sink: booking events route here during the closed beta
+		// (zero messaging budget) while we observe exactly what would be sent.
+		notification.WithChannel(notification.ChannelLogOnly, notification.NewLogOnlySink(slog.Default())),
 		notification.WithOptInChecker(notification.OptInFunc(authRepo.HasOptedIn)),
 		// Opt-out gate (PART 6): a user who withdrew consent receives NOTHING,
 		// regardless of message kind. Backed by users.opt_out via authRepo.
 		notification.WithOptOutChecker(notification.OptOutFunc(authRepo.HasOptedOut)),
+		notification.WithRoutingPolicy(routePolicy, defaultRoute),
+		notification.WithServiceLogger(slog.Default()),
+	}
+
+	// Register the Twilio SMS adapter when configured (closed-beta OTP delivery).
+	// If OTP routes to twilio_sms but credentials are absent, the routing-safety
+	// assertion below fails boot — a precise "OTP has no real sender" error.
+	if cfg.Twilio.Configured() {
+		twilioCh, twErr := notification.NewTwilioChannel(cfg.Twilio)
+		if twErr != nil {
+			log.Fatalf("[FATAL] Twilio configured but adapter init failed: %v", twErr)
+		}
+		channelOpts = append(channelOpts,
+			notification.WithChannel(notification.ChannelTwilioSMS, twilioCh))
+		log.Printf("[NOTIFY] Twilio SMS adapter registered (from=%s)", cfg.Twilio.FromNumber)
+	} else {
+		log.Printf("[NOTIFY] Twilio not configured — twilio_sms adapter not registered")
 	}
 
 	if wa, waErr := notification.NewWhatsAppChannel(cfg.WhatsApp); waErr != nil {
@@ -104,10 +138,23 @@ func main() {
 
 	notifier := notification.NewService(activeChannel, channelOpts...)
 
+	// SAFETY INVARIANT: OTP MUST resolve to a real delivery adapter (not a log
+	// sink, not an unregistered name). A silent OTP→log route is a total login
+	// outage, so we fail boot here rather than discover it in production.
+	if err := notifier.ValidateRouting(); err != nil {
+		log.Fatalf("[FATAL] %v — set TWILIO_* and/or NOTIFY_OTP_ROUTE so OTP has a real sender", err)
+	}
+
 	// OTP stays SYNCHRONOUS through the service: a one-time code is time-sensitive,
 	// so it must be dispatched (and its opt-in/opt-out gates evaluated) inline, not
-	// deferred behind the retry/backoff queue.
-	otpSvc := otp.New(notifier, otpStore, otpStore, otpHasher, otp.DefaultConfig())
+	// deferred behind the retry/backoff queue. The global daily ceiling is aligned
+	// with the Twilio trial limit (TIER-0 anti-AIT breaker ↔ provider budget).
+	otpCfg := otp.DefaultConfig()
+	otpCfg.MaxGlobalDay = cfg.OTP.GlobalDailyCap
+	if otpCfg.MaxGlobalHour > otpCfg.MaxGlobalDay {
+		otpCfg.MaxGlobalHour = otpCfg.MaxGlobalDay
+	}
+	otpSvc := otp.New(notifier, otpStore, otpStore, otpHasher, otpCfg)
 
 	// ── Durable notification outbox (PART 6) ──────────────────────────────────
 	// The Postgres-backed outbox persists each async message as a job; a worker

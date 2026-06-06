@@ -8,14 +8,44 @@ import (
 )
 
 type Config struct {
-	AppEnv     string
-	ServerPort string
-	DB         DBConfig
-	JWT        JWTConfig      // ← NEW
-	BcryptCost int            // ← NEW
-	OTP        OTPConfig      // ← NEW (PART 3B)
-	WhatsApp   WhatsAppConfig // ← NEW (PART 4)
-	Cloudinary CloudinaryConfig
+	AppEnv       string
+	ServerPort   string
+	DB           DBConfig
+	JWT          JWTConfig      // ← NEW
+	BcryptCost   int            // ← NEW
+	OTP          OTPConfig      // ← NEW (PART 3B)
+	WhatsApp     WhatsAppConfig // ← NEW (PART 4)
+	Cloudinary   CloudinaryConfig
+	Twilio       TwilioConfig       // ← NEW (MVP auth channel)
+	Notification NotificationConfig // ← NEW (type-based routing)
+}
+
+// TwilioConfig holds the Twilio Programmable SMS credentials for the closed-beta
+// auth channel (OTP-over-SMS). All three are needed to send; they are OPTIONAL at
+// load time (a FAKE/dev deployment needs none), but a PARTIAL configuration fails
+// fast (see loadTwilioConfig) and the routing safety check fails boot if OTP is
+// routed to Twilio while it is unconfigured. The AuthToken is a secret, never
+// hardcoded and never logged.
+type TwilioConfig struct {
+	AccountSID string // TWILIO_ACCOUNT_SID
+	AuthToken  string // TWILIO_AUTH_TOKEN — secret
+	FromNumber string // TWILIO_FROM_NUMBER — E.164 trial sender number
+}
+
+// Configured reports whether all three Twilio credentials are present.
+func (c TwilioConfig) Configured() bool {
+	return c.AccountSID != "" && c.AuthToken != "" && c.FromNumber != ""
+}
+
+// NotificationConfig is the config-driven routing policy: which registered
+// channel/sink each message type resolves to. Defaults encode the closed-beta
+// policy (OTP → Twilio SMS; booking events → log only). Changing the policy
+// post-incorporation is an env edit, no code change. The OTP route MUST resolve
+// to a real delivery adapter — enforced by a startup assertion, not here.
+type NotificationConfig struct {
+	OTPRoute     string // NOTIFY_OTP_ROUTE      (default twilio_sms)
+	BookingRoute string // NOTIFY_BOOKING_ROUTE  (default log_only) — all booking kinds
+	DefaultRoute string // NOTIFY_DEFAULT_ROUTE  (default log_only) — fail-safe for unknown kinds
 }
 
 // CloudinaryConfig holds the credentials and pinned upload target for
@@ -77,6 +107,12 @@ type OTPConfig struct {
 	// the environment and is never hardcoded — a leaked code store is useless
 	// without it.
 	Pepper string
+
+	// GlobalDailyCap is the platform-wide ceiling on OTP sends per rolling day —
+	// the global circuit breaker from the anti-AIT rate-limit work. It is aligned
+	// with the Twilio TRIAL daily ceiling (~50/day) so the closed beta cannot blow
+	// past the provider limit. Raise it post-incorporation when off the trial.
+	GlobalDailyCap int
 }
 
 type DBConfig struct {
@@ -142,6 +178,12 @@ func Load() *Config {
 		panic("CONFIG: OTP_HMAC_PEPPER must be at least 16 characters long")
 	}
 
+	// Global OTP daily ceiling — aligned with the Twilio trial limit by default.
+	otpGlobalDailyCap, err := strconv.Atoi(getEnv("OTP_GLOBAL_DAILY_CAP", "50"))
+	if err != nil || otpGlobalDailyCap < 1 {
+		panic("CONFIG: OTP_GLOBAL_DAILY_CAP must be a positive integer")
+	}
+
 	return &Config{
 		AppEnv:     getEnv("APP_ENV", "development"),
 		ServerPort: getEnv("PORT", getEnv("SERVER_PORT", "8080")),
@@ -152,11 +194,46 @@ func Load() *Config {
 			RefreshExpiry: refreshExpiry,
 		},
 		OTP: OTPConfig{
-			Pepper: otpPepper,
+			Pepper:         otpPepper,
+			GlobalDailyCap: otpGlobalDailyCap,
 		},
-		WhatsApp:   loadWhatsAppConfig(),
-		Cloudinary: loadCloudinaryConfig(),
-		DB:         loadDBConfig(int32(maxConns), int32(minConns)),
+		WhatsApp:     loadWhatsAppConfig(),
+		Cloudinary:   loadCloudinaryConfig(),
+		Twilio:       loadTwilioConfig(),
+		Notification: loadNotificationConfig(),
+		DB:           loadDBConfig(int32(maxConns), int32(minConns)),
+	}
+}
+
+// loadTwilioConfig reads the optional Twilio credentials. Absence is fine (FAKE/
+// dev). But a PARTIAL configuration — some credentials set, others missing — is a
+// deployment mistake that would silently disable SMS, so it fails fast, matching
+// the loud-failure convention of the other secrets.
+func loadTwilioConfig() TwilioConfig {
+	c := TwilioConfig{
+		AccountSID: getEnv("TWILIO_ACCOUNT_SID", ""),
+		AuthToken:  getEnv("TWILIO_AUTH_TOKEN", ""),
+		FromNumber: getEnv("TWILIO_FROM_NUMBER", ""),
+	}
+	set := 0
+	for _, v := range []string{c.AccountSID, c.AuthToken, c.FromNumber} {
+		if v != "" {
+			set++
+		}
+	}
+	if set != 0 && set != 3 {
+		panic("CONFIG: TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN and TWILIO_FROM_NUMBER must all be set together")
+	}
+	return c
+}
+
+// loadNotificationConfig reads the config-driven routing policy, defaulting to the
+// closed-beta policy: OTP over Twilio SMS, booking events to the log-only sink.
+func loadNotificationConfig() NotificationConfig {
+	return NotificationConfig{
+		OTPRoute:     getEnv("NOTIFY_OTP_ROUTE", "twilio_sms"),
+		BookingRoute: getEnv("NOTIFY_BOOKING_ROUTE", "log_only"),
+		DefaultRoute: getEnv("NOTIFY_DEFAULT_ROUTE", "log_only"),
 	}
 }
 
