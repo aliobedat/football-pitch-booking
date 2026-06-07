@@ -486,9 +486,8 @@ func (m *PitchModel) SoftDeletePitch(ctx context.Context, id int, actor auth.Act
 
 	// 2. Future-confirmed-booking guard. "Future" = the slot has not yet ended
 	//    (upper(booking_range) > now); covers both upcoming and in-progress
-	//    bookings. booking_range stores UTC instants typed as `timestamp`, so we
-	//    compare against the UTC now passed as a ::timestamp (matching the rest of
-	//    the codebase).
+	//    bookings. booking_range is a tstzrange (true instants), so we compare
+	//    against the UTC now passed as a ::timestamptz — timezone-independent.
 	now := time.Now().UTC()
 	var futureCount int
 	if err = tx.QueryRow(ctx, `
@@ -496,7 +495,7 @@ func (m *PitchModel) SoftDeletePitch(ctx context.Context, id int, actor auth.Act
 		FROM bookings
 		WHERE pitch_id = $1
 		  AND status = 'confirmed'
-		  AND upper(booking_range) > $2::timestamp
+		  AND upper(booking_range) > $2::timestamptz
 	`, id, now).Scan(&futureCount); err != nil {
 		return 0, fmt.Errorf("SoftDeletePitch: count future bookings: %w", err)
 	}

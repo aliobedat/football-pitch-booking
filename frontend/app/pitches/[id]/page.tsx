@@ -8,6 +8,7 @@ import api from '@/lib/api';
 import type { Pitch } from '@/lib/types';
 import Navbar from '@/components/Navbar';
 import BookingForm from './BookingForm';
+import ReviewSection from '@/components/reviews/ReviewSection';
 import { MapPin, Star, Users, Zap, ArrowRight } from 'lucide-react';
 
 // ── Lazy-load the map — Maps JS is client-only and heavy ─────────────────────
@@ -229,6 +230,11 @@ export default function PitchDetailPage() {
                   <PitchMap lat={pitch.lat} lng={pitch.lng} zoom={15} />
                 </div>
               )}
+            </div>
+
+            {/* Verified reviews */}
+            <div className="p-5 rounded-xl bg-[#141715] border border-white/[0.07]">
+              <ReviewSection pitchId={pitch.id} />
             </div>
           </section>
 

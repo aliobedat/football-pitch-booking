@@ -2,10 +2,33 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
+
+// devEnvs is the explicit allowlist of APP_ENV values that enable developer
+// conveniences: Gin DebugMode, relaxed cookie security (SameSite=Lax, Secure=
+// false) and the localhost-only DB fallback. The gating is FAIL-CLOSED — ANY
+// other value, including empty, unset, or a typo, is treated as production and
+// gets the secure path. Local dev MUST therefore set APP_ENV to one of these.
+var devEnvs = map[string]bool{
+	"development": true,
+	"local":       true,
+	"dev":         true,
+	"test":        true,
+}
+
+// IsDevEnv reports whether appEnv is a recognised developer environment.
+// Unknown/empty values are NOT dev → production behaviour (fail-closed).
+func IsDevEnv(appEnv string) bool {
+	return devEnvs[strings.ToLower(strings.TrimSpace(appEnv))]
+}
+
+// IsDev reports whether this config is running in a developer environment.
+func (c *Config) IsDev() bool { return IsDevEnv(c.AppEnv) }
 
 type Config struct {
 	AppEnv       string
@@ -138,12 +161,39 @@ type JWTConfig struct {
 
 func (d DBConfig) DSN() string {
 	if d.URL != "" {
-		return d.URL
+		return enforceSSLMode(d.URL)
 	}
+	// Keyword DSN built ONLY for the dev localhost fallback (see loadDBConfig),
+	// where a local Postgres without TLS is acceptable. A cloud database always
+	// arrives via DATABASE_URL, which goes through enforceSSLMode above.
 	return fmt.Sprintf(
 		"host=%s port=%s user=%s password=%s dbname=%s sslmode=disable",
 		d.Host, d.Port, d.User, d.Password, d.Name,
 	)
+}
+
+// enforceSSLMode guarantees a non-local DATABASE_URL connects over TLS. A
+// localhost target may run without TLS (left untouched); any other host with a
+// missing or weaker-than-require sslmode is upgraded to sslmode=require — we
+// never silently talk to a cloud database in cleartext.
+func enforceSSLMode(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL // malformed — let pgx surface the parse error
+	}
+	switch u.Hostname() {
+	case "localhost", "127.0.0.1", "::1":
+		return rawURL
+	}
+	q := u.Query()
+	switch q.Get("sslmode") {
+	case "require", "verify-ca", "verify-full":
+		// already at or above the minimum
+	default:
+		q.Set("sslmode", "require")
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
 }
 
 func Load() *Config {
@@ -185,7 +235,10 @@ func Load() *Config {
 	}
 
 	return &Config{
-		AppEnv:     getEnv("APP_ENV", "development"),
+		// FAIL-CLOSED: no dev default. An unset/empty APP_ENV is NOT a dev value
+		// (see IsDevEnv) and therefore inherits the secure production path. Local
+		// dev must set APP_ENV=development explicitly.
+		AppEnv:     getEnv("APP_ENV", ""),
 		ServerPort: getEnv("PORT", getEnv("SERVER_PORT", "8080")),
 		BcryptCost: bcryptCost,
 		JWT: JWTConfig{
@@ -201,7 +254,7 @@ func Load() *Config {
 		Cloudinary:   loadCloudinaryConfig(),
 		Twilio:       loadTwilioConfig(),
 		Notification: loadNotificationConfig(),
-		DB:           loadDBConfig(int32(maxConns), int32(minConns)),
+		DB:           loadDBConfig(int32(maxConns), int32(minConns), IsDevEnv(getEnv("APP_ENV", ""))),
 	}
 }
 
@@ -273,12 +326,30 @@ func loadWhatsAppConfig() WhatsAppConfig {
 	}
 }
 
-func loadDBConfig(maxConns, minConns int32) DBConfig {
+func loadDBConfig(maxConns, minConns int32, isDev bool) DBConfig {
 	if url := getEnv("DATABASE_URL", ""); url != "" {
 		return DBConfig{URL: url, MaxConns: maxConns, MinConns: minConns}
 	}
+
+	// No DATABASE_URL. We NEVER silently assemble a fallback cloud DSN: in
+	// production this is fatal, refusing to boot rather than guessing connection
+	// parameters and risking an insecure/wrong target.
+	if !isDev {
+		panic("FATAL: DATABASE_URL is required in production — no insecure fallback DSN is built. " +
+			"Set DATABASE_URL (sslmode=require enforced) or APP_ENV to a dev value for the localhost fallback")
+	}
+
+	// Dev-only fallback, and ONLY to a localhost database (where sslmode=disable
+	// is acceptable). A non-local DB_HOST in dev still requires DATABASE_URL so
+	// TLS enforcement (enforceSSLMode) is never bypassed.
+	host := getEnv("DB_HOST", "localhost")
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+	default:
+		panic("FATAL: the dev DB fallback is localhost-only — set DATABASE_URL for a non-local database")
+	}
 	return DBConfig{
-		Host:     mustGetEnv("DB_HOST"),
+		Host:     host,
 		Port:     getEnv("DB_PORT", "5432"),
 		User:     mustGetEnv("DB_USER"),
 		Password: mustGetEnv("DB_PASSWORD"),

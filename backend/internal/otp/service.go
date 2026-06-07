@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"strings"
 	"time"
@@ -115,6 +116,14 @@ type Service struct {
 
 	now  func() time.Time
 	rand io.Reader
+
+	// devBypass, when true, short-circuits OTP delivery: instead of dispatching
+	// through the NotificationService (Twilio et al.) the plaintext code is logged
+	// to stdout and a simulated success is returned. It exists purely to spare
+	// Twilio credits during LOCAL development and is wired ONLY from config.IsDev()
+	// (fail-closed) — production, unset, or any non-dev APP_ENV leaves it false, so
+	// the mock can never leak into a real deployment. Default false.
+	devBypass bool
 }
 
 // Option customises a Service at construction.
@@ -130,6 +139,14 @@ func WithClock(now func() time.Time) Option {
 // to force a known code or simulate an entropy failure).
 func WithRandReader(r io.Reader) Option {
 	return func(s *Service) { s.rand = r }
+}
+
+// WithDevBypass enables the LOCAL-DEV OTP mock: when enabled, Request logs the
+// generated code to stdout and returns success WITHOUT dispatching through the
+// NotificationService (no Twilio call, no credits burned). Wire it strictly from
+// config.IsDev() so it is fail-closed — never pass true in production.
+func WithDevBypass(enabled bool) Option {
+	return func(s *Service) { s.devBypass = enabled }
 }
 
 // New constructs an OTP Service. notifier, store, limiter, and hasher are the
@@ -209,6 +226,14 @@ func (s *Service) Request(ctx context.Context, phone string) error {
 	}
 	if err := s.store.Save(ctx, rec); err != nil {
 		return fmt.Errorf("otp: store code: %w", err)
+	}
+
+	// LOCAL-DEV bypass: skip the real provider entirely and print the code so a
+	// developer can complete login without spending Twilio credits. Gated on
+	// config.IsDev() (fail-closed), so this branch is unreachable in production.
+	if s.devBypass {
+		log.Printf("🎯 [LOCAL DEV] OTP for %s is: %s", phone, code)
+		return nil
 	}
 
 	msg := notification.OutboundMessage{

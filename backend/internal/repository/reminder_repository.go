@@ -98,9 +98,9 @@ func (r *reminderRepo) ClaimDueReminders(
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
 
-	// booking_range stores UTC wall-clock instants typed as `timestamp` (no tz);
-	// compare against the same representation by passing the UTC bounds and
-	// casting to ::timestamp, mirroring how CreateBooking inserts the range.
+	// booking_range is a tstzrange (true points in time); compare its bounds
+	// against the UTC horizon passed as ::timestamptz — timezone-independent,
+	// mirroring how CreateBooking inserts the range.
 	lower := now.UTC()
 	upper := lower.Add(horizon)
 
@@ -116,8 +116,8 @@ func (r *reminderRepo) ClaimDueReminders(
 		WHERE b.status = 'confirmed'
 		  AND b.reminder_sent = FALSE
 		  AND u.phone IS NOT NULL AND u.phone <> ''
-		  AND lower(b.booking_range) >  $1::timestamp
-		  AND lower(b.booking_range) <= $2::timestamp
+		  AND lower(b.booking_range) >  $1::timestamptz
+		  AND lower(b.booking_range) <= $2::timestamptz
 		ORDER BY lower(b.booking_range)
 		LIMIT $3
 		FOR UPDATE OF b SKIP LOCKED

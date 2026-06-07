@@ -55,6 +55,11 @@ type AuthRepository interface {
 
 	// StoreRefreshToken persists the SHA-256 hash of a newly issued refresh token.
 	StoreRefreshToken(ctx context.Context, userID int, tokenHash string, expiresAt time.Time) error
+
+	// UpdateFullName sets users.full_name for userID (Just-In-Time name capture).
+	// The caller validates/normalises the value first. Returns ErrUserNotFound
+	// when no row matches so the handler can map it to a 404.
+	UpdateFullName(ctx context.Context, userID int, fullName string) (*models.User, error)
 }
 
 type authRepo struct {
@@ -175,6 +180,30 @@ func (r *authRepo) FindByID(ctx context.Context, userID int) (*models.User, erro
 			return nil, ErrUserNotFound
 		}
 		return nil, fmt.Errorf("FindByID: %w", err)
+	}
+	return &u, nil
+}
+
+// UpdateFullName sets users.full_name and returns the refreshed profile. The
+// value is assumed already trimmed/validated by the handler.
+func (r *authRepo) UpdateFullName(ctx context.Context, userID int, fullName string) (*models.User, error) {
+	var u models.User
+	err := r.db.QueryRow(ctx, `
+		UPDATE users
+		SET    full_name  = $2,
+		       updated_at = NOW()
+		WHERE  id = $1
+		RETURNING id, COALESCE(full_name,''), COALESCE(email,''), COALESCE(phone,''),
+		          role, created_at, updated_at
+	`, userID, fullName).Scan(
+		&u.ID, &u.FullName, &u.Email, &u.Phone,
+		&u.Role, &u.CreatedAt, &u.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("UpdateFullName: %w", err)
 	}
 	return &u, nil
 }

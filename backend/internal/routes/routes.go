@@ -11,6 +11,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/handlers"
 	"github.com/ali/football-pitch-api/internal/middleware"
 	"github.com/ali/football-pitch-api/internal/notification"
+	"github.com/ali/football-pitch-api/internal/repository"
 )
 
 func Register(
@@ -39,6 +40,7 @@ func Register(
 	pitchHandler := &handlers.PitchHandler{Model: &data.PitchModel{DB: db}, Cloudinary: cldSvc}
 	webhookHandler := handlers.NewWhatsAppWebhookHandler(deliveryStore, cfg.WhatsApp.WebhookVerifyToken)
 	notificationHandler := handlers.NewNotificationHandler(optOutStore)
+	reviewHandler := handlers.NewReviewHandler(repository.NewReviewRepository(db))
 	v1 := r.Group("/api/v1")
 
 	// ════════════════════════════════════════════════════════════════════════
@@ -47,6 +49,8 @@ func Register(
 	v1.GET("/ping", healthHandler.Ping)
 	v1.GET("/pitches", pitchHandler.ListPitches)
 	v1.GET("/pitches/:id", pitchHandler.GetPitch)
+	// Public: anyone can read a pitch's reviews + rating aggregates.
+	v1.GET("/pitches/:id/reviews", reviewHandler.ListPitchReviews)
 
 	// Provider delivery-status webhooks (PART 6). Public: authentication is the
 	// Meta verify-token handshake (GET) plus, in production, request-signature
@@ -79,6 +83,35 @@ func Register(
 
 		// Current-user profile — session rehydration for cookie-based auth.
 		protected.GET("/auth/me", phoneAuthHandler.GetCurrentUser)
+
+		// Just-In-Time profile update (full_name capture at checkout). Strict
+		// BOLA: the target id is taken from the session, never the body.
+		protected.PATCH("/me", phoneAuthHandler.PatchMe)
+
+		// ── Reviews ───────────────────────────────────────────────────────────
+		// Derived eligibility probe (player books → can review after it ends).
+		protected.GET("/pitches/:id/review-eligibility",
+			middleware.RequireRole("player"),
+			reviewHandler.GetEligibility,
+		)
+		// Create a verified review (player only; server re-validates eligibility
+		// via the composite FK + unique index).
+		protected.POST("/pitches/:id/reviews",
+			middleware.RequireRole("player"),
+			reviewHandler.CreateReview,
+		)
+		// Edit own review (player; ownership enforced server-side in the handler).
+		protected.PUT("/reviews/:id",
+			middleware.RequireRole("player"),
+			reviewHandler.UpdateReview,
+		)
+		// Report a review — ANY authenticated role (not public, anti-griefing).
+		protected.POST("/reviews/:id/flag", reviewHandler.FlagReview)
+		// Admin moderation: soft-delete a review (role enforced at route + handler).
+		protected.DELETE("/reviews/:id",
+			middleware.RequireRole("admin"),
+			reviewHandler.DeleteReview,
+		)
 
 		// Notification consent (PART 6): a user withdraws consent for themselves.
 		protected.POST("/notifications/opt-out", notificationHandler.OptOut)

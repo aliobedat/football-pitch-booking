@@ -1,5 +1,14 @@
 CRITICAL: ALWAYS read PROJECT_HANDOFF.md before making any architectural or frontend changes.
 
+## Local dev requirement: APP_ENV
+APP_ENV gating is FAIL-CLOSED. Dev behaviour (Gin DebugMode, SameSite=Lax +
+Secure=false cookies, localhost DB fallback) is enabled ONLY when APP_ENV is one
+of: `development | local | dev | test`. ANY other value — empty, unset, or a
+typo — is treated as PRODUCTION (ReleaseMode, SameSite=None+Secure cookies,
+DATABASE_URL required, no insecure DB fallback). Local dev MUST set
+`APP_ENV=development`, otherwise localhost inherits prod cookie semantics and
+auth over plain http breaks (Secure cookies are dropped).
+
 # PROJECT CONTEXT
 
 ## Product

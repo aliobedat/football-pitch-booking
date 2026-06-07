@@ -35,7 +35,12 @@ func main() {
 
 	cfg := config.Load()
 
-	if cfg.AppEnv == "production" {
+	// FAIL-CLOSED: Gin runs in ReleaseMode by default; only an explicit dev
+	// APP_ENV (see config.IsDevEnv) opts into DebugMode. An unset/typo'd value
+	// inherits production behaviour.
+	if cfg.IsDev() {
+		gin.SetMode(gin.DebugMode)
+	} else {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
@@ -154,7 +159,14 @@ func main() {
 	if otpCfg.MaxGlobalHour > otpCfg.MaxGlobalDay {
 		otpCfg.MaxGlobalHour = otpCfg.MaxGlobalDay
 	}
-	otpSvc := otp.New(notifier, otpStore, otpStore, otpHasher, otpCfg)
+	// LOCAL-DEV OTP mock: in a dev environment (config.IsDev, fail-closed) the OTP
+	// service logs the code to the console instead of dispatching via Twilio,
+	// saving credits during local testing. Production/unset APP_ENV → real sender.
+	otpSvc := otp.New(notifier, otpStore, otpStore, otpHasher, otpCfg,
+		otp.WithDevBypass(cfg.IsDev()))
+	if cfg.IsDev() {
+		log.Printf("[OTP] LOCAL DEV bypass ENABLED — OTP codes are logged to the console, not sent via Twilio")
+	}
 
 	// ── Durable notification outbox (PART 6) ──────────────────────────────────
 	// The Postgres-backed outbox persists each async message as a job; a worker
@@ -270,7 +282,7 @@ func main() {
 	router.Use(cors.New(cors.Config{
 		AllowOriginFunc:  func(origin string) bool { return allowedOrigins[normalizeOrigin(origin)] },
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-CSRF-Token"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-CSRF-Token", "Idempotency-Key"},
 		ExposeHeaders:    []string{"Content-Length"},
 		AllowCredentials: true,
 	}))
@@ -290,12 +302,18 @@ func main() {
 	// (authRepo) backs the consent-withdrawal endpoint.
 	routes.Register(router, pool, jwtManager, cfg, otpSvc, authRepo, bookingSvc, outboxStore, authRepo)
 
+	// Explicit server timeouts bound slow/hung clients (Slowloris) and stuck
+	// connections. There are NO long-lived/streaming endpoints — image uploads go
+	// browser→Cloudinary directly, not through this backend — so a 15s write
+	// timeout cannot truncate a legitimate response. ReadHeaderTimeout caps the
+	// header read separately from the (larger) full-request ReadTimeout.
 	server := &http.Server{
-		Addr:         fmt.Sprintf(":%s", cfg.ServerPort),
-		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		Addr:              fmt.Sprintf(":%s", cfg.ServerPort),
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {

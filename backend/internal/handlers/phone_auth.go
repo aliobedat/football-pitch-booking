@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 
@@ -47,7 +48,16 @@ type PhoneAuthStore interface {
 	// FindByID loads the user behind the current session cookie, backing
 	// GET /auth/me so the client can rehydrate without ever reading a token.
 	FindByID(ctx context.Context, userID int) (*models.User, error)
+	// UpdateFullName backs PATCH /me (Just-In-Time name capture at checkout).
+	UpdateFullName(ctx context.Context, userID int, fullName string) (*models.User, error)
 }
+
+// Full-name bounds for JIT capture, counted in runes so Arabic/RTL names are
+// measured by character, not byte.
+const (
+	minFullNameRunes = 2
+	maxFullNameRunes = 100
+)
 
 // PhoneAuthHandler serves the OTP request/verify endpoints.
 type PhoneAuthHandler struct {
@@ -219,6 +229,60 @@ func (h *PhoneAuthHandler) GetCurrentUser(c *gin.Context) {
 		c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "internal_error", "message": "could not load your profile, please try again",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": user.Safe()})
+}
+
+// updateMeRequest is the bound body for PATCH /me. Only full_name is mutable
+// here (JIT name capture); the user id comes from the session, never the body.
+type updateMeRequest struct {
+	FullName string `json:"full_name"`
+}
+
+// PatchMe sets the authenticated user's full_name (Just-In-Time capture at
+// checkout). Strict BOLA: the target id is read from the session only — there is
+// no path/body id to tamper with. Validation: trimmed, non-empty, 2–100 runes
+// (Arabic/RTL allowed). This endpoint deliberately does NOT touch booking logic.
+func (h *PhoneAuthHandler) PatchMe(c *gin.Context) {
+	userID := middleware.GetUserID(c)
+	if userID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error": "unauthorized", "message": "authentication is required",
+		})
+		return
+	}
+
+	var req updateMeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "bad_request", "message": "صيغة الطلب غير صحيحة",
+		})
+		return
+	}
+
+	name := strings.TrimSpace(req.FullName)
+	if n := utf8.RuneCountInString(name); n < minFullNameRunes || n > maxFullNameRunes {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "invalid_full_name",
+			"message": "الاسم يجب أن يكون بين 2 و100 حرف",
+		})
+		return
+	}
+
+	user, err := h.store.UpdateFullName(c.Request.Context(), userID, name)
+	if err != nil {
+		if errors.Is(err, repository.ErrUserNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "user_not_found", "message": "no user exists for this session",
+			})
+			return
+		}
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "internal_error", "message": "could not update your profile, please try again",
 		})
 		return
 	}

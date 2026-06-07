@@ -49,7 +49,10 @@ const (
 //     same-site, and plain HTTP dev would drop Secure cookies entirely, so Lax
 //     without Secure keeps local development working.
 func cookieSecurity(cfg *config.Config) (http.SameSite, bool) {
-	if cfg.AppEnv == "production" {
+	// FAIL-CLOSED: production cookie semantics are the DEFAULT. Only an explicit
+	// dev APP_ENV (see config.IsDevEnv) relaxes to SameSite=Lax + insecure for
+	// localhost over http; any unset/typo'd value gets None+Secure.
+	if !cfg.IsDev() {
 		return http.SameSiteNoneMode, true
 	}
 	return http.SameSiteLaxMode, false

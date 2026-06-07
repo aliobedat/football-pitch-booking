@@ -107,6 +107,19 @@ func (f *fakeAuthStore) FindByID(_ context.Context, id int) (*models.User, error
 	return nil, repository.ErrUserNotFound
 }
 
+// UpdateFullName backs PATCH /me. It mutates the matching in-memory user.
+func (f *fakeAuthStore) UpdateFullName(_ context.Context, id int, fullName string) (*models.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, u := range f.users {
+		if u.ID == id {
+			u.FullName = fullName
+			return u, nil
+		}
+	}
+	return nil, repository.ErrUserNotFound
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Test harness
 // ─────────────────────────────────────────────────────────────────────────────

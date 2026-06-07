@@ -5,6 +5,8 @@ import { useRouter } from 'next/navigation';
 import { CalendarDays, CheckCircle2 } from 'lucide-react';
 import axios from 'axios';
 import api from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
+import FullNameField, { isValidFullName, saveFullName } from '@/components/FullNameField';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -119,6 +121,15 @@ function formatTime12(totalMins: number): string {
 
 export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const router = useRouter();
+  const { user, refreshUser } = useAuth();
+
+  // ── JIT name capture ──────────────────────────────────────────────────────
+  // If the authed user has no full_name yet, we collect it inline in the confirm
+  // step (no route change) and PATCH /me before the booking call.
+  const needsName = !!user && !user.full_name?.trim();
+  const [nameInput, setNameInput] = useState('');
+  const [nameTouched, setNameTouched] = useState(false);
+  const nameOK = !needsName || isValidFullName(nameInput);
 
   // ── Server time (Asia/Amman) — source of truth for all time logic ─────────
   const [serverNow,      setServerNow]      = useState<Date | null>(null);
@@ -267,6 +278,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     baseHour !== null &&
     !isModDisabled(startMod) &&
     !isDurationDisabled(duration) &&
+    nameOK &&
     !submitting;
 
   // ── Handlers ─────────────────────────────────────────────────────────────
@@ -319,6 +331,20 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     inFlightRef.current = true;
     setSubmitting(true);
     setApiError(null);
+
+    // JIT name capture: persist the collected name BEFORE booking. The core
+    // booking call is unchanged; this is a separate, prior PATCH /me.
+    if (needsName) {
+      try {
+        await saveFullName(nameInput);
+        await refreshUser();
+      } catch {
+        setApiError('تعذّر حفظ الاسم، تأكد من إدخال اسم صحيح وحاول مجدداً');
+        setSubmitting(false);
+        inFlightRef.current = false;
+        return;
+      }
+    }
 
     // One idempotency key per booking ATTEMPT. The backend dedupes on it, so a
     // network retry (the axios 401→refresh path reuses this same request config)
@@ -758,6 +784,22 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
               </span>
               <span className="text-[13px] font-bold text-emerald-500">د.أ</span>
             </div>
+          </div>
+        )}
+
+        {/* ── JIT full-name capture (only when missing) ── */}
+        {needsName && (
+          <div className="rounded-xl border border-white/[0.05] bg-[#0d0f0e] px-4 py-3.5">
+            <p className="text-[11px] text-white/35 mb-2.5 leading-relaxed">
+              أدخل اسمك مرة واحدة لإتمام الحجز
+            </p>
+            <FullNameField
+              value={nameInput}
+              onChange={(v) => { setNameInput(v); setNameTouched(true); }}
+              disabled={submitting}
+              showError={nameTouched}
+              id="booking-full-name"
+            />
           </div>
         )}
 

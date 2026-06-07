@@ -198,7 +198,7 @@ func insertConfirmedBookingTx(ctx context.Context, tx pgx.Tx, req models.CreateB
 
 	err = tx.QueryRow(ctx, `
 		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status)
-		VALUES ($1, $2, tsrange($3::timestamp, $4::timestamp, '[)'), $5, 'confirmed')
+		VALUES ($1, $2, tstzrange($3::timestamptz, $4::timestamptz, '[)'), $5, 'confirmed')
 		RETURNING
 			id,
 			pitch_id,
@@ -388,8 +388,8 @@ func (r *bookingRepo) GetBookedSlots(
 	// stored as 21:30-the-previous-day UTC, so UTC day bounds would wrongly exclude
 	// the first three hours of the local day (and include late-evening slots). Take
 	// the day's bounds as absolute UTC instants of the Amman calendar day; because
-	// booking_range stores UTC wall-clock instants, passing these UTC-zoned bounds
-	// and casting ::timestamp yields the correct naive-UTC comparison values.
+	// booking_range is a tstzrange (true points in time), the UTC-zoned bounds are
+	// compared as instants via ::timestamptz — timezone-independent.
 	dayStart, dayEnd := timeutil.AmmanDayBoundsUTC(date)
 
 	rows, err := r.db.Query(ctx, `
@@ -397,7 +397,7 @@ func (r *bookingRepo) GetBookedSlots(
 		FROM bookings
 		WHERE pitch_id = $1
 		  AND status <> 'cancelled'
-		  AND booking_range && tsrange($2::timestamp, $3::timestamp, '[)')
+		  AND booking_range && tstzrange($2::timestamptz, $3::timestamptz, '[)')
 		ORDER BY lower(booking_range)
 	`, pitchID, dayStart, dayEnd)
 

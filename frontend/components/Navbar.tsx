@@ -8,16 +8,25 @@ import { Users } from 'lucide-react';
 export default function Navbar() {
   const pathname = usePathname();
   const { user, logout } = useAuth();
-  const isOwner = user?.role === 'owner' || user?.role === 'admin';
+  const isAdmin = user?.role === 'admin';
+  const isOwner = user?.role === 'owner';
+  // Owner and admin both land on the dashboard; only admins act as a
+  // "super-viewer" with an additional link into the player-facing catalog.
+  const isStaff = isOwner || isAdmin;
 
-  const navLinks = isOwner
-    ? [{ href: '/dashboard', label: 'لوحة التحكم' }]
-    : [
-        { href: '/pitches',  label: 'ملاعبنا'  },
-        { href: '/bookings', label: 'حجوزاتي'  },
-      ];
+  const navLinks = isAdmin
+    ? [
+        { href: '/dashboard', label: 'لوحة التحكم' },
+        { href: '/pitches',   label: 'الملاعب'     },
+      ]
+    : isOwner
+      ? [{ href: '/dashboard', label: 'لوحة التحكم' }]
+      : [
+          { href: '/pitches',  label: 'ملاعبنا'  },
+          { href: '/bookings', label: 'حجوزاتي'  },
+        ];
 
-  const brandHref = isOwner ? '/dashboard' : '/pitches';
+  const brandHref = isStaff ? '/dashboard' : '/pitches';
 
   return (
     <header className="sticky top-0 z-50 border-b border-white/[0.06] bg-[#0d0f0e]/90 backdrop-blur-md">
