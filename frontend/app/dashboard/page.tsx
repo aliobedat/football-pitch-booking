@@ -7,11 +7,12 @@ import api from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import Navbar from '@/components/Navbar';
 import PitchImageDropzone, { type PitchImageValue } from '@/components/PitchImageDropzone';
+import OperatingHoursModal from '@/components/OperatingHoursModal';
 import {
   BookOpen, CheckCircle2, XCircle,
   X, CalendarDays, LayoutDashboard,
   MapPin, Plus, ChevronDown,
-  Ban, AlertTriangle, Pencil, Trash2, CalendarSearch, Users,
+  Ban, AlertTriangle, Pencil, Trash2, CalendarSearch, Users, Clock,
 } from 'lucide-react';
 import { formatNumber, formatCurrency, formatDate, formatTime } from '@/lib/format';
 
@@ -29,6 +30,7 @@ interface AdminBooking {
   player_id:   number;
   user_name:   string;
   user_email:  string;
+  user_phone:  string;
   start_time:  string;
   end_time:    string;
   status:      BookingStatus;
@@ -53,6 +55,7 @@ interface OwnerPitch {
   pitchHue:     string;
   image_url:       string;
   image_public_id: string;
+  maps_url:        string;
 }
 
 interface PitchForm {
@@ -64,6 +67,7 @@ interface PitchForm {
   description:   string;
   image_url:       string;
   image_public_id: string;
+  maps_url:        string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,7 +76,7 @@ interface PitchForm {
 
 const EMPTY_FORM: PitchForm = {
   name: '', neighborhood: '', surface: 'artificial_grass',
-  format: 'خماسي', price_per_hour: '', description: '', image_url: '', image_public_id: '',
+  format: 'خماسي', price_per_hour: '', description: '', image_url: '', image_public_id: '', maps_url: '',
 };
 
 const STATUS_CONFIG: Record<BookingStatus, { label: string; badge: string }> = {
@@ -155,6 +159,7 @@ function BookingRow({
       </td>
       <td className="px-5 py-4 text-start">
         <p className="text-[13px] font-semibold text-[#f0efe8] leading-snug">{booking.user_name || '—'}</p>
+        <p className="text-[12px] text-white/55 mt-0.5 font-mono" dir="ltr">{booking.user_phone || 'لا يوجد رقم'}</p>
         <p className="text-[11px] text-white/30 mt-0.5 truncate max-w-[160px]">{booking.user_email}</p>
       </td>
       <td className="px-5 py-4 text-start">
@@ -501,6 +506,7 @@ function PitchCard({
   onEdit,
   onRequestDelete,
   onViewBookings,
+  onManageHours,
   onToggleActive,
   isToggling,
 }: {
@@ -508,6 +514,7 @@ function PitchCard({
   onEdit: (pitch: OwnerPitch) => void;
   onRequestDelete: (pitch: OwnerPitch) => void;
   onViewBookings: () => void;
+  onManageHours: (pitch: OwnerPitch) => void;
   onToggleActive: (pitch: OwnerPitch) => void;
   isToggling: boolean;
 }) {
@@ -644,6 +651,15 @@ function PitchCard({
           </button>
           <button
             type="button"
+            onClick={() => onManageHours(pitch)}
+            className={`${actionBtn} !flex-none px-2.5 bg-white/[0.03] border-white/[0.10] text-white/60 hover:bg-emerald-500/[0.09] hover:border-emerald-500/30 hover:text-emerald-300 focus-visible:ring-emerald-500/40`}
+            aria-label={`أوقات عمل ملعب ${pitch.name}`}
+            title="أوقات العمل"
+          >
+            <Clock size={12} aria-hidden />
+          </button>
+          <button
+            type="button"
             onClick={() => onRequestDelete(pitch)}
             className={`${actionBtn} !flex-none px-2.5 bg-red-500/[0.04] border-red-500/[0.14] text-red-400/70 hover:bg-red-500/[0.09] hover:border-red-500/30 hover:text-red-400 focus-visible:ring-red-500/40`}
             aria-label={`حذف ملعب ${pitch.name}`}
@@ -672,6 +688,7 @@ function pitchToForm(p: OwnerPitch): PitchForm {
     description:    p.description ?? '',
     image_url:       p.image_url ?? '',
     image_public_id: p.image_public_id ?? '',
+    maps_url:        p.maps_url ?? '',
   };
 }
 
@@ -781,6 +798,19 @@ function AddPitchForm({
               onChange={set('neighborhood')}
               required
               placeholder="مثال: خلدا"
+              className={inputCls}
+            />
+          </div>
+
+          {/* Google Maps URL */}
+          <div>
+            <label className={labelCls}>رابط الموقع على خرائط Google</label>
+            <input
+              type="url"
+              dir="ltr"
+              value={form.maps_url}
+              onChange={set('maps_url')}
+              placeholder="https://maps.app.goo.gl/..."
               className={inputCls}
             />
           </div>
@@ -931,6 +961,9 @@ export default function DashboardPage() {
   // ── activate/deactivate toggle state ────────────────────────────────────
   const [togglingId, setTogglingId] = useState<number | null>(null);
   const [toast,      setToast]      = useState<string | null>(null);
+
+  // ── operating-hours editor state ────────────────────────────────────────
+  const [hoursTarget, setHoursTarget] = useState<OwnerPitch | null>(null);
 
   // ── cancel-booking modal state ──────────────────────────────────────────
   const [cancelTarget, setCancelTarget] = useState<AdminBooking | null>(null);
@@ -1288,6 +1321,7 @@ export default function DashboardPage() {
                     onEdit={openEditForm}
                     onRequestDelete={openDeleteModal}
                     onViewBookings={() => setActiveTab('bookings')}
+                    onManageHours={setHoursTarget}
                     onToggleActive={handleToggleActive}
                     isToggling={togglingId === p.id}
                   />
@@ -1336,6 +1370,15 @@ export default function DashboardPage() {
           error={deleteError}
           onConfirm={confirmDelete}
           onClose={closeDeleteModal}
+        />
+      )}
+
+      {/* ── Operating-hours editor modal ─────────────────────────────────── */}
+      {hoursTarget && (
+        <OperatingHoursModal
+          pitchId={hoursTarget.id}
+          pitchName={hoursTarget.name}
+          onClose={() => setHoursTarget(null)}
         />
       )}
 

@@ -19,8 +19,11 @@ try {
 // `Content-Security-Policy` header.
 const cspReportOnly = [
   "default-src 'self'",
-  `connect-src 'self' ${apiOrigin}`,
-  "img-src 'self' https://res.cloudinary.com data:",
+  // api.cloudinary.com is the signed direct-upload endpoint (PitchImageDropzone
+  // POSTs bytes there); res.cloudinary.com serves the delivered images.
+  `connect-src 'self' ${apiOrigin} https://api.cloudinary.com`,
+  // blob: covers the in-flight local object-URL preview shown while uploading.
+  "img-src 'self' https://res.cloudinary.com data: blob:",
   "style-src 'self' 'unsafe-inline'",
   "script-src 'self'",
 ].join('; ');

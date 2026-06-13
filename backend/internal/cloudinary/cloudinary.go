@@ -85,6 +85,9 @@ type SignedUpload struct {
 // from the account's configured "Signature algorithm" setting, which MUST be set
 // to SHA-256 for these signatures to verify (see docs/PR_pitch_image_upload.md).
 func (s *Service) SignUpload() SignedUpload {
+	// Generate the timestamp fresh at request time (Cloudinary rejects signatures
+	// whose timestamp drifts too far from its clock), and let signParams drop any
+	// empty-valued params so the to-sign string matches what Cloudinary recomputes.
 	ts := time.Now().Unix()
 
 	params := url.Values{}
@@ -153,8 +156,16 @@ func signParams(params url.Values, secret string) string {
 
 	parts := make([]string, 0, len(keys))
 	for _, k := range keys {
-		parts = append(parts, k+"="+params.Get(k))
+		v := params.Get(k)
+		// Cloudinary drops empty-valued fields from the multipart form before it
+		// recomputes the signature, so we must exclude them here too — otherwise a
+		// blank folder/upload_preset would sign `folder=` and never verify (400).
+		if v == "" {
+			continue
+		}
+		parts = append(parts, k+"="+v)
 	}
+	// strings.Join leaves no trailing "&"; the secret is appended directly.
 	toSign := strings.Join(parts, "&") + secret
 
 	sum := sha256.Sum256([]byte(toSign))

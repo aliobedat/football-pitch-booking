@@ -48,7 +48,8 @@ const pitchSelectCols = `
 	p.is_active,
 	p.image_url,
 	p.image_public_id,
-	p.description
+	p.description,
+	COALESCE(p.maps_url, '')
 `
 
 // pitchReturnCols is used in INSERT/UPDATE RETURNING clauses where no
@@ -72,7 +73,8 @@ const pitchReturnCols = `
 	is_active,
 	image_url,
 	image_public_id,
-	description
+	description,
+	COALESCE(maps_url, '')
 `
 
 // Pitch is the canonical Go representation of a pitch row.
@@ -96,6 +98,7 @@ type Pitch struct {
 	ImageURL     string   `json:"image_url"`
 	ImagePublicID string  `json:"image_public_id"`
 	Description   string  `json:"description"`
+	MapsURL       string  `json:"maps_url" db:"maps_url"`
 }
 
 type CreatePitchRequest struct {
@@ -144,6 +147,7 @@ func scanPitch(row interface {
 		&p.IsActive,
 		&p.ImageURL, &p.ImagePublicID,
 		&p.Description,
+		&p.MapsURL,
 	)
 	return p, err
 }
@@ -271,6 +275,11 @@ type UpdatePitchRequest struct {
 	// full desired description, so an empty string is a legitimate "clear it". The
 	// handler trims and length-caps it first.
 	Description string `json:"description"`
+	// MapsURL is a POINTER so we can distinguish three cases the other string
+	// fields cannot: nil = field absent from the body → leave the DB value
+	// unchanged; "" = present-but-empty → clear it; non-empty → set it. The SQL
+	// uses COALESCE($n, maps_url), so a NULL param (nil pointer) keeps the column.
+	MapsURL *string `json:"maps_url"`
 }
 
 // UpdatePitch applies a partial update to pitch `id`, scoped to the actor: an
@@ -295,17 +304,20 @@ func (m *PitchModel) UpdatePitch(ctx context.Context, id int, actor auth.Actor, 
 
 	// description rides the same scoped UPDATE but is set unconditionally (so an
 	// empty value clears it), as its own trailing placeholder after the CASE cols.
+	// maps_url rides the same scoped UPDATE via COALESCE($n, maps_url): a nil
+	// pointer (field absent) binds NULL → keeps the existing value; a non-nil
+	// pointer (incl. "") overwrites, so an empty string clears the link.
 	var row pgx.Row
 	if actor.IsAdmin() {
 		row = m.DB.QueryRow(ctx, fmt.Sprintf(
-			`UPDATE pitches SET `+setCols+`, description = $7 WHERE id = $1 AND deleted_at IS NULL RETURNING %s`,
+			`UPDATE pitches SET `+setCols+`, description = $7, maps_url = COALESCE($8, maps_url) WHERE id = $1 AND deleted_at IS NULL RETURNING %s`,
 			2, 2, 3, 3, 4, 4, 5, 5, 6, 6, pitchReturnCols,
-		), id, req.Name, req.Neighborhood, req.Surface, req.Format, req.PricePerHour, req.Description)
+		), id, req.Name, req.Neighborhood, req.Surface, req.Format, req.PricePerHour, req.Description, req.MapsURL)
 	} else {
 		row = m.DB.QueryRow(ctx, fmt.Sprintf(
-			`UPDATE pitches SET `+setCols+`, description = $8 WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL RETURNING %s`,
+			`UPDATE pitches SET `+setCols+`, description = $8, maps_url = COALESCE($9, maps_url) WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL RETURNING %s`,
 			3, 3, 4, 4, 5, 5, 6, 6, 7, 7, pitchReturnCols,
-		), id, actor.UserID, req.Name, req.Neighborhood, req.Surface, req.Format, req.PricePerHour, req.Description)
+		), id, actor.UserID, req.Name, req.Neighborhood, req.Surface, req.Format, req.PricePerHour, req.Description, req.MapsURL)
 	}
 
 	p, err := scanPitch(row)

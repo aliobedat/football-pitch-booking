@@ -60,6 +60,8 @@ export default function PitchDetailPage() {
   const [pitch,     setPitch]     = useState<Pitch | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error,     setError]     = useState<string | null>(null);
+  // Falls back to the generated PitchDiagram if the uploaded image fails to load.
+  const [heroImgError, setHeroImgError] = useState(false);
 
   useEffect(() => {
     api.get(`/pitches/${id}`)
@@ -97,7 +99,17 @@ export default function PitchDetailPage() {
 
       {/* ── Hero Banner ───────────────────────────────────────────────────── */}
       <div className="relative w-full h-64 sm:h-80 overflow-hidden">
-        <PitchDiagram hue={pitch.pitchHue} featured={pitch.isFeatured} />
+        {pitch.image_url && !heroImgError ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img
+            src={pitch.image_url}
+            alt={pitch.name}
+            className="absolute inset-0 w-full h-full object-cover"
+            onError={() => setHeroImgError(true)}
+          />
+        ) : (
+          <PitchDiagram hue={pitch.pitchHue} featured={pitch.isFeatured} />
+        )}
         <div className="absolute inset-0 bg-gradient-to-t from-[#0d0f0e] via-[#0d0f0e]/50 to-transparent" />
 
         {pitch.isFeatured && (
@@ -225,6 +237,17 @@ export default function PitchDetailPage() {
                 <MapPin size={13} className="text-emerald-500 shrink-0" aria-hidden="true" />
                 <span className="text-[12px]">{pitch.neighborhood}، عمّان، الأردن</span>
               </div>
+              {pitch.maps_url && (
+                <a
+                  href={pitch.maps_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1.5 mb-4 text-[12px] font-semibold text-emerald-400 hover:text-emerald-300 transition-colors duration-150"
+                >
+                  <MapPin size={12} aria-hidden="true" />
+                  افتح في خرائط Google
+                </a>
+              )}
               {hasCoords && (
                 <div className="h-56 rounded-xl overflow-hidden">
                   <PitchMap lat={pitch.lat} lng={pitch.lng} zoom={15} />

@@ -17,6 +17,22 @@ interface BookedSlot {
   status:     string;
 }
 
+// OpenWindow is one resolved operating-hours interval for the queried date, in
+// absolute UTC [start, end) instants — the SAME referee the server's booking gate
+// uses. `end` may fall on the next calendar day (cross-midnight window).
+interface OpenWindow {
+  start: string;
+  end:   string;
+}
+
+// LocalRange is an OpenWindow projected onto the selected civil day's minute axis
+// (minutes from that day's Amman midnight), clamped to [0, 1440] so the half-hour
+// grid can test containment without any timezone math of its own.
+interface LocalRange {
+  start: number;
+  end:   number;
+}
+
 interface Props {
   pitchId:      number;
   pricePerHour: number;
@@ -92,6 +108,31 @@ function rangeOverlapsBookings(
     const bEnd   = new Date(b.end_time).getTime();
     return bStart < rangeEnd && bEnd > rangeStart;
   });
+}
+
+// projectWindowToDay maps an absolute-UTC open window onto the civil day `dayStr`
+// (Amman), returning minutes-from-midnight clamped to [0, 1440], or null if the
+// window does not touch that day. A window that started the day BEFORE clamps its
+// start to 0 (open from midnight); one that ends the day AFTER clamps its end to
+// 1440 (open through midnight) — so the early-hours tail of a cross-midnight
+// window and a window that runs past midnight are both represented correctly on
+// the day's axis. Date strings are YYYY-MM-DD, so lexical comparison is date order.
+function projectWindowToDay(w: OpenWindow, dayStr: string): LocalRange | null {
+  const s = getAmmanParts(new Date(w.start));
+  const e = getAmmanParts(new Date(w.end));
+
+  let start: number;
+  if (s.dateStr < dayStr) start = 0;                       // began before today → from midnight
+  else if (s.dateStr === dayStr) start = s.hours * 60 + s.minutes;
+  else return null;                                        // begins after today
+
+  let end: number;
+  if (e.dateStr > dayStr) end = 24 * 60;                   // ends after today → through midnight
+  else if (e.dateStr === dayStr) end = e.hours * 60 + e.minutes;
+  else return null;                                        // ended before today
+
+  if (end <= start) return null;
+  return { start, end };
 }
 
 function durationLabel(mins: number): string {
@@ -182,6 +223,12 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
 
   // ── Availability data ─────────────────────────────────────────────────────
   const [booked,       setBooked]       = useState<BookedSlot[]>([]);
+  // Operating hours for the selected day. hasSchedule=false → the pitch is
+  // unconfigured and OPEN 24/7 (the server's fail-open decision); openWindows is
+  // then irrelevant. hasSchedule=true with no covering window for a slot → CLOSED
+  // (rendered distinctly from "booked").
+  const [openWindows,  setOpenWindows]  = useState<OpenWindow[]>([]);
+  const [hasSchedule,  setHasSchedule]  = useState(false);
   const [loadingSlots, setLoadingSlots] = useState(false);
   const [submitting,   setSubmitting]   = useState(false);
   const [apiError,     setApiError]     = useState<string | null>(null);
@@ -194,10 +241,23 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     setApiError(null);
     api
       .get(`/pitches/${pitchId}/availability?date=${selDayStr}`)
-      .then(r  => setBooked(r.data.booked_slots ?? []))
-      .catch(() => setBooked([]))
+      .then(r  => {
+        setBooked(r.data.booked_slots ?? []);
+        setOpenWindows(r.data.open_windows ?? []);
+        setHasSchedule(!!r.data.has_schedule);
+      })
+      .catch(() => { setBooked([]); setOpenWindows([]); setHasSchedule(false); })
       .finally(() => setLoadingSlots(false));
   }, [pitchId, selDayStr]);
+
+  // ── Open-hours projection for the selected day ─────────────────────────────
+  // null = open 24/7 (unconfigured pitch); otherwise the day's covering ranges.
+  const openRanges = useMemo<LocalRange[] | null>(() => {
+    if (!hasSchedule) return null;
+    return openWindows
+      .map(w => projectWindowToDay(w, selDayStr))
+      .filter((r): r is LocalRange => r !== null);
+  }, [openWindows, hasSchedule, selDayStr]);
 
   // ── Server "now" in minutes (Amman time, today only) ──────────────────────
   const nowMins = useMemo(() => {
@@ -232,8 +292,21 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     return isSlotBooked(mins, booked, selDayStr);
   }
 
+  // rangeIsOpen: is [startMins, endMins] fully inside a single open window?
+  // (containment, not overlap — a range straddling a split-shift gap is closed.)
+  // null openRanges = open 24/7.
+  function rangeIsOpen(startMins: number, endMins: number): boolean {
+    if (openRanges === null) return true;
+    return openRanges.some(r => r.start <= startMins && endMins <= r.end);
+  }
+
+  // A 30-min slot is closed when it is not contained by any open window.
+  function slotIsClosed(mins: number): boolean {
+    return !rangeIsOpen(mins, mins + 30);
+  }
+
   function slotUnavailable(mins: number): boolean {
-    return slotIsPast(mins) || slotIsBooked(mins);
+    return slotIsPast(mins) || slotIsBooked(mins) || slotIsClosed(mins);
   }
 
   function isHourDisabled(h: number): boolean {
@@ -248,6 +321,13 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     return nowMins >= 0 && h * 60 + 30 <= nowMins;
   }
 
+  // Both half-slots of the hour fall outside operating hours (and aren't booked) →
+  // render as "مغلق" (closed), visually distinct from "محجوز" (booked).
+  function isHourFullyClosed(h: number): boolean {
+    return slotIsClosed(h * 60) && slotIsClosed(h * 60 + 30)
+      && !slotIsBooked(h * 60) && !slotIsBooked(h * 60 + 30);
+  }
+
   // ── Fine-tuning validation ────────────────────────────────────────────────
 
   function isModDisabled(mod: 0 | 30): boolean {
@@ -260,11 +340,17 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     const startMs = baseHour * 60 + startMod;
     const endMs   = startMs + d;
     if (endMs > 24 * 60) return true;
-    return rangeOverlapsBookings(startMs, endMs, booked, selDayStr);
+    if (rangeOverlapsBookings(startMs, endMs, booked, selDayStr)) return true;
+    // The whole range must lie inside one open window (out-of-hours → disabled).
+    return !rangeIsOpen(startMs, endMs);
   }
 
   // ── Empty state check for current AM/PM half ──────────────────────────────
   const hasAvailableHours = gridHours.some(h => !isHourDisabled(h));
+
+  // The pitch is configured but has no open window covering ANY part of the
+  // selected day → it is closed all day (distinct from "fully booked").
+  const dayClosed = openRanges !== null && openRanges.length === 0;
 
   // ── Derived booking values ────────────────────────────────────────────────
   const actualStartMins = baseHour !== null ? baseHour * 60 + startMod : -1;
@@ -359,6 +445,8 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
       const avail = await api.get(`/pitches/${pitchId}/availability?date=${selDayStr}`);
       const freshBooked: BookedSlot[] = avail.data.booked_slots ?? [];
       setBooked(freshBooked);
+      setOpenWindows(avail.data.open_windows ?? []);
+      setHasSchedule(!!avail.data.has_schedule);
       if (rangeOverlapsBookings(actualStartMins, actualEndMins, freshBooked, selDayStr)) {
         setApiError('تم حجز هذا الوقت للتو — يرجى اختيار وقت آخر');
         setBaseHour(null);
@@ -387,6 +475,8 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
         const msg  = err.response?.data?.message as string | undefined;
         if (code === 'slot_unavailable')
           setApiError('هذا الوقت محجوز بالفعل، اختر وقتاً آخر');
+        else if (code === 'outside_operating_hours')
+          setApiError('الوقت المطلوب خارج ساعات عمل الملعب، اختر وقتاً آخر');
         else if (err.response?.status === 401)
           setApiError('يجب تسجيل الدخول أولاً للقيام بالحجز');
         else if (code === 'invalid_time' || code === 'invalid_duration')
@@ -588,7 +678,17 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
             </div>
 
             {/* ── 12-Hour Grid or Empty State ── */}
-            {!hasAvailableHours ? (
+            {dayClosed ? (
+              <div className="flex flex-col items-center gap-3 py-8 text-center">
+                <div className="w-10 h-10 rounded-full bg-white/[0.04] border border-white/[0.07] flex items-center justify-center [background-image:repeating-linear-gradient(45deg,transparent,transparent_4px,rgba(255,255,255,0.03)_4px,rgba(255,255,255,0.03)_8px)]">
+                  <CalendarDays size={18} className="text-white/20" aria-hidden />
+                </div>
+                <div>
+                  <p className="text-[13px] font-bold text-white/40 mb-1">الملعب مغلق هذا اليوم</p>
+                  <p className="text-[11px] text-white/20">اختر يوماً آخر لعرض المواعيد المتاحة</p>
+                </div>
+              </div>
+            ) : !hasAvailableHours ? (
               <div className="flex flex-col items-center gap-3 py-8 text-center">
                 <div className="w-10 h-10 rounded-full bg-white/[0.04] border border-white/[0.07] flex items-center justify-center">
                   <CalendarDays size={18} className="text-white/20" aria-hidden />
@@ -616,6 +716,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                   {gridHours.map(h => {
                     const fullyPast     = isHourFullyPast(h);
                     const fullyBooked   = isHourFullyBooked(h);
+                    const fullyClosed   = isHourFullyClosed(h);
                     const disabled      = isHourDisabled(h);
                     const selected      = baseHour === h;
                     const partialBooked = !fullyBooked && (slotIsBooked(h * 60) || slotIsBooked(h * 60 + 30));
@@ -637,6 +738,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                         aria-label={label + edgeNote}
                         title={
                           fullyBooked ? 'محجوز'
+                          : fullyClosed ? 'خارج ساعات العمل'
                           : fullyPast  ? 'انقضى الوقت'
                           : disabled   ? 'لا توجد أوقات متاحة في هذه الساعة'
                           : undefined
@@ -648,15 +750,17 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                             ? 'opacity-30 pointer-events-none bg-white/[0.02] border-white/[0.04] text-white/20'
                             : fullyBooked
                               ? 'bg-red-950/40 text-red-400 border-red-800/50 cursor-not-allowed'
-                              : selected
-                                ? 'bg-emerald-500/25 border-emerald-400/60 text-emerald-300 shadow-[0_0_14px_rgba(52,211,153,0.15)]'
-                                : disabled
-                                  ? 'bg-white/[0.01] border-white/[0.03] text-white/10 cursor-not-allowed'
-                                  : [
-                                      'bg-white/[0.03] border-white/[0.07] text-white/55 cursor-pointer',
-                                      'hover:bg-emerald-500/10 hover:border-emerald-500/30 hover:text-emerald-300',
-                                      partialBooked ? 'border-dashed border-white/[0.12]' : '',
-                                    ].join(' '),
+                              : fullyClosed
+                                ? 'bg-white/[0.015] border-white/[0.05] text-white/20 cursor-not-allowed [background-image:repeating-linear-gradient(45deg,transparent,transparent_5px,rgba(255,255,255,0.025)_5px,rgba(255,255,255,0.025)_10px)]'
+                                : selected
+                                  ? 'bg-emerald-500/25 border-emerald-400/60 text-emerald-300 shadow-[0_0_14px_rgba(52,211,153,0.15)]'
+                                  : disabled
+                                    ? 'bg-white/[0.01] border-white/[0.03] text-white/10 cursor-not-allowed'
+                                    : [
+                                        'bg-white/[0.03] border-white/[0.07] text-white/55 cursor-pointer',
+                                        'hover:bg-emerald-500/10 hover:border-emerald-500/30 hover:text-emerald-300',
+                                        partialBooked ? 'border-dashed border-white/[0.12]' : '',
+                                      ].join(' '),
                         ].join(' ')}
                       >
                         {/* Single inline string — hour and :00 are never split across elements */}
@@ -665,6 +769,9 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                         </span>
                         {fullyBooked && (
                           <span className="text-[8px] font-bold tracking-wider">محجوز</span>
+                        )}
+                        {!fullyBooked && fullyClosed && (
+                          <span className="text-[8px] font-bold tracking-wider">مغلق</span>
                         )}
                       </button>
                     );
@@ -758,6 +865,10 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
               <span className="flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-sm bg-white/[0.02] border border-white/[0.04] opacity-30" aria-hidden />
                 منتهي
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-sm border border-white/[0.08] [background-image:repeating-linear-gradient(45deg,transparent,transparent_2px,rgba(255,255,255,0.06)_2px,rgba(255,255,255,0.06)_4px)]" aria-hidden />
+                مغلق
               </span>
               <span className="flex items-center gap-1.5">
                 <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500/25 border border-emerald-400/60" aria-hidden />

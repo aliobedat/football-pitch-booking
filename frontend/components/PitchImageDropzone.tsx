@@ -79,13 +79,17 @@ export default function PitchImageDropzone({
 
         // 2) Upload the bytes straight to Cloudinary. Plain axios → no credentials,
         //    so our httpOnly session cookies are NOT sent to Cloudinary.
+        // Cloudinary keys are lowercase snake_case exactly as signed by the backend.
+        // folder/upload_preset are appended ONLY when non-empty: Cloudinary strips
+        // empty form fields before re-verifying, and the backend signature likewise
+        // excludes empty params, so an empty value must not be sent (would 400).
         const form = new FormData();
         form.append('file', file);
         form.append('api_key', sig.api_key);
         form.append('timestamp', String(sig.timestamp));
         form.append('signature', sig.signature);
-        form.append('folder', sig.folder);
-        form.append('upload_preset', sig.upload_preset);
+        if (sig.folder) form.append('folder', sig.folder);
+        if (sig.upload_preset) form.append('upload_preset', sig.upload_preset);
 
         const cloudURL = `https://api.cloudinary.com/v1_1/${sig.cloud_name}/image/upload`;
         const upRes = await axios.post(cloudURL, form, {

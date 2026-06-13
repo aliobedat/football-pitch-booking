@@ -179,6 +179,17 @@ func (h *PitchHandler) UpdatePitch(c *gin.Context) {
 		return
 	}
 
+	// maps_url: only validated when present (non-nil) and non-empty. An empty
+	// string is a legitimate "clear the link"; a non-empty value must be an https
+	// URL. No deeper URL parsing — paste-and-save only.
+	if req.MapsURL != nil && *req.MapsURL != "" && !strings.HasPrefix(*req.MapsURL, "https://") {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_maps_url",
+			"message": "رابط الموقع يجب أن يبدأ بـ https://",
+		})
+		return
+	}
+
 	// Ownership scoping lives in the data layer: an owner may update only their
 	// own pitch, an admin any. The Actor carries {UserID, Role} from the JWT.
 	pitch, err := h.Model.UpdatePitch(c.Request.Context(), id, middleware.GetActor(c), req)

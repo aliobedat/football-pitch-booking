@@ -51,6 +51,13 @@ func Register(
 	v1.GET("/pitches/:id", pitchHandler.GetPitch)
 	// Public: anyone can read a pitch's reviews + rating aggregates.
 	v1.GET("/pitches/:id/reviews", reviewHandler.ListPitchReviews)
+	// Public: availability (booked slots for a date) is browse-funnel data — a
+	// visitor sees open slots on the public pitch detail page before logging in.
+	// The handler reads only the pitch id + date query; no session identity.
+	v1.GET("/pitches/:id/availability", bookingHandler.GetPitchAvailability)
+	// Public: a pitch's weekly operating hours — the player detail page renders
+	// bookable/closed from it (alongside availability). Read-only; no identity.
+	v1.GET("/pitches/:id/operating-hours", pitchHandler.GetOperatingHours)
 
 	// Provider delivery-status webhooks (PART 6). Public: authentication is the
 	// Meta verify-token handshake (GET) plus, in production, request-signature
@@ -117,10 +124,9 @@ func Register(
 		protected.POST("/notifications/opt-out", notificationHandler.OptOut)
 
 		// ── Bookings ─────────────────────────────────────────────────────────
-		// Any authenticated user can create a booking, list their own, or check availability
+		// Any authenticated user can create a booking or list their own.
 		protected.GET("/bookings", bookingHandler.GetUserBookings)
 		protected.POST("/bookings", bookingHandler.CreateBooking)
-		protected.GET("/pitches/:id/availability", bookingHandler.GetPitchAvailability)
 
 		// Owner: manage their own pitches
 		protected.POST("/pitches",
@@ -152,6 +158,12 @@ func Register(
 		protected.PATCH("/pitches/:id/active",
 			middleware.RequireRole("owner", "admin"),
 			pitchHandler.ToggleActive,
+		)
+		// Replace the whole weekly operating-hours schedule (full grid). Owner/admin
+		// only; actor-scoped + audited in the data layer. Players are barred (403).
+		protected.PUT("/pitches/:id/operating-hours",
+			middleware.RequireRole("owner", "admin"),
+			pitchHandler.PutOperatingHours,
 		)
 		protected.GET("/owner/pitches",
 			middleware.RequireRole("owner", "admin"),

@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ali/football-pitch-api/internal/auth"
+	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/models"
 	"github.com/ali/football-pitch-api/internal/timeutil"
 )
@@ -27,6 +28,12 @@ var (
 	ErrPitchNotBookable        = errors.New("booking: pitch is deactivated or deleted and cannot be booked")
 	ErrBookingNotFound         = errors.New("booking: booking does not exist")
 	ErrInvalidStatusTransition = errors.New("booking: status transition is not permitted")
+
+	// ErrSlotOutsideOperatingHours means the requested slot is not fully contained
+	// within any of the pitch's configured open windows (the operating-hours gate).
+	// Only raised for gated (player) writes on a pitch that HAS a schedule; an
+	// unconfigured pitch is open 24/7 and never trips this. Mapped to 422.
+	ErrSlotOutsideOperatingHours = errors.New("booking: requested slot is outside the pitch's operating hours")
 
 	// ErrIdempotencyInProgress means a booking attempt with this idempotency key is
 	// still in flight (a committed 'pending' claim that has not completed) — the
@@ -89,6 +96,12 @@ type BookingRepository interface {
 	DeleteExpiredIdempotencyKeys(ctx context.Context, now time.Time) (int64, error)
 
 	GetBookedSlots(ctx context.Context, pitchID int, date time.Time) ([]models.AvailabilitySlot, error)
+
+	// GetOpenWindows resolves the pitch's weekly operating hours to the concrete
+	// UTC open intervals touching the given Amman calendar date. hasSchedule is
+	// false when the pitch has NO configured windows (open 24/7 per the fail-open
+	// decision) — callers must NOT read an empty slice as "closed" without it.
+	GetOpenWindows(ctx context.Context, pitchID int, date time.Time) (intervals []data.ConcreteInterval, hasSchedule bool, err error)
 	GetUserBookings(ctx context.Context, userID int64) ([]models.Booking, error)
 
 	// GetAllBookings lists bookings scoped to the actor: an admin sees every
@@ -189,6 +202,29 @@ func insertConfirmedBookingTx(ctx context.Context, tx pgx.Tx, req models.CreateB
 	// rollback.
 	if !isActive || deletedAt != nil {
 		return nil, ErrPitchNotBookable
+	}
+
+	// Operating-hours gate (locked decision #2). A player booking must fall FULLY
+	// within one configured open window (containment, not overlap). The schedule is
+	// read UNDER THE SAME pitch lock taken above, so a concurrent PUT
+	// /operating-hours cannot open a TOCTOU gap between this check and the INSERT —
+	// the booking is evaluated against the strictly latest committed schedule.
+	// Fail-open: a pitch with NO configured windows is open 24/7 (hasSchedule
+	// false). Owner/admin-initiated writes set BypassHoursGate and skip the gate.
+	if !req.BypassHoursGate {
+		windows, err := loadOperatingWindowsTx(ctx, tx, req.PitchID)
+		if err != nil {
+			return nil, err
+		}
+		if len(windows) > 0 { // configured → fail closed unless contained
+			resolved, err := data.ResolveWindowsForDate(windows, timeutil.InAmman(req.StartTime))
+			if err != nil {
+				return nil, fmt.Errorf("CreateBooking: resolve operating hours: %w", err)
+			}
+			if !data.SlotContained(req.StartTime, req.EndTime, resolved) {
+				return nil, ErrSlotOutsideOperatingHours
+			}
+		}
 	}
 
 	durationHours := req.EndTime.Sub(req.StartTime).Hours()
@@ -423,6 +459,60 @@ func (r *bookingRepo) GetBookedSlots(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Operating hours
+// ─────────────────────────────────────────────────────────────────────────────
+
+// rowQuerier is the read surface common to *pgxpool.Pool and pgx.Tx, so the
+// operating-hours loader works both on the connection pool (availability read)
+// and inside the booking transaction (write-path gate, under the pitch lock).
+type rowQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// loadOperatingWindowsTx reads a pitch's raw weekly windows ("HH:MM" wall-clock).
+// It is the single read used by BOTH the availability resolution and the
+// write-path gate, so the two paths can never diverge on what the schedule is.
+func loadOperatingWindowsTx(ctx context.Context, q rowQuerier, pitchID int64) ([]data.OperatingWindow, error) {
+	rows, err := q.Query(ctx, `
+		SELECT weekday, to_char(open_time, 'HH24:MI'), to_char(close_time, 'HH24:MI')
+		FROM operating_hours
+		WHERE pitch_id = $1
+	`, pitchID)
+	if err != nil {
+		return nil, fmt.Errorf("loadOperatingWindows: query: %w", err)
+	}
+	defer rows.Close()
+
+	var windows []data.OperatingWindow
+	for rows.Next() {
+		var w data.OperatingWindow
+		if err := rows.Scan(&w.Weekday, &w.OpenTime, &w.CloseTime); err != nil {
+			return nil, fmt.Errorf("loadOperatingWindows: scan: %w", err)
+		}
+		windows = append(windows, w)
+	}
+	return windows, rows.Err()
+}
+
+// GetOpenWindows resolves the pitch's schedule to concrete UTC open intervals for
+// the Amman calendar date `date` (its Y/M/D are read in Amman civil terms). See
+// the interface doc for the hasSchedule contract (fail-open on unconfigured).
+func (r *bookingRepo) GetOpenWindows(ctx context.Context, pitchID int, date time.Time) ([]data.ConcreteInterval, bool, error) {
+	windows, err := loadOperatingWindowsTx(ctx, r.db, int64(pitchID))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(windows) == 0 {
+		return nil, false, nil // unconfigured → open 24/7
+	}
+	resolved, err := data.ResolveWindowsForDate(windows, date)
+	if err != nil {
+		return nil, true, fmt.Errorf("GetOpenWindows: resolve: %w", err)
+	}
+	return resolved, true, nil
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // GetUserBookings
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -481,6 +571,7 @@ func (r *bookingRepo) GetAllBookings(ctx context.Context, actor auth.Actor) ([]m
 			b.pitch_id,    COALESCE(p.name,      '') AS pitch_name,
 			b.player_id,   COALESCE(u.full_name,  '') AS user_name,
 			               COALESCE(u.email,      '') AS user_email,
+			               COALESCE(u.phone,      '') AS user_phone,
 			lower(b.booking_range) AS start_time, upper(b.booking_range) AS end_time,
 			b.status, b.total_price, b.created_at
 		FROM bookings b
@@ -498,7 +589,7 @@ func (r *bookingRepo) GetAllBookings(ctx context.Context, actor auth.Actor) ([]m
 		var b models.AdminBooking
 		if err := rows.Scan(
 			&b.ID, &b.PitchID, &b.PitchName,
-			&b.PlayerID, &b.UserName, &b.UserEmail,
+			&b.PlayerID, &b.UserName, &b.UserEmail, &b.UserPhone,
 			&b.StartTime, &b.EndTime,
 			&b.Status, &b.TotalPrice, &b.CreatedAt,
 		); err != nil {

@@ -27,6 +27,7 @@ export type Pitch = {
   // ── Optional backend fields ───────────────────────────────────────────────
   description?: string;
   image_url?: string;
+  maps_url?: string;
 
   // ── Phase-2 UI fields (future backend additions) ──────────────────────────
   city?: string;

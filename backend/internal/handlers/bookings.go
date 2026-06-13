@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/middleware"
 	"github.com/ali/football-pitch-api/internal/models"
 	"github.com/ali/football-pitch-api/internal/repository"
@@ -213,11 +214,30 @@ func (h *BookingHandler) GetPitchAvailability(c *gin.Context) {
 		return
 	}
 
+	// Resolve the pitch's open windows for the requested date so the client renders
+	// bookable / booked / CLOSED (closed ≠ booked). open_windows are absolute UTC
+	// [start,end) intervals — the SAME referee the write-path gate uses, so the UI
+	// can never offer a slot the server will reject. has_schedule=false means the
+	// pitch is unconfigured → open 24/7 (the client shows the whole day as open).
+	openWindows, hasSchedule, err := h.repo.GetOpenWindows(c.Request.Context(), pitchID, date)
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "internal_error", "message": "failed to retrieve availability data",
+		})
+		return
+	}
+	if openWindows == nil {
+		openWindows = []data.ConcreteInterval{} // serialise [] not null
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"pitch_id":     pitchID,
 		"date":         dateStr,
 		"booked_slots": slots,
 		"count":        len(slots),
+		"open_windows": openWindows,
+		"has_schedule": hasSchedule,
 	})
 }
 
@@ -300,6 +320,11 @@ func (h *BookingHandler) handleBookingError(c *gin.Context, err error) {
 		c.JSON(http.StatusConflict, gin.H{
 			"error":   "pitch_not_bookable",
 			"message": "الملعب غير متاح للحجز",
+		})
+	case errors.Is(err, repository.ErrSlotOutsideOperatingHours):
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "outside_operating_hours",
+			"message": "الوقت المطلوب خارج ساعات عمل الملعب",
 		})
 	case errors.Is(err, repository.ErrBookingNotFound):
 		c.JSON(http.StatusNotFound, gin.H{

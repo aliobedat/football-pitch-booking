@@ -38,6 +38,13 @@ type CreateBookingRequest struct {
 	// idempotent path so a double-tap / retry replays the original booking instead
 	// of creating a second one. Never bound from the JSON body.
 	Idempotency *IdempotencyParams `json:"-"`
+
+	// BypassHoursGate exempts this write from the operating-hours containment gate
+	// (locked decision #2: owner/admin-initiated writes are not bound by player
+	// open-hours). The player POST /bookings path leaves it false, so player
+	// bookings are always gated. It is the seam for the future owner/academy/block
+	// write-paths (which do not exist yet); never bound from the JSON body.
+	BypassHoursGate bool `json:"-"`
 }
 
 // IdempotencyParams carries everything the idempotent create path needs to claim,
@@ -59,6 +66,7 @@ type AdminBooking struct {
 	PlayerID   int64         `json:"player_id"`
 	UserName   string        `json:"user_name"`
 	UserEmail  string        `json:"user_email"`
+	UserPhone  string        `json:"user_phone"`
 	StartTime  time.Time     `json:"start_time"`
 	EndTime    time.Time     `json:"end_time"`
 	Status     BookingStatus `json:"status"`
@@ -68,7 +76,10 @@ type AdminBooking struct {
 
 // هيكل أوقات الفراغ (للاستعلام عن الحجوزات المتاحة)
 type AvailabilitySlot struct {
-	BookingID int64         `json:"booking_id"`
+	// BookingID is populated for internal use but NOT serialized: the availability
+	// endpoint is public (browse funnel), so we expose only the busy time ranges +
+	// status, never internal booking identifiers.
+	BookingID int64         `json:"-"`
 	StartTime time.Time     `json:"start_time"`
 	EndTime   time.Time     `json:"end_time"`
 	Status    BookingStatus `json:"status"`

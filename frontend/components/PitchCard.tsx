@@ -70,7 +70,10 @@ export default function PitchCard({ pitch }: { pitch: Pitch }) {
   const [imgError,  setImgError]  = useState(false);
 
   const displayArea  = pitch.area ?? pitch.neighborhood;
-  const displayImage = pitch.imageUrl ?? null;
+  // The backend serializes the uploaded Cloudinary URL as snake_case `image_url`
+  // (see backend/internal/data/pitches.go). `imageUrl` is a legacy camelCase
+  // alias the API never populates — prefer image_url, fall back for safety.
+  const displayImage = pitch.image_url ?? pitch.imageUrl ?? null;
   const avail        = pitch.availabilityToday ? AVAIL_STYLE[pitch.availabilityToday] : null;
   const showImage    = !!displayImage && !imgError;
 
