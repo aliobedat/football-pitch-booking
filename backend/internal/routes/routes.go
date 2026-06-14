@@ -48,6 +48,10 @@ func Register(
 	// ════════════════════════════════════════════════════════════════════════
 	v1.GET("/ping", healthHandler.Ping)
 	v1.GET("/pitches", pitchHandler.ListPitches)
+	// Public availability search: date + start time (+ optional coords) → pitches
+	// open and free from that start, nearest-first when coords are present. Static
+	// segment registered before the :id param route (Gin matches static first).
+	v1.GET("/pitches/availability", pitchHandler.SearchAvailability)
 	v1.GET("/pitches/:id", pitchHandler.GetPitch)
 	// Public: anyone can read a pitch's reviews + rating aggregates.
 	v1.GET("/pitches/:id/reviews", reviewHandler.ListPitchReviews)

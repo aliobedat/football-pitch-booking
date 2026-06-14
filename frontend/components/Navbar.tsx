@@ -22,8 +22,9 @@ export default function Navbar() {
     : isOwner
       ? [{ href: '/dashboard', label: 'لوحة التحكم' }]
       : [
-          { href: '/pitches',  label: 'ملاعبنا'  },
-          { href: '/bookings', label: 'حجوزاتي'  },
+          { href: '/pitches',      label: 'ملاعبنا'  },
+          { href: '/availability', label: 'ابحث الآن' },
+          { href: '/bookings',     label: 'حجوزاتي'  },
         ];
 
   const brandHref = isStaff ? '/dashboard' : '/pitches';
