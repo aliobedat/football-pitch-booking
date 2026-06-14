@@ -1,25 +1,21 @@
 {
-  "name": "frontend",
+  "name": "admin-dashboard",
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev",
+    "dev": "next dev -p 3001",
     "build": "next build",
-    "start": "next start",
+    "start": "next start -p 3001",
     "lint": "eslint"
   },
   "dependencies": {
     "@malaab/shared": "*",
-    "@vis.gl/react-google-maps": "^1.8.3",
     "axios": "^1.16.1",
-    "clsx": "^2.1.1",
-    "jwt-decode": "^4.0.0",
     "lucide-react": "^1.16.0",
     "next": "16.2.6",
     "react": "19.2.4",
     "react-dom": "19.2.4",
-    "react-dropzone": "^15.0.0",
-    "tailwind-merge": "^3.6.0"
+    "recharts": "^2.15.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",

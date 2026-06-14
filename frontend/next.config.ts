@@ -45,6 +45,8 @@ const securityHeaders = [
 ];
 
 const nextConfig: NextConfig = {
+  // @malaab/shared ships TS source consumed directly from the workspace.
+  transpilePackages: ['@malaab/shared'],
   // The legacy email/password /register page was removed in the auth-hardening
   // pass — phone OTP via /login is now the sole auth entry point. Permanently
   // redirect any stale bookmarks/links so they land on login instead of a 404.

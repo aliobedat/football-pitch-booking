@@ -1,0 +1,16 @@
+{
+  "name": "malaab-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "frontend",
+    "admin-dashboard"
+  ],
+  "scripts": {
+    "dev:web": "npm run dev -w frontend",
+    "dev:admin": "npm run dev -w admin-dashboard",
+    "build:web": "npm run build -w frontend",
+    "build:admin": "npm run build -w admin-dashboard"
+  }
+}
