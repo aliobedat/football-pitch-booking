@@ -102,16 +102,15 @@ func isCheckViolation(err error) bool {
 	return errors.As(err, &pgErr) && pgErr.Code == pgCheckViolation
 }
 
-// ── migration 017 relaxed the biconditional → a player row with NULL player_id
-//    is NO LONGER rejected at the DB level (forward-compat with PR 4 academy). The
-//    invariant is now unidirectional: only block/manual are FORCED to NULL player.
-//    (The player write-path still always sets player_id; the DB just no longer
-//    asserts it.)
+// ── migration 018 re-tightened the relationship to the BRANCHY bidirectional
+//    constraint (bookings_source_player_chk): source IN ('player','academy') ⟹
+//    player_id IS NOT NULL. So a player row with NULL player_id is REJECTED again
+//    (017's unidirectional relaxation was superseded by 018).
 
-func TestSourceCheck_PlayerNullPlayerIDNowAllowed(t *testing.T) {
+func TestSourceCheck_PlayerRequiresPlayerID(t *testing.T) {
 	e := newSourceCheckEnv(t)
-	if err := e.rawInsert(nil, "player"); err != nil {
-		t.Fatalf("after 017 a player row with NULL player_id should insert (biconditional relaxed), got %v", err)
+	if err := e.rawInsert(nil, "player"); !isCheckViolation(err) {
+		t.Fatalf("player row with NULL player_id: err = %v, want check_violation (23514) — branchy constraint (018)", err)
 	}
 }
 

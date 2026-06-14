@@ -105,8 +105,8 @@ func (e *scopingEnv) seedBooking(t *testing.T, pitchID int, endOffset time.Durat
 	end := time.Now().UTC().Add(endOffset)
 	start := end.Add(-time.Hour)
 	if _, err := e.pool.Exec(context.Background(), `
-		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status)
-		VALUES ($1, $2, tsrange($3::timestamp, $4::timestamp, '[)'), 30, 'confirmed')
+		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status, source)
+		VALUES ($1, $2, tstzrange($3::timestamptz, $4::timestamptz, '[)'), 30, 'confirmed', 'player')
 	`, pitchID, e.playerID, start, end); err != nil {
 		t.Fatalf("seed booking: %v", err)
 	}
