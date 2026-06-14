@@ -11,6 +11,7 @@ import type { Pitch } from '@/lib/types';
 import { Search, SlidersHorizontal, ChevronDown, RefreshCw, MapPin, Loader2 } from 'lucide-react';
 import Navbar from '@/components/Navbar';
 import PitchCard from '@/components/PitchCard';
+import { useAvailabilitySearch, AvailabilitySearchBar, AvailabilityResults } from '@/components/AvailabilitySearch';
 
 // ─── Filter / sort types ──────────────────────────────────────────────────────
 
@@ -185,6 +186,11 @@ function PitchesContent() {
   const [activeFilter, setActiveFilter] = useState<FilterValue>('all');
   const [sortKey,      setSortKey]      = useState<SortKey>('price_asc');
 
+  // Date+time availability search (lifted from the former /availability route). It
+  // fetches ONLY on submit; while a search is active it replaces the default
+  // listing with availability cards. Clearing returns to the default listing.
+  const search = useAvailabilitySearch();
+
   useEffect(() => {
     let cancelled = false;
     setIsLoading(true);
@@ -279,6 +285,25 @@ function PitchesContent() {
           أفضل ملاعب كرة القدم في عمّان. تصفّح، اختر، واحجز بلحظات — بدون اتصال.
         </p>
       </section>
+
+      {/* ── Availability search (prominent, top of discovery) ─────────────── */}
+      <section className="max-w-7xl mx-auto px-6 mb-10" aria-label="البحث عن ملعب متاح حسب الوقت">
+        <div className="rounded-2xl bg-[#141715] border border-white/[0.08] p-5 sm:p-6">
+          <div className="flex items-center gap-2 mb-4">
+            <Search size={14} className="text-emerald-400" aria-hidden />
+            <span className="text-[12.5px] font-bold text-[#f0efe8]">ابحث عن ملعب متاح في وقت محدّد</span>
+          </div>
+          <AvailabilitySearchBar s={search} />
+        </div>
+      </section>
+
+      {search.hasSearched ? (
+        /* ═══ Searched state: availability result cards ═══ */
+        <main className="max-w-7xl mx-auto px-6 pb-20">
+          <AvailabilityResults s={search} />
+        </main>
+      ) : (
+      <>
 
       {/* ── Search & filters ──────────────────────────────────────────────── */}
       <section className="max-w-7xl mx-auto px-6 mb-10" aria-label="البحث وتصفية الملاعب">
@@ -392,6 +417,9 @@ function PitchesContent() {
           }
         </div>
       </main>
+
+      </>
+      )}
 
       {/* ── Footer ────────────────────────────────────────────────────────── */}
       <footer className="border-t border-white/[0.05] py-8">
