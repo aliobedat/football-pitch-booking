@@ -11,12 +11,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ali/football-pitch-api/internal/auth"
+	"github.com/ali/football-pitch-api/internal/geo"
 )
 
 // ErrPitchHasFutureBookings is returned by SoftDeletePitch when the pitch still
 // has confirmed bookings that have not yet ended. Deletion is blocked (mapped to
 // 409 by the handler) rather than auto-cancelling those bookings.
 var ErrPitchHasFutureBookings = errors.New("pitch has future confirmed bookings")
+
+// ErrLocationRequired is returned by UpdatePitch when the edit would leave the
+// pitch with no usable location source (no valid maps_url AND no usable
+// coordinates). The handler maps it to a 422 field error on maps_url.
+var ErrLocationRequired = errors.New("pitch must keep a maps_url or usable coordinates")
 
 // pitchHues is cycled for new pitches that don't specify a colour.
 var pitchHues = []string{
@@ -119,6 +125,11 @@ type CreatePitchRequest struct {
 	// before persisting). Both empty means "no image yet".
 	ImageURL      string `json:"image_url"`
 	ImagePublicID string `json:"image_public_id"`
+
+	// MapsURL is the pitch's Google Maps share link. Required at creation (the
+	// handler enforces a well-formed Google host) — it is the location source from
+	// which coordinates are resolved post-commit. Persisted as-is.
+	MapsURL string `json:"maps_url"`
 }
 
 type PitchFilters struct {
@@ -290,6 +301,36 @@ type UpdatePitchRequest struct {
 func (m *PitchModel) UpdatePitch(ctx context.Context, id int, actor auth.Actor, req UpdatePitchRequest) (*Pitch, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
+
+	// Mandatory-location gate (scoped, no existence leak): read the CURRENT maps_url
+	// + coordinates under the actor's ownership predicate, then evaluate the
+	// after-edit state. A nil req.MapsURL leaves the link unchanged; a present value
+	// (incl. "") overwrites. If the result has neither a valid maps_url nor usable
+	// coordinates → ErrLocationRequired. A missing/foreign/deleted pitch yields
+	// pgx.ErrNoRows here (→ 404), exactly as the UPDATE would.
+	{
+		var curURL string
+		var curLat, curLng *float64
+		sel := `SELECT COALESCE(maps_url, ''), latitude, longitude FROM pitches WHERE id = $1 AND deleted_at IS NULL`
+		args := []any{id}
+		if !actor.IsAdmin() {
+			sel += ` AND owner_id = $2`
+			args = append(args, actor.UserID)
+		}
+		if err := m.DB.QueryRow(ctx, sel, args...).Scan(&curURL, &curLat, &curLng); err != nil {
+			return nil, err // pgx.ErrNoRows → 404
+		}
+		afterURL := curURL
+		if req.MapsURL != nil {
+			afterURL = *req.MapsURL
+		}
+		if !geo.RequireLocationSource(geo.LocationState{
+			MapsURL: afterURL,
+			Coords:  geo.Coordinates{Lat: curLat, Lng: curLng},
+		}) {
+			return nil, ErrLocationRequired
+		}
+	}
 
 	// surface/format are enum types (pitch_surface / pitch_format), so the THEN
 	// branch must cast the text param to the enum — otherwise CASE cannot unify
@@ -546,12 +587,12 @@ func (m *PitchModel) CreatePitch(ctx context.Context, req CreatePitchRequest) (*
 		INSERT INTO pitches
 			(owner_id, name, neighborhood, surface, format, price_per_hour,
 			 rating, review_count, is_featured, pitch_hue, amenities,
-			 latitude, longitude, image_url, image_public_id, description)
-		VALUES ($1, $2, $3, $4, $5, $6, 0, 0, false, $7, '{}', 0, 0, $8, $9, $10)
+			 latitude, longitude, image_url, image_public_id, description, maps_url)
+		VALUES ($1, $2, $3, $4, $5, $6, 0, 0, false, $7, '{}', 0, 0, $8, $9, $10, $11)
 		RETURNING %s
 	`, pitchReturnCols),
 		req.OwnerID, req.Name, req.Neighborhood, req.Surface, req.Format,
-		req.PricePerHour, hue, req.ImageURL, req.ImagePublicID, req.Description,
+		req.PricePerHour, hue, req.ImageURL, req.ImagePublicID, req.Description, req.MapsURL,
 	)
 
 	p, err := scanPitch(row)
@@ -559,4 +600,32 @@ func (m *PitchModel) CreatePitch(ctx context.Context, req CreatePitchRequest) (*
 		return nil, err
 	}
 	return &p, nil
+}
+
+// ResolveCoordsAsync resolves a pitch's coordinates from its maps_url in the
+// BACKGROUND and writes them back best-effort, so the create/update HTTP response
+// is never blocked on the network round-trip. It is fire-and-forget: any failure
+// (bad URL, no coordinate, transport error) is swallowed — the pitch simply stays
+// in the manual-pin queue (maps_url set, no usable coordinates).
+//
+// The UPDATE is GUARDED to only fill a pitch that still has NO usable coordinates
+// ((0,0) sentinel or NULL latitude): it never overwrites a real coordinate or a
+// manual pin, so concurrent resolutions and the legacy trap are both avoided.
+func (m *PitchModel) ResolveCoordsAsync(pitchID int, mapsURL string) {
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+
+		lat, lng, ok := geo.ResolvePitchCoordinates(ctx, mapsURL)
+		if !ok {
+			return // stays in the manual-pin queue
+		}
+		_, _ = m.DB.Exec(ctx, `
+			UPDATE pitches
+			SET latitude = $1, longitude = $2
+			WHERE id = $3
+			  AND deleted_at IS NULL
+			  AND (latitude IS NULL OR (latitude = 0 AND longitude = 0))
+		`, lat, lng, pitchID)
+	}()
 }

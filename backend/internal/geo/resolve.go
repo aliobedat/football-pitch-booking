@@ -72,8 +72,37 @@ func ValidateJordanCoords(lat, lng float64) bool {
 		lng >= jordanMinLng && lng <= jordanMaxLng
 }
 
-// isAllowedMapsHost gates redirect hops to Google's link/maps domains (SSRF guard).
-func isAllowedMapsHost(host string) bool {
+// ValidGoogleMapsURL reports whether raw is a present, well-formed https URL on an
+// allowed Google maps host — the "valid location link" half of RequireLocationSource.
+func ValidGoogleMapsURL(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" {
+		return false
+	}
+	return IsAllowedMapsHost(u.Hostname())
+}
+
+// LocationState is the location a pitch would have AFTER an edit: its resulting
+// maps_url and its current coordinates.
+type LocationState struct {
+	MapsURL string
+	Coords  Coordinates
+}
+
+// RequireLocationSource passes when the after-edit state has a usable location
+// source: EITHER a valid Google maps_url (from which coordinates can be resolved)
+// OR already-usable coordinates (protecting legacy pitches that carry coordinates
+// but no link). It is the single mandatory-location gate for create + update.
+func RequireLocationSource(s LocationState) bool {
+	return ValidGoogleMapsURL(s.MapsURL) || s.Coords.HasUsableCoords()
+}
+
+// IsAllowedMapsHost gates redirect hops to Google's link/maps domains (SSRF guard).
+func IsAllowedMapsHost(host string) bool {
 	host = strings.ToLower(host)
 	switch host {
 	case "goo.gl", "maps.app.goo.gl", "google.com", "maps.google.com":
@@ -102,7 +131,7 @@ func ResolvePitchCoordinates(ctx context.Context, mapsURL string) (lat, lng floa
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return 0, 0, false
 	}
-	if !isAllowedMapsHost(u.Hostname()) {
+	if !IsAllowedMapsHost(u.Hostname()) {
 		return 0, 0, false // reject a non-allowed initial host
 	}
 
@@ -112,7 +141,7 @@ func ResolvePitchCoordinates(ctx context.Context, mapsURL string) (lat, lng floa
 	client := &http.Client{
 		Timeout: 5 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if !isAllowedMapsHost(req.URL.Hostname()) {
+			if !IsAllowedMapsHost(req.URL.Hostname()) {
 				return fmt.Errorf("redirect to disallowed host %q", req.URL.Hostname())
 			}
 			if len(via) >= 10 {

@@ -757,10 +757,18 @@ function AddPitchForm({
   const [form, setForm]           = useState<PitchForm>(editing ? pitchToForm(editing) : EMPTY_FORM);
   const [isSubmitting, setSubmit] = useState(false);
   const [error, setError]         = useState<string | null>(null);
+  const [mapsUrlError, setMapsUrlError] = useState<string | null>(null);
 
   const set = (field: keyof PitchForm) =>
-    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
+    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
+      if (field === 'maps_url') setMapsUrlError(null);
       setForm(prev => ({ ...prev, [field]: e.target.value }));
+    };
+
+  // Light client-side check: a Google Maps share link (https + a Google host). The
+  // server is the final referee (well-formed host + SSRF allowlist).
+  const isGoogleMapsURL = (raw: string) =>
+    /^https:\/\/([a-z0-9-]+\.)*(google\.com|goo\.gl)(\/|$)/i.test(raw.trim());
 
   // Image change from the dropzone. In CREATE mode we just stash the values in
   // form state — they ride along in the POST /pitches payload on save. In EDIT
@@ -783,6 +791,20 @@ function AddPitchForm({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setMapsUrlError(null);
+
+    // Maps URL is mandatory on create. On edit it may be left as-is, but if the
+    // owner typed something it must look like a Google Maps link.
+    const url = form.maps_url.trim();
+    if (!isEdit && !url) {
+      setMapsUrlError('رابط الموقع على خرائط جوجل مطلوب');
+      return;
+    }
+    if (url && !isGoogleMapsURL(url)) {
+      setMapsUrlError('الرابط يجب أن يكون رابط مشاركة من خرائط جوجل (google.com أو goo.gl)');
+      return;
+    }
+
     setSubmit(true);
     try {
       const payload = { ...form, price_per_hour: Number(form.price_per_hour) };
@@ -791,10 +813,16 @@ function AddPitchForm({
         : await api.post('/pitches', payload);
       onSuccess(res.data.data as OwnerPitch);
     } catch (err: any) {
-      setError(
-        err?.response?.data?.message ??
-          (isEdit ? 'تعذّر تحديث الملعب، يرجى المحاولة مجدداً' : 'تعذّر إنشاء الملعب، يرجى المحاولة مجدداً'),
-      );
+      const data = err?.response?.data;
+      // Render the server's field-level 422 inline on the URL field.
+      if (data?.field === 'maps_url') {
+        setMapsUrlError(data?.message ?? 'رابط الموقع غير صالح');
+      } else {
+        setError(
+          data?.message ??
+            (isEdit ? 'تعذّر تحديث الملعب، يرجى المحاولة مجدداً' : 'تعذّر إنشاء الملعب، يرجى المحاولة مجدداً'),
+        );
+      }
       setSubmit(false);
     }
   };
@@ -851,17 +879,28 @@ function AddPitchForm({
             />
           </div>
 
-          {/* Google Maps URL */}
+          {/* Google Maps URL — required: it's the location source for the map pin */}
           <div>
-            <label className={labelCls}>رابط الموقع على خرائط Google</label>
+            <label className={labelCls}>
+              رابط الموقع على خرائط Google <span className="text-red-400/60">*</span>
+            </label>
             <input
               type="url"
               dir="ltr"
               value={form.maps_url}
               onChange={set('maps_url')}
               placeholder="https://maps.app.goo.gl/..."
-              className={inputCls}
+              required={!isEdit}
+              aria-invalid={!!mapsUrlError}
+              className={`${inputCls} ${mapsUrlError ? '!border-red-500/60 focus:!ring-red-500/20' : ''}`}
             />
+            {mapsUrlError ? (
+              <p className="text-[11px] text-red-400 mt-1.5">{mapsUrlError}</p>
+            ) : (
+              <p className="text-[11px] text-white/35 mt-1.5 leading-relaxed">
+                افتح موقع الملعب على تطبيق خرائط جوجل، واضغط «مشاركة» ثم «نسخ الرابط»، والصقه هنا.
+              </p>
+            )}
           </div>
 
           {/* Surface */}

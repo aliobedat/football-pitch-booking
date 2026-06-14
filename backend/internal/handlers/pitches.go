@@ -14,6 +14,7 @@ import (
 
 	"github.com/ali/football-pitch-api/internal/cloudinary"
 	"github.com/ali/football-pitch-api/internal/data"
+	"github.com/ali/football-pitch-api/internal/geo"
 	"github.com/ali/football-pitch-api/internal/middleware"
 )
 
@@ -110,6 +111,7 @@ func (h *PitchHandler) CreatePitch(c *gin.Context) {
 	}
 
 	req.OwnerID = middleware.GetUserID(c)
+	req.MapsURL = strings.TrimSpace(req.MapsURL)
 
 	// Trim + length-cap the free-text description before it reaches the INSERT.
 	if cleaned, ok := normalizeDescription(req.Description); ok {
@@ -118,6 +120,18 @@ func (h *PitchHandler) CreatePitch(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":   "invalid_description",
 			"message": fmt.Sprintf("الوصف يتجاوز الحد الأقصى (%d حرف)", maxDescriptionLen),
+		})
+		return
+	}
+
+	// Mandatory location: a new pitch has no coordinates yet, so the predicate
+	// reduces to "a valid Google maps_url is required". Reject (422, with a
+	// field-level error the UI renders inline on the URL field).
+	if !geo.RequireLocationSource(geo.LocationState{MapsURL: req.MapsURL}) {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "invalid_maps_url",
+			"field":   "maps_url",
+			"message": "رابط موقع الملعب على خرائط جوجل مطلوب (انسخ رابط المشاركة من تطبيق الخرائط)",
 		})
 		return
 	}
@@ -144,6 +158,11 @@ func (h *PitchHandler) CreatePitch(c *gin.Context) {
 		})
 		return
 	}
+
+	// Post-commit, best-effort: resolve coordinates from the link in the background
+	// so the owner's response is instant. On failure the pitch stays in the
+	// manual-pin queue (maps_url set, no usable coordinates).
+	h.Model.ResolveCoordsAsync(pitch.ID, req.MapsURL)
 
 	c.JSON(http.StatusCreated, gin.H{
 		"message": "تم إنشاء الملعب بنجاح",
@@ -179,33 +198,43 @@ func (h *PitchHandler) UpdatePitch(c *gin.Context) {
 		return
 	}
 
-	// maps_url: only validated when present (non-nil) and non-empty. An empty
-	// string is a legitimate "clear the link"; a non-empty value must be an https
-	// URL. No deeper URL parsing — paste-and-save only.
-	if req.MapsURL != nil && *req.MapsURL != "" && !strings.HasPrefix(*req.MapsURL, "https://") {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":   "invalid_maps_url",
-			"message": "رابط الموقع يجب أن يبدأ بـ https://",
-		})
-		return
+	if req.MapsURL != nil {
+		trimmed := strings.TrimSpace(*req.MapsURL)
+		req.MapsURL = &trimmed
 	}
 
-	// Ownership scoping lives in the data layer: an owner may update only their
-	// own pitch, an admin any. The Actor carries {UserID, Role} from the JWT.
+	// Ownership scoping AND the mandatory-location gate both live in the data layer:
+	// UpdatePitch reads the current maps_url + coordinates under the actor's
+	// ownership predicate, so a missing/foreign pitch is a 404 and a location-less
+	// result is ErrLocationRequired — neither leaks existence.
 	pitch, err := h.Model.UpdatePitch(c.Request.Context(), id, middleware.GetActor(c), req)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
 			c.JSON(http.StatusNotFound, gin.H{
 				"error":   "not_found",
 				"message": "الملعب غير موجود أو لا تملك صلاحية تعديله",
 			})
-			return
+		case errors.Is(err, data.ErrLocationRequired):
+			c.JSON(http.StatusUnprocessableEntity, gin.H{
+				"error":   "invalid_maps_url",
+				"field":   "maps_url",
+				"message": "يجب أن يحتفظ الملعب برابط موقع على خرائط جوجل أو بإحداثيات صالحة",
+			})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":   "internal_server_error",
+				"message": "حدث خطأ أثناء تحديث الملعب",
+			})
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "internal_server_error",
-			"message": "حدث خطأ أثناء تحديث الملعب",
-		})
 		return
+	}
+
+	// Best-effort background resolution: only when the pitch still lacks usable
+	// coordinates and now carries a resolvable link.
+	pitchCoords := geo.Coordinates{Lat: &pitch.Latitude, Lng: &pitch.Longitude}
+	if !pitchCoords.HasUsableCoords() && geo.ValidGoogleMapsURL(pitch.MapsURL) {
+		h.Model.ResolveCoordsAsync(pitch.ID, pitch.MapsURL)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "تم تحديث الملعب بنجاح", "data": pitch})

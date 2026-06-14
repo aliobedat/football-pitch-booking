@@ -85,16 +85,61 @@ func TestParseThenValidate_OutOfJordanRejected(t *testing.T) {
 	}
 }
 
+func TestValidGoogleMapsURL(t *testing.T) {
+	cases := []struct {
+		url  string
+		want bool
+	}{
+		{"https://maps.app.goo.gl/abc123", true},
+		{"https://goo.gl/maps/xyz", true},
+		{"https://www.google.com/maps/place/X/@32,35,17z", true},
+		{"", false},
+		{"   ", false},
+		{"http://maps.app.goo.gl/abc", false},        // not https
+		{"https://evil.com/maps", false},             // non-Google host
+		{"https://google.com.attacker.net/x", false}, // look-alike host
+		{"not a url at all", false},
+	}
+	for _, tc := range cases {
+		if got := ValidGoogleMapsURL(tc.url); got != tc.want {
+			t.Errorf("ValidGoogleMapsURL(%q) = %v, want %v", tc.url, got, tc.want)
+		}
+	}
+}
+
+func TestRequireLocationSource(t *testing.T) {
+	usable := Coordinates{Lat: ptr(32.0), Lng: ptr(35.9)}
+	sentinel := Coordinates{Lat: ptr(0), Lng: ptr(0)}
+
+	cases := []struct {
+		name string
+		s    LocationState
+		want bool
+	}{
+		{"valid url, no coords", LocationState{MapsURL: "https://maps.app.goo.gl/x"}, true},
+		{"no url, usable coords (legacy pitch)", LocationState{Coords: usable}, true},
+		{"valid url AND usable coords", LocationState{MapsURL: "https://maps.app.goo.gl/x", Coords: usable}, true},
+		{"no url, sentinel coords", LocationState{Coords: sentinel}, false},
+		{"invalid url, no coords", LocationState{MapsURL: "https://evil.com"}, false},
+		{"empty everything", LocationState{}, false},
+	}
+	for _, tc := range cases {
+		if got := RequireLocationSource(tc.s); got != tc.want {
+			t.Errorf("%s: RequireLocationSource = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestIsAllowedMapsHost(t *testing.T) {
 	allowed := []string{"maps.app.goo.gl", "goo.gl", "google.com", "maps.google.com", "consent.google.com", "www.google.com"}
 	for _, h := range allowed {
-		if !isAllowedMapsHost(h) {
+		if !IsAllowedMapsHost(h) {
 			t.Errorf("%s should be allowed", h)
 		}
 	}
 	denied := []string{"evil.com", "google.com.attacker.net", "notgoogle.com", "localhost", "169.254.169.254"}
 	for _, h := range denied {
-		if isAllowedMapsHost(h) {
+		if IsAllowedMapsHost(h) {
 			t.Errorf("%s should be denied (SSRF guard)", h)
 		}
 	}

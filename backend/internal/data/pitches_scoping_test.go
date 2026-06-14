@@ -75,6 +75,9 @@ func newScopingEnv(t *testing.T) *scopingEnv {
 		p, err := model.CreatePitch(ctx, CreatePitchRequest{
 			Name: name, Neighborhood: "Khalda", Surface: "artificial_grass",
 			Format: "خماسي", PricePerHour: 30, OwnerID: ownerID,
+			// Give a valid maps_url so update-path tests satisfy the PR 4.2 mandatory-
+			// location gate (these tests exercise scoping, not location).
+			MapsURL: "https://maps.app.goo.gl/scopingSeed",
 		})
 		if err != nil {
 			pool.Close()
@@ -493,6 +496,7 @@ func TestDescription_RoundTripAndScopedUpdate(t *testing.T) {
 	created, err := e.model.CreatePitch(ctx, CreatePitchRequest{
 		Name: "Desc Pitch", Neighborhood: "Khalda", Surface: "artificial_grass",
 		Format: "خماسي", PricePerHour: 30, OwnerID: e.ownerAID, Description: xss,
+		MapsURL: "https://maps.app.goo.gl/descSeed", // satisfy the PR 4.2 location gate on update
 	})
 	if err != nil {
 		t.Fatalf("create with description: %v", err)
