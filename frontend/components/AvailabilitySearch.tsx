@@ -185,7 +185,7 @@ export function AvailabilitySearchBar({ s }: { s: UseAvailabilitySearch }) {
 }
 
 // AvailabilityResults — the searched-state view: count + a "clear" back-link, then
-// the result cards (duration + distance badge) or the empty/error states.
+// the result cards (duration) or the empty/error states.
 export function AvailabilityResults({ s }: { s: UseAvailabilitySearch }) {
   return (
     <div>
@@ -232,12 +232,6 @@ export function AvailabilityResults({ s }: { s: UseAvailabilitySearch }) {
                       // eslint-disable-next-line @next/next/no-img-element
                       ? <img src={r.image_url} alt={r.name} className="w-full h-full object-cover" />
                       : <div className="w-full h-full flex items-center justify-center"><MapPin size={24} className="text-white/15" aria-hidden /></div>}
-                    {r.distance_km !== null && (
-                      <span className="absolute top-2 end-2 inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-bold bg-black/60 backdrop-blur-sm text-emerald-300 border border-emerald-500/30">
-                        <Navigation size={10} aria-hidden />
-                        {r.distance_km.toFixed(1)} كم
-                      </span>
-                    )}
                   </div>
                   <div className="p-4 flex flex-col gap-2 flex-1">
                     <h3 className="text-[14px] font-bold text-[#f0efe8] leading-snug">{r.name}</h3>

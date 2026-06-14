@@ -6,7 +6,6 @@ import { useRouter } from 'next/navigation';
 import api from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { LocationProvider, useLocation } from '@/context/LocationContext';
-import { haversineKm } from '@/lib/distance';
 import type { Pitch } from '@/lib/types';
 import { Search, SlidersHorizontal, ChevronDown, RefreshCw, MapPin, Loader2 } from 'lucide-react';
 import Navbar from '@/components/Navbar';
@@ -171,7 +170,7 @@ function ErrorState({ onRetry }: { onRetry: () => void }) {
 function PitchesContent() {
   const { user, isLoading: authLoading } = useAuth();
   const router = useRouter();
-  const { coords, status: locStatus, request: requestLocation } = useLocation();
+  const { status: locStatus, request: requestLocation } = useLocation();
 
   useEffect(() => {
     if (!authLoading && user?.role === 'owner') router.replace('/dashboard');
@@ -206,23 +205,12 @@ function PitchesContent() {
 
   const retry = useCallback(() => setFetchKey(k => k + 1), []);
 
-  // Attach distanceKm to every pitch at this level.
-  // When coords is null (location not granted) distanceKm is undefined —
-  // PitchCard hides the distance row entirely.
-  const pitchesWithDist = useMemo<Pitch[]>(() => {
-    if (!coords) return pitches;
-    return pitches.map(p => ({
-      ...p,
-      distanceKm: Math.round(haversineKm(coords, { lat: p.lat, lng: p.lng }) * 10) / 10,
-    }));
-  }, [pitches, coords]);
-
   const filteredPitches = useMemo<Pitch[]>(() => {
     if (isLoading || error) return [];
     const q    = query.trim();
     const chip = FILTER_CHIPS.find(c => c.value === activeFilter);
 
-    const filtered = pitchesWithDist.filter(pitch => {
+    const filtered = pitches.filter(pitch => {
       const matchesQuery =
         !q ||
         pitch.name.includes(q) ||
@@ -247,7 +235,7 @@ function PitchesContent() {
       const rb = b.rating ?? -1;
       return rb - ra;
     });
-  }, [pitchesWithDist, query, activeFilter, sortKey, isLoading, error]);
+  }, [pitches, query, activeFilter, sortKey, isLoading, error]);
 
   const handleReset = useCallback(() => {
     setQuery('');

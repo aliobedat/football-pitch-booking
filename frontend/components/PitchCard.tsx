@@ -5,7 +5,6 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { MapPin, Star } from 'lucide-react';
 import type { Pitch } from '@/lib/types';
-import { formatDistance } from '@/lib/distance';
 
 // Re-export so existing `import PitchCard, { type Pitch }` imports keep resolving.
 // New code should import from @/lib/types directly.
@@ -61,9 +60,6 @@ function PitchSilhouette() {
 //
 // Single <Link> wraps the whole card. CTA "احجز الآن" is a <span> — not a
 // nested <a>/<button> — zero nested interactive elements.
-//
-// distanceKm is a PROP only. Injected at the listing-page level (one geolocation
-// request, list-wide) so nearest-sorting adds zero refactor next phase.
 
 export default function PitchCard({ pitch }: { pitch: Pitch }) {
   const [imgLoaded, setImgLoaded] = useState(false);
@@ -169,20 +165,12 @@ export default function PitchCard({ pitch }: { pitch: Pitch }) {
             {pitch.name}
           </h3>
 
-          {/* Location + distance */}
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-1.5 text-white/40 min-w-0">
-              <MapPin size={11} className="shrink-0" aria-hidden />
-              <span className="text-[11px] truncate">
-                {pitch.city ? `${pitch.city} — ` : ''}{displayArea}
-              </span>
-            </div>
-            {/* Distance shown ONLY when provided — never 0 or fake */}
-            {pitch.distanceKm !== undefined && (
-              <span className="text-[10px] text-white/30 font-mono shrink-0">
-                {formatDistance(pitch.distanceKm)}
-              </span>
-            )}
+          {/* Location */}
+          <div className="flex items-center gap-1.5 text-white/40 min-w-0">
+            <MapPin size={11} className="shrink-0" aria-hidden />
+            <span className="text-[11px] truncate">
+              {pitch.city ? `${pitch.city} — ` : ''}{displayArea}
+            </span>
           </div>
 
           {/* Spec pills */}
