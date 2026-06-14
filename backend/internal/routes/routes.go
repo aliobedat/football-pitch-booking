@@ -170,6 +170,33 @@ func Register(
 			pitchHandler.GetOwnerPitches,
 		)
 
+		// Owner/admin BLOCKS: create held time (source='block'), or remove it.
+		// Not bound by operating hours (owner bypass); blocks still conflict with
+		// existing bookings via the EXCLUDE (pre-checked for a detailed 409).
+		protected.POST("/pitches/:id/blocks",
+			middleware.RequireRole("owner", "admin"),
+			bookingHandler.CreateBlock,
+		)
+		protected.DELETE("/pitches/:id/blocks/:bookingId",
+			middleware.RequireRole("owner", "admin"),
+			bookingHandler.CancelBlock,
+		)
+
+		// Owner/admin MANUAL (walk-in) bookings: log offline occupancy (source=
+		// 'manual', player_id NULL, guest_name set). Honours operating hours unless
+		// force_bypass_hours (soft override). Cancel goes through the standard
+		// /bookings/:id/cancel owner path (manual rows are real, audited occupancy).
+		protected.POST("/pitches/:id/bookings/manual",
+			middleware.RequireRole("owner", "admin"),
+			bookingHandler.CreateManualBooking,
+		)
+		// Bulk-cancel all FUTURE occurrences of a recurring walk-in group (past
+		// occurrences preserved). Owner/admin-scoped; idempotent (empty → 200, count 0).
+		protected.DELETE("/pitches/:id/bookings/group/:groupId",
+			middleware.RequireRole("owner", "admin"),
+			bookingHandler.CancelGroup,
+		)
+
 		// Owner/admin: list all bookings across all users and pitches
 		protected.GET("/admin/bookings",
 			middleware.RequireRole("owner", "admin"),

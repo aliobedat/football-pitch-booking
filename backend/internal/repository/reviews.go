@@ -317,11 +317,15 @@ func (r *reviewRepo) CheckEligibility(ctx context.Context, playerID, pitchID int
 		return result, nil
 	}
 
-	// Qualifying booking — exact query mandated by the spec.
+	// Qualifying booking. source = 'player' is defence-in-depth: player_id = $1
+	// already excludes block/academy rows (their player_id is NULL), but a block
+	// must never confer review eligibility, so the discriminator is named here too
+	// — robust if the player_id predicate ever changes and self-documenting.
 	var bookingID int64
 	err = r.db.QueryRow(ctx, `
 		SELECT id FROM bookings
 		WHERE player_id = $1 AND pitch_id = $2
+		  AND source = 'player'
 		  AND status <> 'cancelled'
 		  AND upper(booking_range) < now()
 		ORDER BY upper(booking_range) DESC

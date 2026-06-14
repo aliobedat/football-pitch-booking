@@ -139,6 +139,15 @@ func (s *Service) Cancel(ctx context.Context, params repository.CancelBookingPar
 // It is best-effort: any failure (contact lookup, missing phone, delivery) is
 // logged and swallowed so the persisted, audited transition stands on its own.
 func (s *Service) dispatch(ctx context.Context, b *models.Booking, kind notification.MessageKind, reason string) {
+	// Notify guard (PR 2): only PLAYER bookings have a recipient. A block (and, in
+	// PR 3, an academy session) has no player_id, so it has no one to notify — and
+	// GetBookingContact's INNER JOIN on player_id would not resolve. The audited
+	// state transition (written by the Store, in-tx) stands regardless; we only
+	// skip the side-effect here, keeping one create/cancel path for every source.
+	if b.Source != "" && b.Source != models.SourcePlayer {
+		return
+	}
+
 	contact, err := s.store.GetBookingContact(ctx, b.ID)
 	if err != nil {
 		s.logger.Printf("[booking] notify: contact lookup failed for booking %d: %v", b.ID, err)

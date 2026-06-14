@@ -8,6 +8,7 @@ import { useAuth } from '@/context/AuthContext';
 import Navbar from '@/components/Navbar';
 import PitchImageDropzone, { type PitchImageValue } from '@/components/PitchImageDropzone';
 import OperatingHoursModal from '@/components/OperatingHoursModal';
+import BlocksModal from '@/components/BlocksModal';
 import {
   BookOpen, CheckCircle2, XCircle,
   X, CalendarDays, LayoutDashboard,
@@ -23,14 +24,19 @@ import { formatNumber, formatCurrency, formatDate, formatTime } from '@/lib/form
 type BookingStatus = 'pending' | 'confirmed' | 'cancelled';
 type ActiveTab     = 'bookings' | 'pitches';
 
+type BookingSource = 'player' | 'academy' | 'block' | 'manual';
+
 interface AdminBooking {
   id:          number;
   pitch_id:    number;
   pitch_name:  string;
-  player_id:   number;
+  player_id:   number | null;
   user_name:   string;
   user_email:  string;
   user_phone:  string;
+  guest_name?:  string | null;
+  guest_phone?: string | null;
+  source:      BookingSource;
   start_time:  string;
   end_time:    string;
   status:      BookingStatus;
@@ -83,6 +89,14 @@ const STATUS_CONFIG: Record<BookingStatus, { label: string; badge: string }> = {
   confirmed: { label: 'مؤكد',          badge: 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400' },
   pending:   { label: 'قيد الانتظار',  badge: 'bg-amber-500/15 border-amber-500/30 text-amber-400'       },
   cancelled: { label: 'مرفوض',         badge: 'bg-red-500/15 border-red-500/30 text-red-400'             },
+};
+
+// Source tag for non-player rows in the bookings table (player rows show no tag —
+// they are the default). Mirrors the day-grid colour language: blue manual, amber
+// block. See BlocksModal for the calendar rendering.
+const SOURCE_TAG: Partial<Record<BookingSource, { label: string; cls: string }>> = {
+  manual: { label: 'يدوي',  cls: 'bg-sky-500/15 border-sky-500/30 text-sky-300'     },
+  block:  { label: 'محظور', cls: 'bg-amber-500/15 border-amber-500/30 text-amber-300' },
 };
 
 const SURFACE_LABEL: Record<string, string> = {
@@ -158,9 +172,33 @@ function BookingRow({
         </span>
       </td>
       <td className="px-5 py-4 text-start">
-        <p className="text-[13px] font-semibold text-[#f0efe8] leading-snug">{booking.user_name || '—'}</p>
-        <p className="text-[12px] text-white/55 mt-0.5 font-mono" dir="ltr">{booking.user_phone || 'لا يوجد رقم'}</p>
-        <p className="text-[11px] text-white/30 mt-0.5 truncate max-w-[160px]">{booking.user_email}</p>
+        {(() => {
+          const tag = SOURCE_TAG[booking.source];
+          // Manual rows carry a guest; blocks have no party. Player rows use the
+          // joined user fields as before.
+          const isManual = booking.source === 'manual';
+          const isBlock  = booking.source === 'block';
+          const name  = isManual ? (booking.guest_name || 'ضيف') : isBlock ? 'صيانة / مغلق' : (booking.user_name || '—');
+          const phone = isManual ? (booking.guest_phone || '') : isBlock ? '' : booking.user_phone;
+          return (
+            <>
+              <p className="text-[13px] font-semibold text-[#f0efe8] leading-snug flex items-center gap-1.5">
+                <span className="truncate">{name}</span>
+                {tag && (
+                  <span className={`inline-flex flex-shrink-0 items-center px-1.5 py-0.5 rounded-md text-[9px] font-bold border ${tag.cls}`}>
+                    {tag.label}
+                  </span>
+                )}
+              </p>
+              {phone
+                ? <p className="text-[12px] text-white/55 mt-0.5 font-mono" dir="ltr">{phone}</p>
+                : !isBlock && <p className="text-[12px] text-white/30 mt-0.5">لا يوجد رقم</p>}
+              {!isManual && !isBlock && booking.user_email && (
+                <p className="text-[11px] text-white/30 mt-0.5 truncate max-w-[160px]">{booking.user_email}</p>
+              )}
+            </>
+          );
+        })()}
       </td>
       <td className="px-5 py-4 text-start">
         <span className="text-[13px] text-white/65">{booking.pitch_name || `ملعب #${booking.pitch_id}`}</span>
@@ -507,6 +545,7 @@ function PitchCard({
   onRequestDelete,
   onViewBookings,
   onManageHours,
+  onManageBlocks,
   onToggleActive,
   isToggling,
 }: {
@@ -515,6 +554,7 @@ function PitchCard({
   onRequestDelete: (pitch: OwnerPitch) => void;
   onViewBookings: () => void;
   onManageHours: (pitch: OwnerPitch) => void;
+  onManageBlocks: (pitch: OwnerPitch) => void;
   onToggleActive: (pitch: OwnerPitch) => void;
   isToggling: boolean;
 }) {
@@ -657,6 +697,15 @@ function PitchCard({
             title="أوقات العمل"
           >
             <Clock size={12} aria-hidden />
+          </button>
+          <button
+            type="button"
+            onClick={() => onManageBlocks(pitch)}
+            className={`${actionBtn} !flex-none px-2.5 bg-white/[0.03] border-white/[0.10] text-white/60 hover:bg-amber-500/[0.09] hover:border-amber-500/30 hover:text-amber-300 focus-visible:ring-amber-500/40`}
+            aria-label={`حجب مواعيد ملعب ${pitch.name}`}
+            title="الحجب والصيانة"
+          >
+            <Ban size={12} aria-hidden />
           </button>
           <button
             type="button"
@@ -964,6 +1013,9 @@ export default function DashboardPage() {
 
   // ── operating-hours editor state ────────────────────────────────────────
   const [hoursTarget, setHoursTarget] = useState<OwnerPitch | null>(null);
+
+  // ── blocks (held time / maintenance) manager state ──────────────────────
+  const [blocksTarget, setBlocksTarget] = useState<OwnerPitch | null>(null);
 
   // ── cancel-booking modal state ──────────────────────────────────────────
   const [cancelTarget, setCancelTarget] = useState<AdminBooking | null>(null);
@@ -1322,6 +1374,7 @@ export default function DashboardPage() {
                     onRequestDelete={openDeleteModal}
                     onViewBookings={() => setActiveTab('bookings')}
                     onManageHours={setHoursTarget}
+                    onManageBlocks={setBlocksTarget}
                     onToggleActive={handleToggleActive}
                     isToggling={togglingId === p.id}
                   />
@@ -1379,6 +1432,15 @@ export default function DashboardPage() {
           pitchId={hoursTarget.id}
           pitchName={hoursTarget.name}
           onClose={() => setHoursTarget(null)}
+        />
+      )}
+
+      {/* ── Blocks / maintenance manager modal ───────────────────────────── */}
+      {blocksTarget && (
+        <BlocksModal
+          pitchId={blocksTarget.id}
+          pitchName={blocksTarget.name}
+          onClose={() => setBlocksTarget(null)}
         />
       )}
 

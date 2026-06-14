@@ -114,6 +114,7 @@ func (r *reminderRepo) ClaimDueReminders(
 		JOIN pitches p ON p.id = b.pitch_id
 		JOIN users   u ON u.id = b.player_id
 		WHERE b.status = 'confirmed'
+		  AND b.source = 'player'
 		  AND b.reminder_sent = FALSE
 		  AND u.phone IS NOT NULL AND u.phone <> ''
 		  AND lower(b.booking_range) >  $1::timestamptz

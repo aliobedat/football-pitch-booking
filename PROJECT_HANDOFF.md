@@ -6,6 +6,25 @@ _Last updated: 2026-06-06 — read-only system audit reconciled this handoff aga
 
 ---
 
+## ⚠️ Structural note — `'academy'` in `bookings_source_chk` is RESERVED (do not remove)
+
+The `bookings.source` value-domain CHECK (`bookings_source_chk`) permits four
+values: `player`, `manual`, `block`, and **`academy`**. As of the recurring
+walk-ins work (migration 019), **`academy` is a DORMANT, forward-looking value**
+— no code path writes `source='academy'` today. Recurring walk-ins are logged as
+`source='manual'` with a shared `recurrence_group_id`, NOT as academy rows. The
+original parent/child academy materialization engine (migration 018's
+`booking_series` + `bookings.series_id`) was deliberately **rolled forward out of
+the schema** (migration 019) in favour of the lean grouping approach.
+
+**Do NOT "tidy up" by removing `'academy'` from the CHECK constraint.** It is
+intentionally retained for a V2 academy feature. The branchy relationship
+constraint `bookings_source_player_chk` already accounts for it
+(`source IN ('player','academy') ⟹ player_id IS NOT NULL`). Removing the value
+would force a constraint rewrite later and break forward compatibility. Leave it.
+
+---
+
 ## 0. ⏸️ DEPLOYMENT PAUSED — LOCAL-ONLY DEVELOPMENT
 
 **As of 2026-06-04, the Vercel (frontend) and Railway (backend) deployment is paused.** The cross-site CORS/cookie configuration was causing too much friction. We are building all remaining features **purely locally** and will deploy cleanly to a proper domain once the project is finished.
