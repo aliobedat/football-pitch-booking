@@ -104,13 +104,15 @@ const (
 
 func sampleBooking() *models.Booking {
 	start := time.Date(2026, 6, 10, 18, 0, 0, 0, time.UTC)
+	pid := int64(3)
 	return &models.Booking{
 		ID:         42,
 		PitchID:    7,
-		PlayerID:     3,
+		PlayerID:   &pid,
 		StartTime:  start,
 		EndTime:    start.Add(time.Hour),
 		Status:     models.StatusConfirmed,
+		Source:     models.SourcePlayer,
 		TotalPrice: 30,
 		CreatedAt:  start.Add(-24 * time.Hour),
 	}
@@ -120,6 +122,68 @@ func sampleBooking() *models.Booking {
 // logger so best-effort diagnostics don't pollute test output.
 func newService(store Store, notifier Notifier) *Service {
 	return NewService(store, notifier, WithLogger(log.New(io.Discard, "", 0)))
+}
+
+// TestCancel_BlockSendsNoNotification proves the #9 guard: a block (no player)
+// flows through the SAME cancel path — the Store records the transition/audit —
+// but the notify side-effect is skipped (no contact lookup, no message). One
+// path; only the dispatch is conditional on source.
+func TestCancel_BlockSendsNoNotification(t *testing.T) {
+	blk := sampleBooking()
+	blk.Source = models.SourceBlock
+	blk.PlayerID = nil
+	store := &fakeStore{booking: blk}
+	notifier := &fakeNotifier{}
+	svc := newService(store, notifier)
+
+	if _, err := svc.Cancel(context.Background(), repository.CancelBookingParams{
+		BookingID:     blk.ID,
+		ActorID:       int64Ptr(5),
+		ActorRole:     repository.ActorOwner,
+		RequireSource: "block",
+	}); err != nil {
+		t.Fatalf("cancel block: %v", err)
+	}
+	if store.cancelCalls != 1 {
+		t.Fatalf("cancelCalls = %d, want 1 (block must still flow through cancel + audit)", store.cancelCalls)
+	}
+	if store.contactCalls != 0 {
+		t.Fatalf("GetBookingContact called %d times for a block, want 0 (guard short-circuits)", store.contactCalls)
+	}
+	if len(notifier.sent) != 0 {
+		t.Fatalf("notifier sent %d messages for a block cancel, want 0", len(notifier.sent))
+	}
+}
+
+// TestCancel_ManualSendsNoNotification proves the same #9 guard covers MANUAL
+// (walk-in) cancels: a manual booking has no platform player (player_id NULL), so
+// cancelling it via the standard owner path records the transition/audit but skips
+// the notify side-effect (no contact lookup, no SMS) — confirming SMS dispatch is
+// bypassed for manual just as it is for blocks.
+func TestCancel_ManualSendsNoNotification(t *testing.T) {
+	mb := sampleBooking()
+	mb.Source = models.SourceManual
+	mb.PlayerID = nil
+	store := &fakeStore{booking: mb}
+	notifier := &fakeNotifier{}
+	svc := newService(store, notifier)
+
+	if _, err := svc.Cancel(context.Background(), repository.CancelBookingParams{
+		BookingID: mb.ID,
+		ActorID:   int64Ptr(5),
+		ActorRole: repository.ActorOwner,
+	}); err != nil {
+		t.Fatalf("cancel manual: %v", err)
+	}
+	if store.cancelCalls != 1 {
+		t.Fatalf("cancelCalls = %d, want 1 (manual must still flow through cancel + audit)", store.cancelCalls)
+	}
+	if store.contactCalls != 0 {
+		t.Fatalf("GetBookingContact called %d times for a manual booking, want 0 (guard short-circuits)", store.contactCalls)
+	}
+	if len(notifier.sent) != 0 {
+		t.Fatalf("notifier sent %d messages for a manual cancel, want 0", len(notifier.sent))
+	}
 }
 
 func int64Ptr(v int64) *int64 { return &v }

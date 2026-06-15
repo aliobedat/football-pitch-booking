@@ -44,6 +44,24 @@ func TestSignParams_KnownVector(t *testing.T) {
 	}
 }
 
+// Empty-valued params must be EXCLUDED from the to-sign string, mirroring how
+// Cloudinary drops empty form fields before re-verifying. A blank upload_preset
+// must produce the same signature as if it were never supplied.
+func TestSignParams_ExcludesEmptyValues(t *testing.T) {
+	withEmpty := url.Values{}
+	withEmpty.Set("folder", "malaeb/pitches")
+	withEmpty.Set("timestamp", "1700000000")
+	withEmpty.Set("upload_preset", "")
+
+	without := url.Values{}
+	without.Set("folder", "malaeb/pitches")
+	without.Set("timestamp", "1700000000")
+
+	if got, want := signParams(withEmpty, "topsecret"), signParams(without, "topsecret"); got != want {
+		t.Fatalf("empty param not excluded: got %q, want %q", got, want)
+	}
+}
+
 // The signed payload must carry the pinned folder/preset and the non-secret
 // api_key + cloud_name — and the signature must verify against those exact params.
 // The API SECRET must never appear anywhere in the payload.

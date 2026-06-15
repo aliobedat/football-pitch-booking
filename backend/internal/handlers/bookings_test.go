@@ -88,13 +88,15 @@ func doJSON(t *testing.T, r *gin.Engine, method, path string, body any) *httptes
 
 func sampleHandlerBooking() *models.Booking {
 	start := time.Now().UTC().Add(48 * time.Hour)
+	pid := int64(3)
 	return &models.Booking{
 		ID:         42,
 		PitchID:    7,
-		PlayerID:   3,
+		PlayerID:   &pid,
 		StartTime:  start,
 		EndTime:    start.Add(time.Hour),
 		Status:     models.StatusConfirmed,
+		Source:     models.SourcePlayer,
 		TotalPrice: 30,
 		CreatedAt:  time.Now().UTC(),
 	}
@@ -109,6 +111,42 @@ func validCreateBody() map[string]any {
 		"start_time":  start.Format(time.RFC3339),
 		"end_time":    start.Add(time.Hour).Format(time.RFC3339),
 		"total_price": 30,
+	}
+}
+
+// newBlockRouter mounts the block routes behind the SAME RequireRole guard used
+// in production, with an identity injector, so the authz contract (player → 403)
+// is exercised end-to-end. RequireRole aborts before the handler, so the nil repo
+// is never touched.
+func newBlockRouter(h *BookingHandler, userID int, role string) *gin.Engine {
+	r := gin.New()
+	inject := func(c *gin.Context) {
+		c.Set(middleware.ContextKeyUserID, userID)
+		c.Set(middleware.ContextKeyRole, role)
+		c.Next()
+	}
+	r.POST("/pitches/:id/blocks", inject, middleware.RequireRole("owner", "admin"), h.CreateBlock)
+	r.DELETE("/pitches/:id/blocks/:bookingId", inject, middleware.RequireRole("owner", "admin"), h.CancelBlock)
+	return r
+}
+
+// A player must not be able to create or remove blocks (owner/admin only).
+func TestCreateBlock_PlayerForbidden(t *testing.T) {
+	r := newBlockRouter(&BookingHandler{}, 3, "player")
+	rec := doJSON(t, r, http.MethodPost, "/pitches/7/blocks", map[string]any{
+		"start_time": time.Now().UTC().Add(48 * time.Hour).Format(time.RFC3339),
+		"end_time":   time.Now().UTC().Add(49 * time.Hour).Format(time.RFC3339),
+	})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a player creating a block (body: %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCancelBlock_PlayerForbidden(t *testing.T) {
+	r := newBlockRouter(&BookingHandler{}, 3, "player")
+	rec := doJSON(t, r, http.MethodDelete, "/pitches/7/blocks/55", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a player removing a block (body: %s)", rec.Code, rec.Body.String())
 	}
 }
 

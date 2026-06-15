@@ -75,6 +75,9 @@ func newScopingEnv(t *testing.T) *scopingEnv {
 		p, err := model.CreatePitch(ctx, CreatePitchRequest{
 			Name: name, Neighborhood: "Khalda", Surface: "artificial_grass",
 			Format: "خماسي", PricePerHour: 30, OwnerID: ownerID,
+			// Give a valid maps_url so update-path tests satisfy the PR 4.2 mandatory-
+			// location gate (these tests exercise scoping, not location).
+			MapsURL: "https://maps.app.goo.gl/scopingSeed",
 		})
 		if err != nil {
 			pool.Close()
@@ -105,8 +108,8 @@ func (e *scopingEnv) seedBooking(t *testing.T, pitchID int, endOffset time.Durat
 	end := time.Now().UTC().Add(endOffset)
 	start := end.Add(-time.Hour)
 	if _, err := e.pool.Exec(context.Background(), `
-		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status)
-		VALUES ($1, $2, tsrange($3::timestamp, $4::timestamp, '[)'), 30, 'confirmed')
+		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status, source)
+		VALUES ($1, $2, tstzrange($3::timestamptz, $4::timestamptz, '[)'), 30, 'confirmed', 'player')
 	`, pitchID, e.playerID, start, end); err != nil {
 		t.Fatalf("seed booking: %v", err)
 	}
@@ -493,6 +496,7 @@ func TestDescription_RoundTripAndScopedUpdate(t *testing.T) {
 	created, err := e.model.CreatePitch(ctx, CreatePitchRequest{
 		Name: "Desc Pitch", Neighborhood: "Khalda", Surface: "artificial_grass",
 		Format: "خماسي", PricePerHour: 30, OwnerID: e.ownerAID, Description: xss,
+		MapsURL: "https://maps.app.goo.gl/descSeed", // satisfy the PR 4.2 location gate on update
 	})
 	if err != nil {
 		t.Fatalf("create with description: %v", err)

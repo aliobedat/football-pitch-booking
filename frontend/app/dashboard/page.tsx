@@ -7,11 +7,13 @@ import api from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import Navbar from '@/components/Navbar';
 import PitchImageDropzone, { type PitchImageValue } from '@/components/PitchImageDropzone';
+import OperatingHoursModal from '@/components/OperatingHoursModal';
+import BlocksModal from '@/components/BlocksModal';
 import {
   BookOpen, CheckCircle2, XCircle,
   X, CalendarDays, LayoutDashboard,
   MapPin, Plus, ChevronDown,
-  Ban, AlertTriangle, Pencil, Trash2, CalendarSearch, Users,
+  Ban, AlertTriangle, Pencil, Trash2, CalendarSearch, Users, Clock,
 } from 'lucide-react';
 import { formatNumber, formatCurrency, formatDate, formatTime } from '@/lib/format';
 
@@ -22,13 +24,19 @@ import { formatNumber, formatCurrency, formatDate, formatTime } from '@/lib/form
 type BookingStatus = 'pending' | 'confirmed' | 'cancelled';
 type ActiveTab     = 'bookings' | 'pitches';
 
+type BookingSource = 'player' | 'academy' | 'block' | 'manual';
+
 interface AdminBooking {
   id:          number;
   pitch_id:    number;
   pitch_name:  string;
-  player_id:   number;
+  player_id:   number | null;
   user_name:   string;
   user_email:  string;
+  user_phone:  string;
+  guest_name?:  string | null;
+  guest_phone?: string | null;
+  source:      BookingSource;
   start_time:  string;
   end_time:    string;
   status:      BookingStatus;
@@ -53,6 +61,7 @@ interface OwnerPitch {
   pitchHue:     string;
   image_url:       string;
   image_public_id: string;
+  maps_url:        string;
 }
 
 interface PitchForm {
@@ -64,6 +73,7 @@ interface PitchForm {
   description:   string;
   image_url:       string;
   image_public_id: string;
+  maps_url:        string;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,13 +82,21 @@ interface PitchForm {
 
 const EMPTY_FORM: PitchForm = {
   name: '', neighborhood: '', surface: 'artificial_grass',
-  format: 'خماسي', price_per_hour: '', description: '', image_url: '', image_public_id: '',
+  format: 'خماسي', price_per_hour: '', description: '', image_url: '', image_public_id: '', maps_url: '',
 };
 
 const STATUS_CONFIG: Record<BookingStatus, { label: string; badge: string }> = {
   confirmed: { label: 'مؤكد',          badge: 'bg-emerald-500/15 border-emerald-500/30 text-emerald-400' },
   pending:   { label: 'قيد الانتظار',  badge: 'bg-amber-500/15 border-amber-500/30 text-amber-400'       },
   cancelled: { label: 'مرفوض',         badge: 'bg-red-500/15 border-red-500/30 text-red-400'             },
+};
+
+// Source tag for non-player rows in the bookings table (player rows show no tag —
+// they are the default). Mirrors the day-grid colour language: blue manual, amber
+// block. See BlocksModal for the calendar rendering.
+const SOURCE_TAG: Partial<Record<BookingSource, { label: string; cls: string }>> = {
+  manual: { label: 'يدوي',  cls: 'bg-sky-500/15 border-sky-500/30 text-sky-300'     },
+  block:  { label: 'محظور', cls: 'bg-amber-500/15 border-amber-500/30 text-amber-300' },
 };
 
 const SURFACE_LABEL: Record<string, string> = {
@@ -154,8 +172,33 @@ function BookingRow({
         </span>
       </td>
       <td className="px-5 py-4 text-start">
-        <p className="text-[13px] font-semibold text-[#f0efe8] leading-snug">{booking.user_name || '—'}</p>
-        <p className="text-[11px] text-white/30 mt-0.5 truncate max-w-[160px]">{booking.user_email}</p>
+        {(() => {
+          const tag = SOURCE_TAG[booking.source];
+          // Manual rows carry a guest; blocks have no party. Player rows use the
+          // joined user fields as before.
+          const isManual = booking.source === 'manual';
+          const isBlock  = booking.source === 'block';
+          const name  = isManual ? (booking.guest_name || 'ضيف') : isBlock ? 'صيانة / مغلق' : (booking.user_name || '—');
+          const phone = isManual ? (booking.guest_phone || '') : isBlock ? '' : booking.user_phone;
+          return (
+            <>
+              <p className="text-[13px] font-semibold text-[#f0efe8] leading-snug flex items-center gap-1.5">
+                <span className="truncate">{name}</span>
+                {tag && (
+                  <span className={`inline-flex flex-shrink-0 items-center px-1.5 py-0.5 rounded-md text-[9px] font-bold border ${tag.cls}`}>
+                    {tag.label}
+                  </span>
+                )}
+              </p>
+              {phone
+                ? <p className="text-[12px] text-white/55 mt-0.5 font-mono" dir="ltr">{phone}</p>
+                : !isBlock && <p className="text-[12px] text-white/30 mt-0.5">لا يوجد رقم</p>}
+              {!isManual && !isBlock && booking.user_email && (
+                <p className="text-[11px] text-white/30 mt-0.5 truncate max-w-[160px]">{booking.user_email}</p>
+              )}
+            </>
+          );
+        })()}
       </td>
       <td className="px-5 py-4 text-start">
         <span className="text-[13px] text-white/65">{booking.pitch_name || `ملعب #${booking.pitch_id}`}</span>
@@ -501,6 +544,8 @@ function PitchCard({
   onEdit,
   onRequestDelete,
   onViewBookings,
+  onManageHours,
+  onManageBlocks,
   onToggleActive,
   isToggling,
 }: {
@@ -508,6 +553,8 @@ function PitchCard({
   onEdit: (pitch: OwnerPitch) => void;
   onRequestDelete: (pitch: OwnerPitch) => void;
   onViewBookings: () => void;
+  onManageHours: (pitch: OwnerPitch) => void;
+  onManageBlocks: (pitch: OwnerPitch) => void;
   onToggleActive: (pitch: OwnerPitch) => void;
   isToggling: boolean;
 }) {
@@ -644,6 +691,24 @@ function PitchCard({
           </button>
           <button
             type="button"
+            onClick={() => onManageHours(pitch)}
+            className={`${actionBtn} !flex-none px-2.5 bg-white/[0.03] border-white/[0.10] text-white/60 hover:bg-emerald-500/[0.09] hover:border-emerald-500/30 hover:text-emerald-300 focus-visible:ring-emerald-500/40`}
+            aria-label={`أوقات عمل ملعب ${pitch.name}`}
+            title="أوقات العمل"
+          >
+            <Clock size={12} aria-hidden />
+          </button>
+          <button
+            type="button"
+            onClick={() => onManageBlocks(pitch)}
+            className={`${actionBtn} !flex-none px-2.5 bg-white/[0.03] border-white/[0.10] text-white/60 hover:bg-amber-500/[0.09] hover:border-amber-500/30 hover:text-amber-300 focus-visible:ring-amber-500/40`}
+            aria-label={`حجب مواعيد ملعب ${pitch.name}`}
+            title="الحجب والصيانة"
+          >
+            <Ban size={12} aria-hidden />
+          </button>
+          <button
+            type="button"
             onClick={() => onRequestDelete(pitch)}
             className={`${actionBtn} !flex-none px-2.5 bg-red-500/[0.04] border-red-500/[0.14] text-red-400/70 hover:bg-red-500/[0.09] hover:border-red-500/30 hover:text-red-400 focus-visible:ring-red-500/40`}
             aria-label={`حذف ملعب ${pitch.name}`}
@@ -672,6 +737,7 @@ function pitchToForm(p: OwnerPitch): PitchForm {
     description:    p.description ?? '',
     image_url:       p.image_url ?? '',
     image_public_id: p.image_public_id ?? '',
+    maps_url:        p.maps_url ?? '',
   };
 }
 
@@ -691,10 +757,18 @@ function AddPitchForm({
   const [form, setForm]           = useState<PitchForm>(editing ? pitchToForm(editing) : EMPTY_FORM);
   const [isSubmitting, setSubmit] = useState(false);
   const [error, setError]         = useState<string | null>(null);
+  const [mapsUrlError, setMapsUrlError] = useState<string | null>(null);
 
   const set = (field: keyof PitchForm) =>
-    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
+    (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
+      if (field === 'maps_url') setMapsUrlError(null);
       setForm(prev => ({ ...prev, [field]: e.target.value }));
+    };
+
+  // Light client-side check: a Google Maps share link (https + a Google host). The
+  // server is the final referee (well-formed host + SSRF allowlist).
+  const isGoogleMapsURL = (raw: string) =>
+    /^https:\/\/([a-z0-9-]+\.)*(google\.com|goo\.gl)(\/|$)/i.test(raw.trim());
 
   // Image change from the dropzone. In CREATE mode we just stash the values in
   // form state — they ride along in the POST /pitches payload on save. In EDIT
@@ -717,6 +791,20 @@ function AddPitchForm({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setMapsUrlError(null);
+
+    // Maps URL is mandatory on create. On edit it may be left as-is, but if the
+    // owner typed something it must look like a Google Maps link.
+    const url = form.maps_url.trim();
+    if (!isEdit && !url) {
+      setMapsUrlError('رابط الموقع على خرائط جوجل مطلوب');
+      return;
+    }
+    if (url && !isGoogleMapsURL(url)) {
+      setMapsUrlError('الرابط يجب أن يكون رابط مشاركة من خرائط جوجل (google.com أو goo.gl)');
+      return;
+    }
+
     setSubmit(true);
     try {
       const payload = { ...form, price_per_hour: Number(form.price_per_hour) };
@@ -725,10 +813,16 @@ function AddPitchForm({
         : await api.post('/pitches', payload);
       onSuccess(res.data.data as OwnerPitch);
     } catch (err: any) {
-      setError(
-        err?.response?.data?.message ??
-          (isEdit ? 'تعذّر تحديث الملعب، يرجى المحاولة مجدداً' : 'تعذّر إنشاء الملعب، يرجى المحاولة مجدداً'),
-      );
+      const data = err?.response?.data;
+      // Render the server's field-level 422 inline on the URL field.
+      if (data?.field === 'maps_url') {
+        setMapsUrlError(data?.message ?? 'رابط الموقع غير صالح');
+      } else {
+        setError(
+          data?.message ??
+            (isEdit ? 'تعذّر تحديث الملعب، يرجى المحاولة مجدداً' : 'تعذّر إنشاء الملعب، يرجى المحاولة مجدداً'),
+        );
+      }
       setSubmit(false);
     }
   };
@@ -783,6 +877,30 @@ function AddPitchForm({
               placeholder="مثال: خلدا"
               className={inputCls}
             />
+          </div>
+
+          {/* Google Maps URL — required: it's the location source for the map pin */}
+          <div>
+            <label className={labelCls}>
+              رابط الموقع على خرائط Google <span className="text-red-400/60">*</span>
+            </label>
+            <input
+              type="url"
+              dir="ltr"
+              value={form.maps_url}
+              onChange={set('maps_url')}
+              placeholder="https://maps.app.goo.gl/..."
+              required={!isEdit}
+              aria-invalid={!!mapsUrlError}
+              className={`${inputCls} ${mapsUrlError ? '!border-red-500/60 focus:!ring-red-500/20' : ''}`}
+            />
+            {mapsUrlError ? (
+              <p className="text-[11px] text-red-400 mt-1.5">{mapsUrlError}</p>
+            ) : (
+              <p className="text-[11px] text-white/35 mt-1.5 leading-relaxed">
+                افتح موقع الملعب على تطبيق خرائط جوجل، واضغط «مشاركة» ثم «نسخ الرابط»، والصقه هنا.
+              </p>
+            )}
           </div>
 
           {/* Surface */}
@@ -931,6 +1049,12 @@ export default function DashboardPage() {
   // ── activate/deactivate toggle state ────────────────────────────────────
   const [togglingId, setTogglingId] = useState<number | null>(null);
   const [toast,      setToast]      = useState<string | null>(null);
+
+  // ── operating-hours editor state ────────────────────────────────────────
+  const [hoursTarget, setHoursTarget] = useState<OwnerPitch | null>(null);
+
+  // ── blocks (held time / maintenance) manager state ──────────────────────
+  const [blocksTarget, setBlocksTarget] = useState<OwnerPitch | null>(null);
 
   // ── cancel-booking modal state ──────────────────────────────────────────
   const [cancelTarget, setCancelTarget] = useState<AdminBooking | null>(null);
@@ -1288,6 +1412,8 @@ export default function DashboardPage() {
                     onEdit={openEditForm}
                     onRequestDelete={openDeleteModal}
                     onViewBookings={() => setActiveTab('bookings')}
+                    onManageHours={setHoursTarget}
+                    onManageBlocks={setBlocksTarget}
                     onToggleActive={handleToggleActive}
                     isToggling={togglingId === p.id}
                   />
@@ -1336,6 +1462,24 @@ export default function DashboardPage() {
           error={deleteError}
           onConfirm={confirmDelete}
           onClose={closeDeleteModal}
+        />
+      )}
+
+      {/* ── Operating-hours editor modal ─────────────────────────────────── */}
+      {hoursTarget && (
+        <OperatingHoursModal
+          pitchId={hoursTarget.id}
+          pitchName={hoursTarget.name}
+          onClose={() => setHoursTarget(null)}
+        />
+      )}
+
+      {/* ── Blocks / maintenance manager modal ───────────────────────────── */}
+      {blocksTarget && (
+        <BlocksModal
+          pitchId={blocksTarget.id}
+          pitchName={blocksTarget.name}
+          onClose={() => setBlocksTarget(null)}
         />
       )}
 

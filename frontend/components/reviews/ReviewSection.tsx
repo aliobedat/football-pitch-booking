@@ -84,12 +84,10 @@ function fmtDate(iso: string): string {
 function ReviewForm({
   pitchId,
   existing,
-  qualifyingBookingId,
   onSaved,
 }: {
   pitchId: number;
   existing: Review | null;
-  qualifyingBookingId: number | null;
   onSaved: () => void;
 }) {
   const { user, refreshUser } = useAuth();
@@ -352,14 +350,12 @@ export default function ReviewSection({ pitchId }: Props) {
         <ReviewForm
           pitchId={pitchId}
           existing={eligibility.existing_review}
-          qualifyingBookingId={eligibility.qualifying_booking_id}
           onSaved={onSaved}
         />
       ) : eligibility?.eligible ? (
         <ReviewForm
           pitchId={pitchId}
           existing={null}
-          qualifyingBookingId={eligibility.qualifying_booking_id}
           onSaved={onSaved}
         />
       ) : null}

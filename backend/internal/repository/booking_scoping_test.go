@@ -67,8 +67,8 @@ func TestBookingScoping_GetAllBookings_OwnerVsAdmin(t *testing.T) {
 	mkBooking := func(pitch int64) {
 		start := time.Now().UTC().Add(48 * time.Hour)
 		if _, err := pool.Exec(ctx, `
-			INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status)
-			VALUES ($1,$2, tsrange($3::timestamp,$4::timestamp,'[)'), 30, 'confirmed')
+			INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status, source)
+			VALUES ($1,$2, tstzrange($3::timestamptz,$4::timestamptz,'[)'), 30, 'confirmed', 'player')
 		`, pitch, player, start, start.Add(time.Hour)); err != nil {
 			t.Fatalf("seed booking: %v", err)
 		}

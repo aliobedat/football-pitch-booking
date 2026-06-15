@@ -48,9 +48,20 @@ func Register(
 	// ════════════════════════════════════════════════════════════════════════
 	v1.GET("/ping", healthHandler.Ping)
 	v1.GET("/pitches", pitchHandler.ListPitches)
+	// Public availability search: date + start time (+ optional coords) → pitches
+	// open and free from that start, nearest-first when coords are present. Static
+	// segment registered before the :id param route (Gin matches static first).
+	v1.GET("/pitches/availability", pitchHandler.SearchAvailability)
 	v1.GET("/pitches/:id", pitchHandler.GetPitch)
 	// Public: anyone can read a pitch's reviews + rating aggregates.
 	v1.GET("/pitches/:id/reviews", reviewHandler.ListPitchReviews)
+	// Public: availability (booked slots for a date) is browse-funnel data — a
+	// visitor sees open slots on the public pitch detail page before logging in.
+	// The handler reads only the pitch id + date query; no session identity.
+	v1.GET("/pitches/:id/availability", bookingHandler.GetPitchAvailability)
+	// Public: a pitch's weekly operating hours — the player detail page renders
+	// bookable/closed from it (alongside availability). Read-only; no identity.
+	v1.GET("/pitches/:id/operating-hours", pitchHandler.GetOperatingHours)
 
 	// Provider delivery-status webhooks (PART 6). Public: authentication is the
 	// Meta verify-token handshake (GET) plus, in production, request-signature
@@ -117,10 +128,9 @@ func Register(
 		protected.POST("/notifications/opt-out", notificationHandler.OptOut)
 
 		// ── Bookings ─────────────────────────────────────────────────────────
-		// Any authenticated user can create a booking, list their own, or check availability
+		// Any authenticated user can create a booking or list their own.
 		protected.GET("/bookings", bookingHandler.GetUserBookings)
 		protected.POST("/bookings", bookingHandler.CreateBooking)
-		protected.GET("/pitches/:id/availability", bookingHandler.GetPitchAvailability)
 
 		// Owner: manage their own pitches
 		protected.POST("/pitches",
@@ -153,9 +163,42 @@ func Register(
 			middleware.RequireRole("owner", "admin"),
 			pitchHandler.ToggleActive,
 		)
+		// Replace the whole weekly operating-hours schedule (full grid). Owner/admin
+		// only; actor-scoped + audited in the data layer. Players are barred (403).
+		protected.PUT("/pitches/:id/operating-hours",
+			middleware.RequireRole("owner", "admin"),
+			pitchHandler.PutOperatingHours,
+		)
 		protected.GET("/owner/pitches",
 			middleware.RequireRole("owner", "admin"),
 			pitchHandler.GetOwnerPitches,
+		)
+
+		// Owner/admin BLOCKS: create held time (source='block'), or remove it.
+		// Not bound by operating hours (owner bypass); blocks still conflict with
+		// existing bookings via the EXCLUDE (pre-checked for a detailed 409).
+		protected.POST("/pitches/:id/blocks",
+			middleware.RequireRole("owner", "admin"),
+			bookingHandler.CreateBlock,
+		)
+		protected.DELETE("/pitches/:id/blocks/:bookingId",
+			middleware.RequireRole("owner", "admin"),
+			bookingHandler.CancelBlock,
+		)
+
+		// Owner/admin MANUAL (walk-in) bookings: log offline occupancy (source=
+		// 'manual', player_id NULL, guest_name set). Honours operating hours unless
+		// force_bypass_hours (soft override). Cancel goes through the standard
+		// /bookings/:id/cancel owner path (manual rows are real, audited occupancy).
+		protected.POST("/pitches/:id/bookings/manual",
+			middleware.RequireRole("owner", "admin"),
+			bookingHandler.CreateManualBooking,
+		)
+		// Bulk-cancel all FUTURE occurrences of a recurring walk-in group (past
+		// occurrences preserved). Owner/admin-scoped; idempotent (empty → 200, count 0).
+		protected.DELETE("/pitches/:id/bookings/group/:groupId",
+			middleware.RequireRole("owner", "admin"),
+			bookingHandler.CancelGroup,
 		)
 
 		// Owner/admin: list all bookings across all users and pitches

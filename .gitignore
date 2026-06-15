@@ -6,6 +6,14 @@
 .env.*
 *.env
 
+# Dependencies & build output (monorepo workspaces)
+node_modules/
+.next/
+out/
+build/
+*.tsbuildinfo
+.vercel
+
 # OS
 .DS_Store
 .DS_Store?

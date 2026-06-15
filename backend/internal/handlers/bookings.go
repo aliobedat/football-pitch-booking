@@ -12,8 +12,11 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/middleware"
 	"github.com/ali/football-pitch-api/internal/models"
 	"github.com/ali/football-pitch-api/internal/repository"
@@ -86,6 +89,9 @@ func (h *BookingHandler) CreateBooking(c *gin.Context) {
 		req.Idempotency = &models.IdempotencyParams{
 			Key:         key,
 			Endpoint:    bookingEndpoint,
+		
+		
+		
 			Fingerprint: bookingFingerprint(req),
 		}
 	}
@@ -213,11 +219,30 @@ func (h *BookingHandler) GetPitchAvailability(c *gin.Context) {
 		return
 	}
 
+	// Resolve the pitch's open windows for the requested date so the client renders
+	// bookable / booked / CLOSED (closed ≠ booked). open_windows are absolute UTC
+	// [start,end) intervals — the SAME referee the write-path gate uses, so the UI
+	// can never offer a slot the server will reject. has_schedule=false means the
+	// pitch is unconfigured → open 24/7 (the client shows the whole day as open).
+	openWindows, hasSchedule, err := h.repo.GetOpenWindows(c.Request.Context(), pitchID, date)
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "internal_error", "message": "failed to retrieve availability data",
+		})
+		return
+	}
+	if openWindows == nil {
+		openWindows = []data.ConcreteInterval{} // serialise [] not null
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"pitch_id":     pitchID,
 		"date":         dateStr,
 		"booked_slots": slots,
 		"count":        len(slots),
+		"open_windows": openWindows,
+		"has_schedule": hasSchedule,
 	})
 }
 
@@ -262,6 +287,286 @@ func (h *BookingHandler) CancelBooking(c *gin.Context) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// POST /api/v1/pitches/:id/blocks                                       ← NEW
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CreateBlock creates an owner/admin BLOCK on a pitch: held time with no player.
+// It is owner/admin-scoped (RequireRole at the route) and resolves the pitch under
+// a FOR UPDATE lock with the ownership predicate. The operating-hours gate is NOT
+// applied (owner bypass, locked decision #2) — block creation goes through a
+// distinct repository path (CreateBlock), not the player write-path. On overlap
+// with any non-cancelled booking it returns 409 with the conflict detail so the
+// dashboard can tell the owner exactly what to cancel first.
+func (h *BookingHandler) CreateBlock(c *gin.Context) {
+	pitchID, ok := parseIDParam(c, "id")
+	if !ok {
+		return
+	}
+
+	var req struct {
+		StartTime time.Time `json:"start_time" binding:"required"`
+		EndTime   time.Time `json:"end_time"   binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+	if !req.EndTime.After(req.StartTime) {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "invalid_time", "message": "end_time must be after start_time",
+		})
+		return
+	}
+	if !req.EndTime.After(time.Now().UTC()) {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "invalid_time", "message": "cannot block a time range entirely in the past",
+		})
+		return
+	}
+
+	block, err := h.repo.CreateBlock(c.Request.Context(), repository.CreateBlockParams{
+		PitchID:   int64(pitchID),
+		Actor:     middleware.GetActor(c),
+		StartTime: req.StartTime,
+		EndTime:   req.EndTime,
+	})
+	if err != nil {
+		var conflict *repository.BlockConflictError
+		switch {
+		case errors.As(err, &conflict):
+			c.JSON(http.StatusConflict, gin.H{
+				"error":     "slot_conflict",
+				"message":   "النطاق المطلوب يتعارض مع حجز قائم — يجب إلغاؤه أولاً",
+				"conflicts": conflict.Conflicts,
+			})
+		case errors.Is(err, pgx.ErrNoRows):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "not_found", "message": "الملعب غير موجود أو لا تملك صلاحية تعديله",
+			})
+		default:
+			c.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal_error", "message": "تعذّر إنشاء الحجب، حاول مجدداً",
+			})
+		}
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"message": "تم حجب الموعد", "data": block})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/v1/pitches/:id/bookings/manual                              ← NEW
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CreateManualBooking logs an owner/admin offline (walk-in / phone) booking:
+// real occupancy with no platform player (player_id NULL) but a named guest. It is
+// owner/admin-scoped (RequireRole) and reuses the Blocks locked-resolve + overlap
+// pre-check. It HONOURS the operating-hours gate unless force_bypass_hours is true
+// (the soft override: the UI first submits without it, catches the 422, confirms
+// with the owner, then resubmits with it set). On overlap it returns 409 with the
+// conflict detail (now null-safe for non-player conflicting rows).
+func (h *BookingHandler) CreateManualBooking(c *gin.Context) {
+	pitchID, ok := parseIDParam(c, "id")
+	if !ok {
+		return
+	}
+
+	var req struct {
+		StartTime         time.Time `json:"start_time"  binding:"required"`
+		EndTime           time.Time `json:"end_time"    binding:"required"`
+		GuestName         string    `json:"guest_name"  binding:"required"`
+		GuestPhone        string    `json:"guest_phone"`
+		ForceBypassHours  bool      `json:"force_bypass_hours"`
+		RepeatWeeks       int       `json:"repeat_weeks"`
+		RecurrenceGroupID string    `json:"recurrence_group_id"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+	req.GuestName = strings.TrimSpace(req.GuestName)
+	req.GuestPhone = strings.TrimSpace(req.GuestPhone)
+	req.RecurrenceGroupID = strings.TrimSpace(req.RecurrenceGroupID)
+	if req.GuestName == "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "invalid_guest", "message": "اسم الضيف مطلوب",
+		})
+		return
+	}
+	if !req.EndTime.After(req.StartTime) {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "invalid_time", "message": "end_time must be after start_time",
+		})
+		return
+	}
+	if !req.EndTime.After(time.Now().UTC()) {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "invalid_time", "message": "cannot log a booking entirely in the past",
+		})
+		return
+	}
+
+	// Recurrence: default 1, cap at 52 occurrences — reject an oversize series
+	// BEFORE acquiring the lock or writing anything.
+	if req.RepeatWeeks == 0 {
+		req.RepeatWeeks = 1
+	}
+	if req.RepeatWeeks < 1 || req.RepeatWeeks > 52 {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "invalid_repeat", "message": "عدد الأسابيع يجب أن يكون بين 1 و 52",
+		})
+		return
+	}
+	// A multi-week series MUST carry a recurrence_group_id — it is the only handle
+	// for bulk-cancelling future occurrences. Reject an orphan series up front (before
+	// any lock or write) so we never materialise an un-cancellable group.
+	if req.RepeatWeeks > 1 && req.RecurrenceGroupID == "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "missing_group_id",
+			"message": "الحجز المتكرر يتطلب معرّف تكرار (recurrence_group_id)",
+		})
+		return
+	}
+	// A recurrence_group_id, when supplied, must be a valid UUID (it is the
+	// idempotency key + bulk-cancel handle).
+	if req.RecurrenceGroupID != "" {
+		if _, err := uuid.Parse(req.RecurrenceGroupID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "invalid_group_id", "message": "معرّف التكرار غير صالح",
+			})
+			return
+		}
+	}
+
+	bookings, replayed, err := h.repo.CreateManualBooking(c.Request.Context(), repository.ManualBookingParams{
+		PitchID:           int64(pitchID),
+		Actor:             middleware.GetActor(c),
+		StartTime:         req.StartTime,
+		EndTime:           req.EndTime,
+		GuestName:         req.GuestName,
+		GuestPhone:        req.GuestPhone,
+		BypassHours:       req.ForceBypassHours,
+		RepeatWeeks:       req.RepeatWeeks,
+		RecurrenceGroupID: req.RecurrenceGroupID,
+	})
+	if err != nil {
+		var rec *repository.RecurrenceConflictError
+		switch {
+		case errors.As(err, &rec):
+			// Name the failing week + occurrence so the UI can point the owner at it.
+			occ := gin.H{"week": rec.Week, "start": rec.OccStart, "end": rec.OccEnd}
+			if rec.Reason == "outside_hours" {
+				// Keep the error code the soft-override interceptor keys on.
+				c.JSON(http.StatusUnprocessableEntity, gin.H{
+					"error":      "outside_operating_hours",
+					"message":    "الوقت المطلوب خارج ساعات عمل الملعب",
+					"occurrence": occ,
+				})
+			} else {
+				c.JSON(http.StatusConflict, gin.H{
+					"error":      "slot_conflict",
+					"message":    "النطاق المطلوب يتعارض مع حجز قائم — يجب إلغاؤه أولاً",
+					"occurrence": occ,
+					"conflicts":  rec.Conflicts,
+				})
+			}
+		case errors.Is(err, pgx.ErrNoRows):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "not_found", "message": "الملعب غير موجود أو لا تملك صلاحية تعديله",
+			})
+		default:
+			h.handleBookingError(c, err)
+		}
+		return
+	}
+
+	// Replay (idempotent resubmit) → 200; a fresh materialization → 201.
+	status := http.StatusCreated
+	msg := "تم تسجيل الحجز اليدوي"
+	if replayed {
+		status = http.StatusOK
+		msg = "تم استرجاع الحجز الحالي"
+	}
+	c.JSON(status, gin.H{"message": msg, "data": bookings, "count": len(bookings)})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/v1/pitches/:id/bookings/group/:groupId                    ← NEW
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CancelGroup bulk-cancels every NON-PAST occurrence of a recurring walk-in group
+// on the pitch (owner/admin-scoped), auditing each in one set-based transaction.
+// Past occurrences are preserved as history; already-cancelled rows are skipped
+// (idempotent re-cancel). An empty match is a valid 200 with cancelled_count:0 —
+// NOT a 404 — so the UI never has to special-case "nothing to cancel". Single-
+// occurrence cancellation stays on the standard PATCH /bookings/:id/cancel path.
+func (h *BookingHandler) CancelGroup(c *gin.Context) {
+	pitchID, ok := parseIDParam(c, "id")
+	if !ok {
+		return
+	}
+	groupID := strings.TrimSpace(c.Param("groupId"))
+	if _, err := uuid.Parse(groupID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_group_id", "message": "معرّف التكرار غير صالح",
+		})
+		return
+	}
+
+	n, err := h.repo.CancelFutureGroup(c.Request.Context(), repository.CancelGroupParams{
+		PitchID: int64(pitchID),
+		GroupID: groupID,
+		Actor:   middleware.GetActor(c),
+		ActorID: int64(middleware.GetUserID(c)),
+	})
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "internal_error", "message": "تعذّر إلغاء الحجوزات، حاول مجدداً",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":         "تم إلغاء الحجوزات القادمة",
+		"cancelled_count": n,
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELETE /api/v1/pitches/:id/blocks/:bookingId                          ← NEW
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CancelBlock removes (cancels) a block, releasing the slot. It reuses the
+// source-aware cancellation service: RequireSource="block" means the scoped
+// resolve refuses any non-block row (→ 404), and the service's notify guard skips
+// dispatch for a non-player source. Owner/admin-scoped at the route + in the
+// resolve's ownership predicate.
+func (h *BookingHandler) CancelBlock(c *gin.Context) {
+	if _, ok := parseIDParam(c, "id"); !ok {
+		return
+	}
+	bookingID, ok := parseIDParam(c, "bookingId")
+	if !ok {
+		return
+	}
+
+	actorID := int64(middleware.GetUserID(c))
+	if _, err := h.service.Cancel(c.Request.Context(), repository.CancelBookingParams{
+		BookingID:     int64(bookingID),
+		ActorID:       &actorID,
+		ActorRole:     middleware.GetUserRole(c),
+		RequireSource: string(models.SourceBlock),
+	}); err != nil {
+		h.handleBookingError(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "تم رفع الحجب"})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Private helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -300,6 +605,11 @@ func (h *BookingHandler) handleBookingError(c *gin.Context, err error) {
 		c.JSON(http.StatusConflict, gin.H{
 			"error":   "pitch_not_bookable",
 			"message": "الملعب غير متاح للحجز",
+		})
+	case errors.Is(err, repository.ErrSlotOutsideOperatingHours):
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error":   "outside_operating_hours",
+			"message": "الوقت المطلوب خارج ساعات عمل الملعب",
 		})
 	case errors.Is(err, repository.ErrBookingNotFound):
 		c.JSON(http.StatusNotFound, gin.H{
