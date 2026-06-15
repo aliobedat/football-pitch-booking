@@ -251,11 +251,16 @@ func main() {
 		return strings.TrimRight(strings.TrimSpace(o), "/")
 	}
 	allowedOrigins := map[string]bool{
-		// Local dev frontend.
+		// Local dev B2C player app.
 		"http://localhost:3000": true,
+		// Local dev admin dashboard (Dashboard PR 3, cross-origin auth). The admin
+		// app authenticates against this same backend; gin-contrib/cors echoes the
+		// matched origin (never "*") so AllowCredentials stays spec-compliant.
+		"http://localhost:3001": true,
 		// Production frontend (Vercel). Hardcoded as a fallback so the deploy
 		// works even if CORS_ALLOWED_ORIGINS is unset/misconfigured on Railway;
-		// the env var below can still add more origins (e.g. preview URLs).
+		// the env var below can still add more origins (e.g. preview URLs and the
+		// production admin-dashboard origin, e.g. https://admin.<domain>).
 		"https://football-pitch-booking-liart.vercel.app": true,
 	}
 	if raw := os.Getenv("CORS_ALLOWED_ORIGINS"); raw != "" {
