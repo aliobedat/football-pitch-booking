@@ -54,10 +54,10 @@ func (h *AnalyticsHandler) GetRevenueSummary(c *gin.Context) {
 		pitchID = v
 	}
 
-	// OwnerScope() returns 0 for admin (unscoped) or the owner's id (scoped) — the
-	// SQL filters to that owner's pitches, so an owner can never read another
-	// owner's revenue even by passing an arbitrary pitch_id.
-	summary, err := h.repo.OwnerRevenueSummary(c.Request.Context(), actor.OwnerScope(), pitchID)
+	// The repo scopes via actor.OwnerScopeFilter (admin unscoped; owner → own
+	// pitches), so an owner can never read another owner's revenue even by passing
+	// an arbitrary pitch_id.
+	summary, err := h.repo.OwnerRevenueSummary(c.Request.Context(), actor, pitchID)
 	if err != nil {
 		c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{

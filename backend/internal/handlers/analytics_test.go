@@ -14,20 +14,21 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/middleware"
 	"github.com/ali/football-pitch-api/internal/repository"
 )
 
 type fakeAnalyticsRepo struct {
-	calls          int
-	lastOwnerScope int
-	lastPitchID    int
-	summary        repository.RevenueSummary
+	calls       int
+	lastActor   auth.Actor
+	lastPitchID int
+	summary     repository.RevenueSummary
 }
 
-func (f *fakeAnalyticsRepo) OwnerRevenueSummary(_ context.Context, ownerScope, pitchID int) (repository.RevenueSummary, error) {
+func (f *fakeAnalyticsRepo) OwnerRevenueSummary(_ context.Context, actor auth.Actor, pitchID int) (repository.RevenueSummary, error) {
 	f.calls++
-	f.lastOwnerScope = ownerScope
+	f.lastActor = actor
 	f.lastPitchID = pitchID
 	return f.summary, nil
 }
@@ -77,9 +78,10 @@ func TestAnalytics_OwnerScopedToSelf(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 for owner (body: %s)", rec.Code, rec.Body.String())
 	}
-	// An owner is scoped to their own pitches — OwnerScope() must equal their id.
-	if repo.lastOwnerScope != ownerID {
-		t.Fatalf("ownerScope = %d, want %d (owner must only see their own revenue)", repo.lastOwnerScope, ownerID)
+	// An owner is scoped to their own pitches — the actor handed to the repo must
+	// be the owner themselves (the repo then applies OwnerScopeFilter).
+	if repo.lastActor.UserID != ownerID || repo.lastActor.Role != "owner" {
+		t.Fatalf("actor = %+v, want owner #%d (owner must only see their own revenue)", repo.lastActor, ownerID)
 	}
 	var body struct {
 		Data repository.RevenueSummary `json:"data"`
@@ -99,8 +101,9 @@ func TestAnalytics_AdminUnscoped(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 for admin", rec.Code)
 	}
-	// Admin is unscoped: OwnerScope() == 0 (all pitches).
-	if repo.lastOwnerScope != 0 {
-		t.Fatalf("ownerScope = %d, want 0 for admin (unscoped)", repo.lastOwnerScope)
+	// Admin is unscoped: the actor handed to the repo is the admin, whose
+	// OwnerScopeFilter yields "TRUE" (all pitches).
+	if !repo.lastActor.IsAdmin() {
+		t.Fatalf("actor = %+v, want admin (unscoped)", repo.lastActor)
 	}
 }
