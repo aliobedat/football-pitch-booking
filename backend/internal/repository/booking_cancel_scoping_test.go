@@ -105,8 +105,8 @@ func (e *cancelScopeEnv) seedConfirmed(t *testing.T, pitchID int64) int64 {
 	start := time.Now().UTC().Add(72 * time.Hour)
 	var id int64
 	if err := e.pool.QueryRow(context.Background(), `
-		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status)
-		VALUES ($1,$2, tsrange($3::timestamp,$4::timestamp,'[)'), 30, 'confirmed')
+		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status, source)
+		VALUES ($1,$2, tstzrange($3::timestamptz,$4::timestamptz,'[)'), 30, 'confirmed', 'player')
 		RETURNING id
 	`, pitchID, e.playerID, start, start.Add(time.Hour)).Scan(&id); err != nil {
 		t.Fatalf("seed confirmed booking: %v", err)

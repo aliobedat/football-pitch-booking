@@ -68,8 +68,8 @@ func TestReviews_EligibilityAndSecurity(t *testing.T) {
 	mkBooking := func(playerID int64, start, end time.Time, status string) int64 {
 		var id int64
 		if err := pool.QueryRow(ctx, `
-			INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status)
-			VALUES ($1, $2, tstzrange($3::timestamptz, $4::timestamptz, '[)'), $5, $6::booking_status)
+			INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status, source)
+			VALUES ($1, $2, tstzrange($3::timestamptz, $4::timestamptz, '[)'), $5, $6::booking_status, 'player')
 			RETURNING id
 		`, pitchID, playerID, start, end, 30, status).Scan(&id); err != nil {
 			t.Fatalf("seed booking: %v", err)
