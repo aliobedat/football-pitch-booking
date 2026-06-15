@@ -86,25 +86,25 @@ const pitchReturnCols = `
 // Pitch is the canonical Go representation of a pitch row.
 // JSON tags match what the frontend expects.
 type Pitch struct {
-	ID           int      `json:"id"`
-	OwnerID      int      `json:"owner_id,omitempty"`
-	Name         string   `json:"name"`
-	Neighborhood string   `json:"neighborhood"`
-	Surface      string   `json:"surface"`
-	Format       string   `json:"format"`
-	PricePerHour int      `json:"pricePerHour"`
-	Rating       *float64 `json:"rating"`       // nil = no reviews yet
-	ReviewsCount int      `json:"reviewsCount"` // renamed from reviewCount
-	IsFeatured   bool     `json:"isFeatured"`
-	Amenities    []string `json:"amenities"`
-	PitchHue     string   `json:"pitchHue"`
-	Latitude     float64  `json:"lat"`
-	Longitude    float64  `json:"lng"`
-	IsActive     bool     `json:"isActive"`
-	ImageURL     string   `json:"image_url"`
-	ImagePublicID string  `json:"image_public_id"`
-	Description   string  `json:"description"`
-	MapsURL       string  `json:"maps_url" db:"maps_url"`
+	ID            int      `json:"id"`
+	OwnerID       int      `json:"owner_id,omitempty"`
+	Name          string   `json:"name"`
+	Neighborhood  string   `json:"neighborhood"`
+	Surface       string   `json:"surface"`
+	Format        string   `json:"format"`
+	PricePerHour  int      `json:"pricePerHour"`
+	Rating        *float64 `json:"rating"`       // nil = no reviews yet
+	ReviewsCount  int      `json:"reviewsCount"` // renamed from reviewCount
+	IsFeatured    bool     `json:"isFeatured"`
+	Amenities     []string `json:"amenities"`
+	PitchHue      string   `json:"pitchHue"`
+	Latitude      float64  `json:"lat"`
+	Longitude     float64  `json:"lng"`
+	IsActive      bool     `json:"isActive"`
+	ImageURL      string   `json:"image_url"`
+	ImagePublicID string   `json:"image_public_id"`
+	Description   string   `json:"description"`
+	MapsURL       string   `json:"maps_url" db:"maps_url"`
 }
 
 type CreatePitchRequest struct {
@@ -244,10 +244,10 @@ func (m *PitchModel) ListForActor(ctx context.Context, actor auth.Actor) ([]Pitc
 
 	wheres := []string{"p.deleted_at IS NULL"}
 	args := []interface{}{}
-	if !actor.IsAdmin() {
-		args = append(args, actor.UserID)
-		wheres = append(wheres, fmt.Sprintf("p.owner_id = $%d", len(args)))
-	}
+	// Centralised owner scoping: admin → "TRUE" (unscoped); owner → owner_id = $n.
+	ownerClause, ownerArgs := actor.OwnerScopeFilter("p.owner_id", len(args)+1)
+	wheres = append(wheres, ownerClause)
+	args = append(args, ownerArgs...)
 
 	rows, err := m.DB.Query(ctx, fmt.Sprintf(`
 		SELECT %s

@@ -1,3 +1,21 @@
+> **Status update (Dashboard PR 3 — Cross-Origin Auth, DONE):** items #1–#3
+> (CORS, cookie, CSRF) are now implemented and proven with a live cross-origin
+> browser test. Design pin honoured: the dashboard session cookie is **host-only
+> (no parent `.domain` cookie)** — B2B/B2C auth contexts stay decoupled.
+> - **CORS (#1):** `http://localhost:3001` added to the allowlist in
+>   `cmd/api/main.go`; `gin-contrib/cors` echoes the specific matched origin
+>   (never `*`) with `AllowCredentials: true`. Prod admin origin goes via
+>   `CORS_ALLOWED_ORIGINS`.
+> - **Cookie (#2):** no change needed — `issueSessionCookies` already sets
+>   host-only cookies (`Domain=""`) with `SameSite=None+Secure` (prod) /
+>   `SameSite=Lax` (dev). We deliberately do **not** set a parent `Domain`.
+> - **CSRF (#3):** no allowlist needed — `RequireCSRF` is pure double-submit
+>   (header==cookie), origin-agnostic; CORS is the origin gate. Verified the admin
+>   origin's `X-CSRF-Token` echo passes on a real logout POST.
+> - **Items #4–#6 (JWT role, scope guard, staff table) shipped in PR 2.** Still
+>   open: production admin-origin values for CORS/cookies and the B2C dead-code
+>   strip (deferred until the dashboard is feature-complete).
+
 # Dashboard PR 2 — Required backend changes (documented in PR 1, NOT yet applied)
 
 PR 1 is frontend-only: it scaffolds the admin dashboard, the shared package, the

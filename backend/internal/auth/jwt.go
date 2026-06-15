@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -29,10 +30,17 @@ const (
 )
 
 // Claims is the JWT payload for مالعب tokens.
-// Using short field names ("uid", "rol", "typ") reduces token size on every request.
+//
+// Wire contract (Dashboard PR 2): the access token serialises the standard
+// registered `sub` (the user id, as a string) plus `role` and `exp`. This is the
+// exact { sub, role, exp } shape the frontend @malaab/shared client decodes for
+// UX routing — there is deliberately NO `scope` claim; scope is resolved
+// per-request from the DB server-side (see middleware.ResolveScope). `uid` is
+// retained as the numeric id the backend reads directly off the struct, and
+// `typ` guards against access/refresh token-type confusion.
 type Claims struct {
 	UserID    int       `json:"uid"`
-	Role      string    `json:"rol"`
+	Role      string    `json:"role"`
 	TokenType tokenType `json:"typ"`
 	jwt.RegisteredClaims
 }
@@ -64,6 +72,9 @@ func (m *JWTManager) GenerateAccessToken(userID int, role string) (string, error
 		Role:      role,
 		TokenType: tokenTypeAccess,
 		RegisteredClaims: jwt.RegisteredClaims{
+			// Subject carries the user id as the standard `sub` claim so the
+			// frontend shared client reads { sub, role, exp } off the token.
+			Subject:   strconv.Itoa(userID),
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(m.accessExpiry)),
 			// Issuer and Audience can be added when deploying multiple services
