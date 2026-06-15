@@ -6,9 +6,11 @@
 // Owner sees only their pitches (server-scoped); admin global.
 
 import { useCallback, useEffect, useState } from 'react';
-import { Plus, Pencil, Trash2, X, ChevronDown, MapPin, Loader2 } from 'lucide-react';
+import { Plus, Pencil, Trash2, X, ChevronDown, MapPin, Loader2, Ban, Clock, AlertTriangle } from 'lucide-react';
 import api from '@/lib/api';
 import PitchImageDropzone, { type PitchImageValue } from '@/components/PitchImageDropzone';
+import BlocksModal from '@/components/BlocksModal';
+import OperatingHoursModal from '@/components/OperatingHoursModal';
 
 interface OwnerPitch {
   id: number;
@@ -198,6 +200,11 @@ export default function PitchesPage() {
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [togglingId, setTogglingId] = useState<number | null>(null);
+  const [blocksTarget, setBlocksTarget] = useState<OwnerPitch | null>(null);
+  const [hoursTarget, setHoursTarget] = useState<OwnerPitch | null>(null);
+  // Lightweight inline toast (copy-adapted from the legacy dashboard, zero deps) —
+  // surfaces the activate/deactivate rollback that was previously silent.
+  const [toast, setToast] = useState<string | null>(null);
 
   useEffect(() => {
     api.get('/owner/pitches')
@@ -225,16 +232,29 @@ export default function PitchesPage() {
 
   const toggleActive = useCallback(async (p: OwnerPitch) => {
     const next = !p.isActive;
+    setToast(null);
     setTogglingId(p.id);
     setPitches((prev) => prev.map((x) => (x.id === p.id ? { ...x, isActive: next } : x)));
     try {
       await api.patch(`/pitches/${p.id}/active`, { is_active: next });
-    } catch {
+    } catch (err: any) {
+      // Roll back to the previous state and surface the failure (was silent).
       setPitches((prev) => prev.map((x) => (x.id === p.id ? { ...x, isActive: p.isActive } : x)));
+      setToast(
+        err?.response?.data?.message ??
+          (next ? 'تعذّر تفعيل الملعب، يرجى المحاولة مجدداً' : 'تعذّر تعطيل الملعب، يرجى المحاولة مجدداً'),
+      );
     } finally {
       setTogglingId(null);
     }
   }, []);
+
+  // Auto-dismiss the error toast.
+  useEffect(() => {
+    if (!toast) return;
+    const t = setTimeout(() => setToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [toast]);
 
   return (
     <div className="flex flex-col gap-6">
@@ -279,6 +299,12 @@ export default function PitchesPage() {
                   <button type="button" onClick={() => { setShowAdd(false); setEditTarget(p); }} className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] font-semibold text-white/60 hover:text-white/90 transition-colors">
                     <Pencil size={12} aria-hidden /> تعديل
                   </button>
+                  <button type="button" onClick={() => setHoursTarget(p)} className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] font-semibold text-white/60 hover:text-emerald-300 hover:border-emerald-500/30 transition-colors" title="أوقات العمل">
+                    <Clock size={12} aria-hidden /> الأوقات
+                  </button>
+                  <button type="button" onClick={() => setBlocksTarget(p)} className="inline-flex items-center gap-1 rounded-lg border border-amber-500/20 px-2.5 py-1.5 text-[11px] font-semibold text-amber-400/80 hover:text-amber-300 transition-colors">
+                    <Ban size={12} aria-hidden /> الحجب
+                  </button>
                   <button type="button" onClick={() => { setDeleteError(null); setDeleteTarget(p); }} className="inline-flex items-center gap-1 rounded-lg border border-red-500/15 px-2.5 py-1.5 text-[11px] font-semibold text-red-400/80 hover:text-red-400 transition-colors">
                     <Trash2 size={12} aria-hidden /> حذف
                   </button>
@@ -289,6 +315,24 @@ export default function PitchesPage() {
               </div>
             </div>
           ))}
+        </div>
+      )}
+
+      {blocksTarget && (
+        <BlocksModal pitchId={blocksTarget.id} pitchName={blocksTarget.name} onClose={() => setBlocksTarget(null)} />
+      )}
+
+      {hoursTarget && (
+        <OperatingHoursModal pitchId={hoursTarget.id} pitchName={hoursTarget.name} onClose={() => setHoursTarget(null)} />
+      )}
+
+      {toast && (
+        <div role="alert" className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2.5 px-4 py-3 rounded-xl bg-[#1a1110] border border-red-500/25 shadow-2xl">
+          <AlertTriangle size={15} className="text-red-400 flex-shrink-0" aria-hidden />
+          <span className="text-[12.5px] font-semibold text-red-300">{toast}</span>
+          <button type="button" onClick={() => setToast(null)} className="text-white/30 hover:text-white/60 transition-colors duration-150 ms-1" aria-label="إغلاق التنبيه">
+            <X size={14} aria-hidden />
+          </button>
         </div>
       )}
 
