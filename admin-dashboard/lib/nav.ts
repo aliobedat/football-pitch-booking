@@ -1,6 +1,6 @@
 import type { Role } from '@malaab/shared/auth';
 import { canViewFinance } from '@malaab/shared/auth';
-import { LayoutDashboard, CalendarCheck, MapPin, BarChart3, ClipboardList, type LucideIcon } from 'lucide-react';
+import { LayoutDashboard, CalendarCheck, MapPin, BarChart3, ClipboardList, Users, type LucideIcon } from 'lucide-react';
 
 export interface NavItem {
   href: string;
@@ -25,12 +25,18 @@ export const NAV_ITEMS: NavItem[] = [
     icon: BarChart3,
     visible: (role) => canViewFinance(role),
   },
+  {
+    href: '/crm',
+    label: 'اللاعبون',
+    icon: Users,
+    visible: (role) => canViewFinance(role),
+  },
 ];
 
 // Routes gated to finance-capable roles. Used by the route-level guard so a
 // staff user deep-linking here is redirected cleanly instead of rendered into a
 // page the backend will 403.
-export const FINANCE_ROUTES = ['/analytics'];
+export const FINANCE_ROUTES = ['/analytics', '/crm'];
 
 export function isFinanceRoute(pathname: string): boolean {
   return FINANCE_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`));

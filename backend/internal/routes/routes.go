@@ -47,6 +47,8 @@ func Register(
 	analyticsHandler := handlers.NewAnalyticsHandler(repository.NewAnalyticsRepository(db))
 	// Dashboard PR 4: staff daily schedule + attendance.
 	scheduleHandler := handlers.NewScheduleHandler(repository.NewScheduleRepository(db))
+	// Dashboard PR 5: owner CRM.
+	crmHandler := handlers.NewCRMHandler(repository.NewCRMRepository(db))
 	v1 := r.Group("/api/v1")
 
 	// ════════════════════════════════════════════════════════════════════════
@@ -191,6 +193,14 @@ func Register(
 		protected.GET("/owner/analytics",
 			middleware.RequireRole("owner", "admin"),
 			analyticsHandler.GetRevenueSummary,
+		)
+		protected.GET("/owner/analytics/overview",
+			middleware.RequireRole("owner", "admin"),
+			analyticsHandler.GetAnalyticsOverview,
+		)
+		protected.GET("/owner/crm",
+			middleware.RequireRole("owner", "admin"),
+			crmHandler.GetCRM,
 		)
 
 		// ── Staff provisioning (owner-scoped) ──────────────────────────────────

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -31,6 +32,19 @@ func (f *fakeAnalyticsRepo) OwnerRevenueSummary(_ context.Context, actor auth.Ac
 	f.lastActor = actor
 	f.lastPitchID = pitchID
 	return f.summary, nil
+}
+
+func (f *fakeAnalyticsRepo) RevenueByDay(_ context.Context, _ auth.Actor, _, _ time.Time) ([]repository.DayPoint, error) {
+	return nil, nil
+}
+func (f *fakeAnalyticsRepo) RevenueByMonth(_ context.Context, _ auth.Actor, _, _ time.Time) ([]repository.MonthPoint, error) {
+	return nil, nil
+}
+func (f *fakeAnalyticsRepo) BookingHeatmap(_ context.Context, _ auth.Actor, _, _ time.Time) ([]repository.HeatCell, error) {
+	return nil, nil
+}
+func (f *fakeAnalyticsRepo) Totals(_ context.Context, _ auth.Actor, _, _ time.Time) (repository.PeriodTotals, error) {
+	return repository.PeriodTotals{}, nil
 }
 
 // newAnalyticsRouter mounts the finance route behind the SAME RequireRole guard
