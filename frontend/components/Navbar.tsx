@@ -5,28 +5,22 @@ import { usePathname } from 'next/navigation';
 import { useAuth } from '@/context/AuthContext';
 import { Users } from 'lucide-react';
 
+// The separate admin app (pitch owners/staff manage pitches there). A passive,
+// logic-free link points owners to it — the B2C app itself is player-only.
+const ADMIN_URL = process.env.NEXT_PUBLIC_ADMIN_URL || 'http://localhost:3001';
+
 export default function Navbar() {
   const pathname = usePathname();
   const { user, logout } = useAuth();
-  const isAdmin = user?.role === 'admin';
-  const isOwner = user?.role === 'owner';
-  // Owner and admin both land on the dashboard; only admins act as a
-  // "super-viewer" with an additional link into the player-facing catalog.
-  const isStaff = isOwner || isAdmin;
 
-  const navLinks = isAdmin
-    ? [
-        { href: '/dashboard', label: 'لوحة التحكم' },
-        { href: '/pitches',   label: 'الملاعب'     },
-      ]
-    : isOwner
-      ? [{ href: '/dashboard', label: 'لوحة التحكم' }]
-      : [
-          { href: '/pitches',  label: 'ملاعبنا'  },
-          { href: '/bookings', label: 'حجوزاتي'  },
-        ];
+  // B2C is player-facing only: the nav is role-agnostic (no owner/admin management
+  // links). Every visitor — including an owner-role account — sees the player nav.
+  const navLinks = [
+    { href: '/pitches',  label: 'ملاعبنا'  },
+    { href: '/bookings', label: 'حجوزاتي'  },
+  ];
 
-  const brandHref = isStaff ? '/dashboard' : '/pitches';
+  const brandHref = '/pitches';
 
   return (
     <header className="sticky top-0 z-50 border-b border-white/[0.06] bg-[#0d0f0e]/90 backdrop-blur-md">
@@ -66,6 +60,13 @@ export default function Navbar() {
 
         {/* Right side — actions */}
         <div className="flex items-center gap-3">
+          {/* Passive, logic-free pointer to the separate admin app for pitch owners. */}
+          <a
+            href={ADMIN_URL}
+            className="hidden sm:inline text-[12px] text-white/35 hover:text-emerald-400 transition-colors duration-150"
+          >
+            صاحب ملعب؟ أدر ملاعبك →
+          </a>
           {user ? (
             <div className="flex items-center gap-3">
               {/* Greeting chip */}

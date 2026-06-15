@@ -2,7 +2,6 @@
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import api from '@/lib/api';
 import { useAuth } from '@/context/AuthContext';
 import { LocationProvider, useLocation } from '@/context/LocationContext';
@@ -168,13 +167,11 @@ function ErrorState({ onRetry }: { onRetry: () => void }) {
 // ─── Inner page (consumes LocationContext) ────────────────────────────────────
 
 function PitchesContent() {
-  const { user, isLoading: authLoading } = useAuth();
-  const router = useRouter();
+  const { isLoading: authLoading } = useAuth();
   const { status: locStatus, request: requestLocation } = useLocation();
 
-  useEffect(() => {
-    if (!authLoading && user?.role === 'owner') router.replace('/dashboard');
-  }, [user, authLoading, router]);
+  // B2C is player-facing only: no role-based routing. An owner-role account
+  // browsing here gets the normal player experience (backend stays the referee).
 
   const [pitches,   setPitches]   = useState<Pitch[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -243,8 +240,8 @@ function PitchesContent() {
     setSortKey('price_asc');
   }, []);
 
-  // Full-page spinner only while auth resolves (user role unknown)
-  if (authLoading || user?.role === 'owner') {
+  // Full-page spinner only while auth resolves
+  if (authLoading) {
     return (
       <div className="min-h-screen bg-[#0d0f0e] flex items-center justify-center">
         <div className="w-6 h-6 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
