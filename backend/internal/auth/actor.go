@@ -7,6 +7,10 @@ const (
 	RoleAdmin  = "admin"
 	RoleOwner  = "owner"
 	RolePlayer = "player"
+	// RoleStaff is an owner-provisioned operator bound to a single pitch (V1).
+	// A staff member operates the day-to-day of their bound pitch but is
+	// categorically barred from finance/analytics (enforced server-side).
+	RoleStaff = "staff"
 )
 
 // Actor is the authenticated principal behind a request, derived solely from the

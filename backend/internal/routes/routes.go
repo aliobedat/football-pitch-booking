@@ -41,6 +41,10 @@ func Register(
 	webhookHandler := handlers.NewWhatsAppWebhookHandler(deliveryStore, cfg.WhatsApp.WebhookVerifyToken)
 	notificationHandler := handlers.NewNotificationHandler(optOutStore)
 	reviewHandler := handlers.NewReviewHandler(repository.NewReviewRepository(db))
+	// Dashboard PR 2 (RBAC): staff provisioning + finance analytics.
+	staffRepo := repository.NewStaffRepository(db)
+	staffHandler := handlers.NewStaffHandler(staffRepo)
+	analyticsHandler := handlers.NewAnalyticsHandler(repository.NewAnalyticsRepository(db))
 	v1 := r.Group("/api/v1")
 
 	// ════════════════════════════════════════════════════════════════════════
@@ -88,6 +92,11 @@ func Register(
 	// Double-submit CSRF: enforced for unsafe methods on cookie-authenticated
 	// requests; safe methods and Bearer-authenticated callers pass through.
 	protected.Use(middleware.RequireCSRF())
+	// Central scope guard (Dashboard PR 2): resolve each actor's scope from the DB
+	// once per request and inject it. A `staff` actor with no pitch binding is
+	// rejected here (403); non-staff carry an empty scope. Scope is intentionally
+	// NOT in the JWT — a rebind/revoke takes effect on the next request.
+	protected.Use(middleware.ResolveScope(staffRepo))
 	{
 		// Auth actions that require identity
 		protected.POST("/auth/logout", authHandler.Logout)
@@ -172,6 +181,26 @@ func Register(
 		protected.GET("/owner/pitches",
 			middleware.RequireRole("owner", "admin"),
 			pitchHandler.GetOwnerPitches,
+		)
+
+		// ── Finance / Analytics (owner/admin ONLY — staff hard-rejected) ───────
+		// The canonical RBAC boundary the dashboard's Analytics nav is gated on.
+		// RequireRole bars staff/player at the route; the handler re-asserts it.
+		protected.GET("/owner/analytics",
+			middleware.RequireRole("owner", "admin"),
+			analyticsHandler.GetRevenueSummary,
+		)
+
+		// ── Staff provisioning (owner-scoped) ──────────────────────────────────
+		// Owner invites a guard by phone and binds them to a pitch they OWN. The
+		// ownership invariant is enforced in the repository transaction.
+		protected.POST("/pitches/:id/staff",
+			middleware.RequireRole("owner", "admin"),
+			staffHandler.InviteStaff,
+		)
+		protected.GET("/owner/staff",
+			middleware.RequireRole("owner", "admin"),
+			staffHandler.ListStaff,
 		)
 
 		// Owner/admin BLOCKS: create held time (source='block'), or remove it.
