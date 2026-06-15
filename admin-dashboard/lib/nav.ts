@@ -1,6 +1,6 @@
 import type { Role } from '@malaab/shared/auth';
 import { canViewFinance } from '@malaab/shared/auth';
-import { LayoutDashboard, CalendarCheck, MapPin, BarChart3, type LucideIcon } from 'lucide-react';
+import { LayoutDashboard, CalendarCheck, MapPin, BarChart3, ClipboardList, type LucideIcon } from 'lucide-react';
 
 export interface NavItem {
   href: string;
@@ -16,6 +16,7 @@ export interface NavItem {
 // items in this same shell.)
 export const NAV_ITEMS: NavItem[] = [
   { href: '/', label: 'نظرة عامة', icon: LayoutDashboard, visible: () => true },
+  { href: '/schedule', label: 'جدول اليوم', icon: ClipboardList, visible: () => true },
   { href: '/bookings', label: 'الحجوزات', icon: CalendarCheck, visible: () => true },
   { href: '/pitches', label: 'الملاعب', icon: MapPin, visible: () => true },
   {

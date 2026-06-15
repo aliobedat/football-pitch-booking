@@ -45,6 +45,8 @@ func Register(
 	staffRepo := repository.NewStaffRepository(db)
 	staffHandler := handlers.NewStaffHandler(staffRepo)
 	analyticsHandler := handlers.NewAnalyticsHandler(repository.NewAnalyticsRepository(db))
+	// Dashboard PR 4: staff daily schedule + attendance.
+	scheduleHandler := handlers.NewScheduleHandler(repository.NewScheduleRepository(db))
 	v1 := r.Group("/api/v1")
 
 	// ════════════════════════════════════════════════════════════════════════
@@ -201,6 +203,17 @@ func Register(
 		protected.GET("/owner/staff",
 			middleware.RequireRole("owner", "admin"),
 			staffHandler.ListStaff,
+		)
+
+		// ── Staff daily schedule + attendance (staff/owner/admin; players barred) ──
+		// Scope enforced in SQL (staff → bound pitch, owner → owned, admin → any).
+		protected.GET("/schedule",
+			middleware.RequireRole("staff", "owner", "admin"),
+			scheduleHandler.GetDailySchedule,
+		)
+		protected.PATCH("/bookings/:id/attendance",
+			middleware.RequireRole("staff", "owner", "admin"),
+			scheduleHandler.PatchAttendance,
 		)
 
 		// Owner/admin BLOCKS: create held time (source='block'), or remove it.
