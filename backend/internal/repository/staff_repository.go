@@ -121,9 +121,9 @@ func (r *staffRepo) CreateStaffBinding(ctx context.Context, ownerID, pitchID int
 		return nil, fmt.Errorf("CreateStaffBinding: lookup user: %w", err)
 	}
 
-	// 3. Only a plain player (or an already-staff user being re-checked) may be
-	//    bound. Never demote an owner/admin or bind the inviting owner to itself.
-	if targetID == ownerID || role == auth.RoleOwner || role == auth.RoleAdmin {
+	// 3. PROMOTE ONLY A PLAYER. Reject self-binding and any non-player role
+	//    (owner/admin/already-staff) — no silent demotion, no re-binding.
+	if targetID == ownerID || role != auth.RolePlayer {
 		return nil, ErrCannotBindPrivileged
 	}
 
