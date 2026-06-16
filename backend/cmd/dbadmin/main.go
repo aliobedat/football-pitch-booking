@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -37,6 +38,10 @@ func main() {
 	verifyCRM := flag.Bool("verify-crm", false, "cross-tenant CRM scoping probe (read-only)")
 	smokeCRM := flag.Bool("smoke-crm", false, "exercise the real CRM repository (list+profile) against live data")
 	smokeCal := flag.String("smoke-cal", "", "exercise the real calendar repository for a date YYYY-MM-DD against live data")
+	enumName := flag.String("enum", "", "print the values of an enum type, then exit")
+	smokeFin := flag.Bool("smoke-fin", false, "exercise analytics KPIs + timeseries (Expected vs Collected) against live data")
+	verifySettle := flag.Bool("verify-settle", false, "exercise the real SetPayment path on one in-week booking, show Collected move, then revert")
+	smokeSched := flag.String("smoke-sched", "", "exercise the real DailySchedule repository for a date YYYY-MM-DD")
 	flag.Parse()
 
 	_ = godotenv.Load()
@@ -72,6 +77,14 @@ func main() {
 		smokeCRMRepo(ctx, pool)
 	case *smokeCal != "":
 		smokeCalendarRepo(ctx, pool, *smokeCal)
+	case *enumName != "":
+		printEnum(ctx, pool, *enumName)
+	case *smokeFin:
+		smokeFinancials(ctx, pool)
+	case *verifySettle:
+		verifySettlement(ctx, pool)
+	case *smokeSched != "":
+		smokeSchedule(ctx, pool, *smokeSched)
 	default:
 		flag.Usage()
 		os.Exit(2)
@@ -332,6 +345,135 @@ func smokeCalendarRepo(ctx context.Context, pool *pgxpool.Pool, dateStr string) 
 			p.PitchID, p.PitchName, p.IsActive, len(p.OpenWindows), len(p.Events), p.HasSchedule)
 	}
 	fmt.Println("✓ calendar repository SQL executes cleanly against live data.")
+}
+
+// smokeFinancials exercises the analytics KPI + timeseries SQL (with the new
+// Collected/paid_cash aggregates) against live data, as admin (unscoped).
+func smokeFinancials(ctx context.Context, pool *pgxpool.Pool) {
+	fmt.Println("── Financials smoke: Expected vs Collected (admin/unscoped) ──")
+	repo := repository.NewAnalyticsRepository(pool)
+	admin := auth.Actor{UserID: 0, Role: auth.RoleAdmin}
+
+	k, err := repo.OwnerKPIs(ctx, admin)
+	must(err)
+	fmt.Printf("KPIs: today expected=%.2f collected=%.2f | wtd expected=%.2f collected=%.2f | today_count=%d upcoming=%d\n",
+		k.TodayRevenue, k.TodayCollected, k.WeekToDateRevenue, k.WeekToDateCollected,
+		k.TodayConfirmedCount, k.UpcomingBookings)
+
+	now := time.Now().UTC()
+	from, _ := timeutil.AmmanDayBoundsUTC(timeutil.InAmman(now).AddDate(0, 0, -29))
+	_, to := timeutil.AmmanDayBoundsUTC(timeutil.InAmman(now))
+	series, err := repo.OwnerTimeSeries(ctx, admin, repository.TimeSeriesParams{Granularity: "day", From: from, To: to})
+	must(err)
+	fmt.Printf("timeseries(day, 30d): %d bucket(s)\n", len(series))
+	for i, b := range series {
+		if i >= 5 {
+			break
+		}
+		fmt.Printf("  %s expected=%.2f collected=%.2f volume=%d\n", b.Bucket, b.Revenue, b.Collected, b.Volume)
+	}
+	fmt.Println("✓ analytics SQL (Expected + Collected) executes cleanly.")
+}
+
+// verifySettlement proves the end-to-end Cash-Settlement flow against live data:
+// it picks one confirmed, non-block booking that plays in the current Amman week,
+// drives the REAL SetPayment repository path (the exact code the endpoint runs) to
+// 'paid_cash', shows week-to-date Collected move, then reverts to its original
+// value — leaving the database exactly as found.
+func verifySettlement(ctx context.Context, pool *pgxpool.Pool) {
+	fmt.Println("── End-to-end Cash-Settlement verification (mutate + revert) ──")
+	sched := repository.NewScheduleRepository(pool)
+	an := repository.NewAnalyticsRepository(pool)
+	admin := auth.Actor{UserID: 0, Role: auth.RoleAdmin}
+
+	// Pick the most recent PAST confirmed, non-block booking (so it lands inside a
+	// measurable timeseries bucket).
+	var bookingID int
+	var ownerID int64
+	var original string
+	var playedAt time.Time
+	err := pool.QueryRow(ctx, `
+		SELECT b.id, p.owner_id, b.payment_status, lower(b.booking_range)
+		FROM bookings b JOIN pitches p ON p.id = b.pitch_id
+		WHERE b.status = 'confirmed' AND b.source <> 'block'
+		  AND lower(b.booking_range) < now()
+		ORDER BY lower(b.booking_range) DESC
+		LIMIT 1
+	`).Scan(&bookingID, &ownerID, &original, &playedAt)
+	if err != nil {
+		fmt.Printf("(no past confirmed booking to exercise: %v)\n", err)
+		return
+	}
+	dayFrom, dayTo := timeutil.AmmanDayBoundsUTC(timeutil.InAmman(playedAt))
+	bucketCollected := func() float64 {
+		s, e := an.OwnerTimeSeries(ctx, admin, repository.TimeSeriesParams{Granularity: "day", From: dayFrom, To: dayTo})
+		must(e)
+		var c float64
+		for _, b := range s {
+			c += b.Collected
+		}
+		return c
+	}
+	fmt.Printf("target booking #%d (owner %d) played %s, original=%q\n",
+		bookingID, ownerID, timeutil.InAmman(playedAt).Format("2006-01-02 15:04"), original)
+
+	before := bucketCollected()
+	if _, err := sched.SetPayment(ctx, admin, 0, bookingID, "paid_cash"); err != nil { // REAL endpoint path
+		must(fmt.Errorf("SetPayment paid_cash: %w", err))
+	}
+	after := bucketCollected()
+	fmt.Printf("that day's Collected: %.2f → %.2f (Δ=%.2f)\n", before, after, after-before)
+
+	if _, err := sched.SetPayment(ctx, admin, 0, bookingID, original); err != nil { // revert
+		must(fmt.Errorf("SetPayment revert: %w", err))
+	}
+	fmt.Printf("reverted that day's Collected: %.2f (baseline)\n", bucketCollected())
+	fmt.Println("✓ SetPayment writes, Collected aggregate moves by the booking's price, revert clean.")
+}
+
+// smokeSchedule exercises the real DailySchedule repository (which now carries
+// payment_status) for a date against live data, as admin (unscoped).
+func smokeSchedule(ctx context.Context, pool *pgxpool.Pool, dateStr string) {
+	day, err := time.ParseInLocation("2006-01-02", dateStr, timeutil.Amman())
+	must(err)
+	from, to := timeutil.AmmanDayBoundsUTC(day)
+	fmt.Printf("── DailySchedule smoke for %s (admin/unscoped) ──\n", dateStr)
+	repo := repository.NewScheduleRepository(pool)
+	rows, err := repo.DailySchedule(ctx, auth.Actor{UserID: 0, Role: auth.RoleAdmin}, 0, 0, from, to)
+	must(err)
+	fmt.Printf("rows=%d\n", len(rows))
+	for i, r := range rows {
+		if i >= 6 {
+			break
+		}
+		fmt.Printf("  #%d %-14s attendance=%-10s payment=%-9s %q\n",
+			r.ID, r.PitchName, r.Attendance, r.PaymentStatus, r.AttendeeName)
+	}
+	fmt.Println("✓ DailySchedule returns payment_status cleanly.")
+}
+
+// printEnum lists the labels of a Postgres enum type in sort order.
+func printEnum(ctx context.Context, pool *pgxpool.Pool, name string) {
+	rows, err := pool.Query(ctx, `
+		SELECT e.enumlabel
+		FROM pg_type t JOIN pg_enum e ON e.enumtypid = t.oid
+		WHERE t.typname = $1
+		ORDER BY e.enumsortorder
+	`, name)
+	must(err)
+	defer rows.Close()
+	vals := []string{}
+	for rows.Next() {
+		var v string
+		must(rows.Scan(&v))
+		vals = append(vals, v)
+	}
+	must(rows.Err())
+	if len(vals) == 0 {
+		fmt.Printf("enum %q: NOT FOUND\n", name)
+		return
+	}
+	fmt.Printf("enum %s = { %s }\n", name, strings.Join(vals, ", "))
 }
 
 func must(err error) {

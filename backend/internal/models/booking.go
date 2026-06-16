@@ -107,6 +107,10 @@ type AdminBooking struct {
 	TotalPrice float64       `json:"total_price"`
 	CreatedAt  time.Time     `json:"created_at"`
 
+	// PaymentStatus is the cash-settlement marker (WO-F1): unpaid | paid_cash. The
+	// dashboard's "Collected" figures sum total_price over paid_cash rows.
+	PaymentStatus string `json:"payment_status"`
+
 	// Guest identity for manual (walk-in) rows — the dashboard shows guest_name in
 	// place of the (absent) player. nil for every non-manual source.
 	GuestName  *string `json:"guest_name,omitempty"`

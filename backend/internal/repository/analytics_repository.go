@@ -30,19 +30,25 @@ type RevenueSummary struct {
 // not a business booking). Time windows are bucketed by the booking START instant
 // (lower(booking_range)), the occupancy date.
 type KPISummary struct {
-	TodayRevenue        float64 `json:"today_revenue"`         // confirmed revenue for the current Amman day
+	TodayRevenue        float64 `json:"today_revenue"`         // EXPECTED: confirmed revenue for the current Amman day
 	TodayConfirmedCount int     `json:"today_confirmed_count"` // confirmed, non-block bookings playing today (Amman)
-	WeekToDateRevenue   float64 `json:"week_to_date_revenue"`  // confirmed revenue since the start of the current Amman week
+	WeekToDateRevenue   float64 `json:"week_to_date_revenue"`  // EXPECTED: confirmed revenue since the start of the current Amman week
 	UpcomingBookings    int     `json:"upcoming_bookings"`     // confirmed, non-block bookings whose slot is still in the future
+
+	// COLLECTED (WO-F1): cash actually settled (payment_status='paid_cash'). The
+	// gap Expected − Collected is the owner's leakage.
+	TodayCollected     float64 `json:"today_collected"`
+	WeekToDateCollected float64 `json:"week_to_date_collected"`
 }
 
 // TimeBucket is one point on the owner analytics time series: a calendar bucket
 // (day/week/month start, Amman) with its confirmed revenue and booking volume.
 // Volume EXCLUDES blocks; revenue is source-agnostic (blocks contribute 0).
 type TimeBucket struct {
-	Bucket  string  `json:"bucket"` // YYYY-MM-DD (Amman) — start of the day/week/month
-	Revenue float64 `json:"revenue"`
-	Volume  int     `json:"volume"`
+	Bucket    string  `json:"bucket"`    // YYYY-MM-DD (Amman) — start of the day/week/month
+	Revenue   float64 `json:"revenue"`   // EXPECTED: confirmed revenue
+	Collected float64 `json:"collected"` // COLLECTED: paid_cash revenue (WO-F1)
+	Volume    int     `json:"volume"`
 }
 
 // TimeSeriesParams bounds an owner time-series query. Granularity is one of
@@ -132,19 +138,26 @@ func (r *analyticsRepo) OwnerKPIs(ctx context.Context, actor auth.Actor) (KPISum
 	err := r.db.QueryRow(ctx, fmt.Sprintf(`
 		SELECT
 			COALESCE(SUM(b.total_price) FILTER (
-				WHERE lower(b.booking_range) >= $%d AND lower(b.booking_range) < $%d), 0)::float8 AS today_revenue,
+				WHERE lower(b.booking_range) >= $%[1]d AND lower(b.booking_range) < $%[2]d), 0)::float8 AS today_revenue,
 			COUNT(*) FILTER (
 				WHERE b.source <> 'block'
-				  AND lower(b.booking_range) >= $%d AND lower(b.booking_range) < $%d) AS today_count,
+				  AND lower(b.booking_range) >= $%[1]d AND lower(b.booking_range) < $%[2]d) AS today_count,
 			COALESCE(SUM(b.total_price) FILTER (
-				WHERE lower(b.booking_range) >= $%d AND lower(b.booking_range) < $%d), 0)::float8 AS wtd_revenue,
+				WHERE lower(b.booking_range) >= $%[3]d AND lower(b.booking_range) < $%[4]d), 0)::float8 AS wtd_revenue,
 			COUNT(*) FILTER (
-				WHERE b.source <> 'block' AND lower(b.booking_range) >= $%d) AS upcoming
+				WHERE b.source <> 'block' AND lower(b.booking_range) >= $%[4]d) AS upcoming,
+			COALESCE(SUM(b.total_price) FILTER (
+				WHERE b.payment_status = 'paid_cash'
+				  AND lower(b.booking_range) >= $%[1]d AND lower(b.booking_range) < $%[2]d), 0)::float8 AS today_collected,
+			COALESCE(SUM(b.total_price) FILTER (
+				WHERE b.payment_status = 'paid_cash'
+				  AND lower(b.booking_range) >= $%[3]d AND lower(b.booking_range) < $%[4]d), 0)::float8 AS wtd_collected
 		FROM bookings b
 		JOIN pitches p ON p.id = b.pitch_id
-		WHERE b.status = 'confirmed' AND %s
-	`, ts, ts+1, ts, ts+1, ts+2, ts+3, ts+3, ownerClause),
-		args...).Scan(&k.TodayRevenue, &k.TodayConfirmedCount, &k.WeekToDateRevenue, &k.UpcomingBookings)
+		WHERE b.status = 'confirmed' AND %[5]s
+	`, ts, ts+1, ts+2, ts+3, ownerClause),
+		args...).Scan(&k.TodayRevenue, &k.TodayConfirmedCount, &k.WeekToDateRevenue, &k.UpcomingBookings,
+		&k.TodayCollected, &k.WeekToDateCollected)
 	if err != nil {
 		return KPISummary{}, fmt.Errorf("OwnerKPIs: %w", err)
 	}
@@ -179,6 +192,7 @@ func (r *analyticsRepo) OwnerTimeSeries(ctx context.Context, actor auth.Actor, p
 		SELECT
 			to_char(%s, 'YYYY-MM-DD') AS bucket,
 			COALESCE(SUM(b.total_price), 0)::float8 AS revenue,
+			COALESCE(SUM(b.total_price) FILTER (WHERE b.payment_status = 'paid_cash'), 0)::float8 AS collected,
 			COUNT(*) FILTER (WHERE b.source <> 'block') AS volume
 		FROM bookings b
 		JOIN pitches p ON p.id = b.pitch_id
@@ -198,7 +212,7 @@ func (r *analyticsRepo) OwnerTimeSeries(ctx context.Context, actor auth.Actor, p
 	series := make([]TimeBucket, 0)
 	for rows.Next() {
 		var b TimeBucket
-		if err := rows.Scan(&b.Bucket, &b.Revenue, &b.Volume); err != nil {
+		if err := rows.Scan(&b.Bucket, &b.Revenue, &b.Collected, &b.Volume); err != nil {
 			return nil, fmt.Errorf("OwnerTimeSeries: scan: %w", err)
 		}
 		series = append(series, b)

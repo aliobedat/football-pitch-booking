@@ -32,7 +32,7 @@ type Source = 'player' | 'manual' | 'block' | 'academy';
 
 interface CalEvent {
   id: number; pitch_id: number; start_time: string; end_time: string;
-  source: Source; status: string; attendance: string; title: string;
+  source: Source; status: string; attendance: string; payment_status: string; title: string;
   customer_id: number | null;
 }
 interface PitchRow {
@@ -180,7 +180,13 @@ export default function CalendarPage() {
         </div>
       )}
 
-      {detail && <EventDetailModal event={detail} onClose={() => setDetail(null)} />}
+      {detail && (
+        <EventDetailModal
+          event={detail}
+          onClose={() => setDetail(null)}
+          onChanged={() => { setDetail(null); fetchDay(); }}
+        />
+      )}
       {create && (
         <CreateManualModal
           pitch={create.pitch}
@@ -276,6 +282,9 @@ function PitchLane({
               style={{ left: `${b.left}%`, width: `${b.width}%`, minWidth: 6 }}
               title={ev.title}
             >
+              {ev.payment_status === 'paid_cash' && (
+                <span className="absolute top-1 end-1 w-1.5 h-1.5 rounded-full bg-emerald-400 ring-1 ring-emerald-300/50" title="مدفوع نقداً" />
+              )}
               <span className={`block text-[11px] font-bold truncate ${s.text}`} dir="rtl">{ev.title || s.label}</span>
               <span className="block text-[9px] font-mono text-white/60" dir="ltr">
                 {formatTime(ev.start_time, { hour: '2-digit', minute: '2-digit', hour12: false })}
@@ -299,8 +308,28 @@ function PitchLane({
 // ─────────────────────────────────────────────────────────────────────────────
 // Tap-to-detail
 // ─────────────────────────────────────────────────────────────────────────────
-function EventDetailModal({ event, onClose }: { event: CalEvent; onClose: () => void }) {
+function EventDetailModal({ event, onClose, onChanged }: { event: CalEvent; onClose: () => void; onChanged: () => void }) {
   const s = SOURCE_STYLE[event.source] ?? SOURCE_STYLE.player;
+  const [saving, setSaving] = useState(false);
+  const [error, setError]   = useState<string | null>(null);
+  const isPaid = event.payment_status === 'paid_cash';
+  // Blocks are unpriced maintenance holds — no settlement concept.
+  const settleable = event.source !== 'block';
+
+  const togglePaid = useCallback(async () => {
+    setSaving(true);
+    setError(null);
+    try {
+      await api.patch(`/bookings/${event.id}/payment`, {
+        payment_status: isPaid ? 'unpaid' : 'paid_cash',
+      });
+      onChanged();
+    } catch {
+      setError('تعذّر تحديث حالة الدفع.');
+      setSaving(false);
+    }
+  }, [event.id, isPaid, onChanged]);
+
   return (
     <ModalShell onClose={onClose} title={event.title || s.label}>
       <div className="flex flex-col gap-3 text-[13px]">
@@ -311,6 +340,28 @@ function EventDetailModal({ event, onClose }: { event: CalEvent; onClose: () => 
         <Row label="الحضور" value={
           event.attendance === 'checked_in' ? 'حضر' : event.attendance === 'no_show' ? 'لم يحضر' : '—'
         } />
+
+        {settleable && (
+          <div className="flex items-center justify-between gap-4 pt-1">
+            <span className="text-white/40">حالة الدفع</span>
+            <button
+              type="button"
+              onClick={togglePaid}
+              disabled={saving}
+              className={[
+                'inline-flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-[12px] font-bold border transition-all disabled:opacity-50',
+                isPaid
+                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20'
+                  : 'bg-amber-500/10 border-amber-500/30 text-amber-300 hover:bg-amber-500/15',
+              ].join(' ')}
+            >
+              {saving ? <Loader2 size={13} className="animate-spin" aria-hidden /> : null}
+              {isPaid ? 'مدفوع نقداً ✓ — اضغط لإلغاء' : 'غير مدفوع — تحصيل نقدي'}
+            </button>
+          </div>
+        )}
+        {error && <p className="text-[12px] text-red-400">{error}</p>}
+
         {event.customer_id && (
           <Link
             href={`/customers/${event.customer_id}`}

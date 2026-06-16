@@ -39,6 +39,7 @@ interface AdminBooking {
   end_time:    string;
   status:      BookingStatus;
   total_price: number;
+  payment_status: string; // unpaid | paid_cash
   created_at:  string;
 }
 
@@ -86,9 +87,13 @@ function StatCard({ icon: Icon, value, label, iconBg, iconColor, valueColor }: {
 function BookingRow({
   booking,
   onRequestCancel,
+  onTogglePay,
+  payingId,
 }: {
   booking: AdminBooking;
   onRequestCancel: (booking: AdminBooking) => void;
+  onTogglePay: (booking: AdminBooking) => void;
+  payingId: number | null;
 }) {
   const { label, badge } = STATUS_CONFIG[booking.status] ?? STATUS_CONFIG.confirmed;
 
@@ -162,6 +167,31 @@ function BookingRow({
         <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-[10px] font-bold tracking-wide border ${badge}`}>
           {label}
         </span>
+      </td>
+      {/* Cash-settlement toggle (WO-F1) — blocks have no settlement concept. */}
+      <td className="px-5 py-4 text-start">
+        {booking.source === 'block' ? (
+          <span className="text-[12px] text-white/20">—</span>
+        ) : (() => {
+          const paid = booking.payment_status === 'paid_cash';
+          const busy = payingId === booking.id;
+          return (
+            <button
+              type="button"
+              onClick={() => onTogglePay(booking)}
+              disabled={busy}
+              className={[
+                'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold border transition-all disabled:opacity-50',
+                paid
+                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20'
+                  : 'bg-amber-500/[0.08] border-amber-500/25 text-amber-300/80 hover:bg-amber-500/15',
+              ].join(' ')}
+              aria-label={paid ? 'إلغاء التحصيل النقدي' : 'تحصيل نقدي'}
+            >
+              {busy ? '…' : paid ? 'مدفوع نقداً' : 'غير مدفوع'}
+            </button>
+          );
+        })()}
       </td>
       {/* Actions — rendered last so, under dir="rtl", it sits left-most. */}
       <td className="px-5 py-4 text-start">
@@ -372,7 +402,7 @@ const STATUS_FILTER_OPTIONS: { value: StatusFilter; label: string }[] = [
 // export reuses exactly the rows on screen — it never issues an unscoped fetch —
 // so it inherits the server's owner scoping. UTF-8 BOM so Excel renders Arabic.
 function buildBookingsCsv(rows: AdminBooking[]): string {
-  const headers = ['#', 'الاسم', 'الهاتف', 'الملعب', 'التاريخ', 'من', 'إلى', 'المبلغ', 'الحالة', 'المصدر'];
+  const headers = ['#', 'الاسم', 'الهاتف', 'الملعب', 'التاريخ', 'من', 'إلى', 'المبلغ', 'الحالة', 'الدفع', 'المصدر'];
   const esc = (v: string | number) => {
     const s = String(v ?? '');
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -385,7 +415,8 @@ function buildBookingsCsv(rows: AdminBooking[]): string {
     return [
       b.id, name, phone, b.pitch_name || `#${b.pitch_id}`,
       fmtDate(b.start_time), fmtTime(b.start_time), fmtTime(b.end_time),
-      b.total_price, STATUS_CONFIG[b.status]?.label ?? b.status, b.source,
+      b.total_price, STATUS_CONFIG[b.status]?.label ?? b.status,
+      b.payment_status === 'paid_cash' ? 'مدفوع نقداً' : 'غير مدفوع', b.source,
     ].map(esc).join(',');
   });
   return '﻿' + [headers.join(','), ...lines].join('\r\n');
@@ -404,6 +435,22 @@ export default function BookingsPage() {
   const [cancelTarget, setCancelTarget] = useState<AdminBooking | null>(null);
   const [isCancelling, setIsCancelling] = useState(false);
   const [cancelError,  setCancelError]  = useState<string | null>(null);
+
+  // ── cash-settlement toggle (WO-F1) ──────────────────────────────────────
+  const [payingId, setPayingId] = useState<number | null>(null);
+
+  const togglePay = useCallback(async (booking: AdminBooking) => {
+    const next = booking.payment_status === 'paid_cash' ? 'unpaid' : 'paid_cash';
+    setPayingId(booking.id);
+    try {
+      await api.patch(`/bookings/${booking.id}/payment`, { payment_status: next });
+      setBookings(prev => prev.map(b => (b.id === booking.id ? { ...b, payment_status: next } : b)));
+    } catch {
+      // leave state unchanged on failure (server is authoritative)
+    } finally {
+      setPayingId(null);
+    }
+  }, []);
 
   useEffect(() => {
     // Server-side filtering: pass only the set params. Owner scoping is applied in
@@ -590,7 +637,7 @@ export default function BookingsPage() {
                 <table className="w-full min-w-[860px] bg-[#141715]">
                   <thead>
                     <tr className="border-b border-white/[0.06] bg-[#111312]">
-                      {['# الحجز', 'اللاعب', 'الملعب', 'التاريخ', 'الوقت', 'المبلغ', 'الحالة', 'الإجراءات'].map(col => (
+                      {['# الحجز', 'اللاعب', 'الملعب', 'التاريخ', 'الوقت', 'المبلغ', 'الحالة', 'الدفع', 'الإجراءات'].map(col => (
                         <th key={col} className="px-5 py-3.5 text-start text-[10px] font-semibold text-white/30 tracking-widest uppercase whitespace-nowrap">
                           {col}
                         </th>
@@ -599,7 +646,7 @@ export default function BookingsPage() {
                   </thead>
                   <tbody>
                     {bookings.map(b => (
-                      <BookingRow key={b.id} booking={b} onRequestCancel={openCancelModal} />
+                      <BookingRow key={b.id} booking={b} onRequestCancel={openCancelModal} onTogglePay={togglePay} payingId={payingId} />
                     ))}
                   </tbody>
                 </table>

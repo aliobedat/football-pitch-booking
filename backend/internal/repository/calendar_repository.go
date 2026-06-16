@@ -27,11 +27,12 @@ type CalendarEvent struct {
 	PitchID    int64     `json:"pitch_id"`
 	StartTime  time.Time `json:"start_time"`
 	EndTime    time.Time `json:"end_time"`
-	Source     string    `json:"source"`     // player | manual | block | academy
-	Status     string    `json:"status"`     // confirmed | pending
-	Attendance string    `json:"attendance"` // pending | checked_in | no_show
-	Title      string    `json:"title"`      // player name → guest name → block label
-	CustomerID *int64    `json:"customer_id"`
+	Source        string    `json:"source"`         // player | manual | block | academy
+	Status        string    `json:"status"`         // confirmed | pending
+	Attendance    string    `json:"attendance"`     // pending | checked_in | no_show
+	PaymentStatus string    `json:"payment_status"` // unpaid | paid_cash
+	Title         string    `json:"title"`          // player name → guest name → block label
+	CustomerID    *int64    `json:"customer_id"`
 }
 
 // CalendarPitchRow is one resource row: the pitch, its resolved open windows for
@@ -128,7 +129,7 @@ func (r *calendarRepo) OwnerDayCalendar(ctx context.Context, actor auth.Actor, a
 	evRows, err := r.db.Query(ctx, fmt.Sprintf(`
 		SELECT b.id, b.pitch_id,
 		       lower(b.booking_range), upper(b.booking_range),
-		       b.source, b.status, b.attendance, b.customer_id,
+		       b.source, b.status, b.attendance, b.payment_status, b.customer_id,
 		       %s
 		FROM bookings b
 		JOIN pitches p ON p.id = b.pitch_id
@@ -145,7 +146,7 @@ func (r *calendarRepo) OwnerDayCalendar(ctx context.Context, actor auth.Actor, a
 	for evRows.Next() {
 		var e CalendarEvent
 		if err := evRows.Scan(&e.ID, &e.PitchID, &e.StartTime, &e.EndTime,
-			&e.Source, &e.Status, &e.Attendance, &e.CustomerID, &e.Title); err != nil {
+			&e.Source, &e.Status, &e.Attendance, &e.PaymentStatus, &e.CustomerID, &e.Title); err != nil {
 			return nil, fmt.Errorf("OwnerDayCalendar: event scan: %w", err)
 		}
 		if row, ok := rowsByPitch[e.PitchID]; ok {

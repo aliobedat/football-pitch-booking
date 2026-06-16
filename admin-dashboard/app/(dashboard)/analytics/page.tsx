@@ -19,9 +19,10 @@ import { formatCurrency, formatNumber, formatDate } from '@/lib/format';
 type Granularity = 'day' | 'week' | 'month';
 
 interface TimeBucket {
-  bucket:  string; // YYYY-MM-DD (Amman)
-  revenue: number;
-  volume:  number;
+  bucket:    string; // YYYY-MM-DD (Amman)
+  revenue:   number; // Expected (confirmed)
+  collected: number; // Collected (paid_cash)
+  volume:    number;
 }
 
 const GRANULARITY_OPTIONS: { value: Granularity; label: string }[] = [
@@ -113,7 +114,7 @@ export default function AnalyticsPage() {
         </div>
       )}
 
-      <ChartCard title="الإيرادات عبر الزمن (د.أ)" loading={loading} hasData={hasData}>
+      <ChartCard title="المتوقّع مقابل المحصّل عبر الزمن (د.أ)" loading={loading} hasData={hasData}>
         <LineChart data={series}>
           <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
           <XAxis dataKey="bucket" tick={AXIS_TICK} tickFormatter={fmtBucket} reversed />
@@ -121,9 +122,14 @@ export default function AnalyticsPage() {
           <Tooltip
             contentStyle={TOOLTIP_STYLE}
             labelFormatter={(l: string) => fmtBucket(l)}
-            formatter={(v: number) => [`${formatCurrency(v, { minimumFractionDigits: 2 })} د.أ`, 'الإيراد']}
+            formatter={(v: number, name) => [
+              `${formatCurrency(v, { minimumFractionDigits: 2 })} د.أ`,
+              name === 'collected' ? 'محصّل' : 'متوقّع',
+            ]}
           />
-          <Line type="monotone" dataKey="revenue" stroke="#3dba8a" strokeWidth={2} dot={false} />
+          {/* Expected = dashed/muted; Collected = solid emerald. The visible gap is leakage. */}
+          <Line type="monotone" dataKey="revenue"   stroke="rgba(255,255,255,0.35)" strokeWidth={2} strokeDasharray="4 3" dot={false} />
+          <Line type="monotone" dataKey="collected" stroke="#3dba8a" strokeWidth={2} dot={false} />
         </LineChart>
       </ChartCard>
 

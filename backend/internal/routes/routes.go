@@ -251,6 +251,11 @@ func Register(
 			middleware.RequireRole("staff", "owner", "admin"),
 			scheduleHandler.PatchAttendance,
 		)
+		// Cash-Settlement Marker (WO-F1): unpaid | paid_cash on a non-cancelled booking.
+		protected.PATCH("/bookings/:id/payment",
+			middleware.RequireRole("staff", "owner", "admin"),
+			scheduleHandler.PatchPayment,
+		)
 
 		// Owner/admin BLOCKS: create held time (source='block'), or remove it.
 		// Not bound by operating hours (owner bypass); blocks still conflict with

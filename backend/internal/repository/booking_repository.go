@@ -1129,7 +1129,7 @@ func (r *bookingRepo) GetAllBookings(ctx context.Context, actor auth.Actor, filt
 			               COALESCE(u.email,      '') AS user_email,
 			               COALESCE(u.phone,      '') AS user_phone,
 			lower(b.booking_range) AS start_time, upper(b.booking_range) AS end_time,
-			b.status, b.source, b.total_price, b.created_at,
+			b.status, b.source, b.total_price, b.created_at, b.payment_status,
 			b.guest_name, b.guest_phone, b.recurrence_group_id
 		FROM bookings b
 		%s
@@ -1149,7 +1149,7 @@ func (r *bookingRepo) GetAllBookings(ctx context.Context, actor auth.Actor, filt
 			&b.ID, &b.PitchID, &b.PitchName,
 			&b.PlayerID, &b.UserName, &b.UserEmail, &b.UserPhone,
 			&b.StartTime, &b.EndTime,
-			&b.Status, &b.Source, &b.TotalPrice, &b.CreatedAt,
+			&b.Status, &b.Source, &b.TotalPrice, &b.CreatedAt, &b.PaymentStatus,
 			&b.GuestName, &b.GuestPhone, &b.RecurrenceGroupID,
 		); err != nil {
 			return nil, fmt.Errorf("GetAllBookings: scan: %w", err)

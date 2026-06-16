@@ -96,3 +96,38 @@ func (h *ScheduleHandler) PatchAttendance(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, gin.H{"data": row})
 }
+
+type paymentRequest struct {
+	PaymentStatus string `json:"payment_status"`
+}
+
+// PatchPayment sets a booking's cash-settlement marker (WO-F1, data-only: no
+// notification or side effects). PATCH /bookings/:id/payment  body { payment_status }.
+// Settable on any non-cancelled, in-scope booking. Out-of-scope → 403.
+func (h *ScheduleHandler) PatchPayment(c *gin.Context) {
+	bookingID, err := strconv.Atoi(c.Param("id"))
+	if err != nil || bookingID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_booking_id", "message": "invalid booking id"})
+		return
+	}
+	var req paymentRequest
+	if err := c.ShouldBindJSON(&req); err != nil || !repository.IsValidPayment(req.PaymentStatus) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_payment", "message": "payment_status must be unpaid|paid_cash"})
+		return
+	}
+
+	actor := middleware.GetActor(c)
+	scope := middleware.GetScope(c)
+
+	row, err := h.repo.SetPayment(c.Request.Context(), actor, scope.BoundPitchID, bookingID, req.PaymentStatus)
+	if err != nil {
+		if errors.Is(err, repository.ErrBookingNotInScope) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "not_in_scope", "message": "this booking is not on a pitch you manage"})
+			return
+		}
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "could not update payment"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": row})
+}

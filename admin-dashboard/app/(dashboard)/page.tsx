@@ -7,15 +7,17 @@
 // page never filters tenancy client-side.
 
 import { useEffect, useState } from 'react';
-import { CalendarCheck2, Wallet, TrendingUp, CalendarClock } from 'lucide-react';
+import { CalendarCheck2, Wallet, TrendingUp, TrendingDown, CalendarClock, Banknote } from 'lucide-react';
 import api from '@/lib/api';
 import { formatCurrency, formatNumber } from '@/lib/format';
 
 interface KPIs {
-  today_revenue:         number;
-  today_confirmed_count: number;
-  week_to_date_revenue:  number;
-  upcoming_bookings:     number;
+  today_revenue:          number;
+  today_confirmed_count:  number;
+  week_to_date_revenue:   number;
+  upcoming_bookings:      number;
+  today_collected:        number;
+  week_to_date_collected: number;
 }
 
 type TileKind = 'currency' | 'count';
@@ -72,7 +74,9 @@ export default function OverviewPage() {
   // an error. Only a failed request surfaces the error banner.
   const k: KPIs = kpis ?? {
     today_revenue: 0, today_confirmed_count: 0, week_to_date_revenue: 0, upcoming_bookings: 0,
+    today_collected: 0, week_to_date_collected: 0,
   };
+  const todayLeak = Math.max(0, k.today_revenue - k.today_collected);
 
   return (
     <div className="flex flex-col gap-6">
@@ -83,16 +87,23 @@ export default function OverviewPage() {
           {error}
         </div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
-          <KpiTile icon={CalendarCheck2} label="حجوزات اليوم المؤكدة" value={k.today_confirmed_count} kind="count"    loading={loading} accent="bg-emerald-500/10 text-emerald-400" />
-          <KpiTile icon={Wallet}         label="إيرادات اليوم"        value={k.today_revenue}         kind="currency" loading={loading} accent="bg-emerald-500/10 text-emerald-400" />
-          <KpiTile icon={TrendingUp}     label="إيرادات الأسبوع حتى الآن" value={k.week_to_date_revenue} kind="currency" loading={loading} accent="bg-sky-500/10 text-sky-400" />
-          <KpiTile icon={CalendarClock}  label="الحجوزات القادمة"     value={k.upcoming_bookings}     kind="count"    loading={loading} accent="bg-white/[0.06] text-white/60" />
+        <div className="flex flex-col gap-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+            <KpiTile icon={CalendarCheck2} label="حجوزات اليوم المؤكدة" value={k.today_confirmed_count} kind="count"    loading={loading} accent="bg-emerald-500/10 text-emerald-400" />
+            <KpiTile icon={Wallet}         label="متوقّع اليوم"          value={k.today_revenue}         kind="currency" loading={loading} accent="bg-white/[0.06] text-white/60" />
+            <KpiTile icon={Banknote}       label="محصّل اليوم (نقداً)"   value={k.today_collected}       kind="currency" loading={loading} accent="bg-emerald-500/10 text-emerald-400" />
+            <KpiTile icon={CalendarClock}  label="الحجوزات القادمة"     value={k.upcoming_bookings}     kind="count"    loading={loading} accent="bg-white/[0.06] text-white/60" />
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+            <KpiTile icon={TrendingUp}     label="متوقّع الأسبوع"        value={k.week_to_date_revenue}  kind="currency" loading={loading} accent="bg-white/[0.06] text-white/60" />
+            <KpiTile icon={Banknote}       label="محصّل الأسبوع (نقداً)" value={k.week_to_date_collected} kind="currency" loading={loading} accent="bg-emerald-500/10 text-emerald-400" />
+            <KpiTile icon={TrendingDown} label="فجوة التحصيل اليوم"  value={todayLeak}             kind="currency" loading={loading} accent={todayLeak > 0 ? 'bg-amber-500/10 text-amber-400' : 'bg-white/[0.06] text-white/60'} />
+          </div>
         </div>
       )}
 
       <p className="text-[13px] text-white/35">
-        أرقام مباشرة ضمن نطاق ملاعبك فقط، بتوقيت عمّان. الإيرادات تحتسب الحجوزات المؤكدة دون أوقات الصيانة.
+        أرقام مباشرة ضمن نطاق ملاعبك فقط، بتوقيت عمّان. «المتوقّع» يحتسب الحجوزات المؤكدة، و«المحصّل» يحتسب ما تم تحصيله نقداً. الفجوة بينهما هي ما لم يُحصّل بعد.
       </p>
     </div>
   );
