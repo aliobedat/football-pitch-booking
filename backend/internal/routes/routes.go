@@ -33,6 +33,8 @@ func Register(
 	// go-forward via the same repository the CRM reads from.
 	customerRepo := repository.NewCustomerRepository(db)
 	customerHandler := handlers.NewCustomerHandler(customerRepo)
+	// Cockpit WO2: Visual Calendar Command Center (read).
+	calendarHandler := handlers.NewCalendarHandler(repository.NewCalendarRepository(db))
 	bookingHandler := handlers.NewBookingHandler(db, bookingSvc).WithCustomers(customerRepo)
 	// The Cloudinary credentials are validated at config load (fail-fast), so the
 	// only error here would be a programming/SDK error — panic to fail fast,
@@ -219,6 +221,12 @@ func Register(
 		protected.PATCH("/owner/customers/:id/notes",
 			middleware.RequireRole("owner", "admin"),
 			customerHandler.PatchCustomerNotes,
+		)
+
+		// ── Visual Calendar (owner/admin ONLY) — per-day resource timeline ─────
+		protected.GET("/owner/calendar",
+			middleware.RequireRole("owner", "admin"),
+			calendarHandler.GetDayCalendar,
 		)
 
 		// ── Staff provisioning (owner-scoped) ──────────────────────────────────

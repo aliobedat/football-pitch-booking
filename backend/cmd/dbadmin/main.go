@@ -27,6 +27,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/phone"
 	"github.com/ali/football-pitch-api/internal/repository"
+	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
 func main() {
@@ -35,6 +36,7 @@ func main() {
 	apply := flag.Bool("apply", false, "with -backfill: perform writes (default is dry-run)")
 	verifyCRM := flag.Bool("verify-crm", false, "cross-tenant CRM scoping probe (read-only)")
 	smokeCRM := flag.Bool("smoke-crm", false, "exercise the real CRM repository (list+profile) against live data")
+	smokeCal := flag.String("smoke-cal", "", "exercise the real calendar repository for a date YYYY-MM-DD against live data")
 	flag.Parse()
 
 	_ = godotenv.Load()
@@ -68,6 +70,8 @@ func main() {
 		verifyCrossTenant(ctx, pool)
 	case *smokeCRM:
 		smokeCRMRepo(ctx, pool)
+	case *smokeCal != "":
+		smokeCalendarRepo(ctx, pool, *smokeCal)
 	default:
 		flag.Usage()
 		os.Exit(2)
@@ -307,6 +311,27 @@ func smokeCRMRepo(ctx context.Context, pool *pgxpool.Pool) {
 		fmt.Printf("  preferred: weekday=%d hour=%02d ×%d\n", s.Weekday, s.Hour, s.Count)
 	}
 	fmt.Println("✓ CRM repository SQL executes cleanly against live data.")
+}
+
+// smokeCalendarRepo exercises the real calendar repository (resource-timeline
+// payload) for a date against live data, as an admin (unscoped).
+func smokeCalendarRepo(ctx context.Context, pool *pgxpool.Pool, dateStr string) {
+	day, err := time.ParseInLocation("2006-01-02", dateStr, timeutil.Amman())
+	must(err)
+	fmt.Printf("── Calendar repository smoke for %s (admin/unscoped) ──\n", dateStr)
+	repo := repository.NewCalendarRepository(pool)
+	cal, err := repo.OwnerDayCalendar(ctx, auth.Actor{UserID: 0, Role: auth.RoleAdmin}, day)
+	must(err)
+	fmt.Printf("date=%s pitches=%d\n", cal.Date, len(cal.Pitches))
+	for i, p := range cal.Pitches {
+		if i >= 6 {
+			fmt.Printf("  …(+%d more)\n", len(cal.Pitches)-6)
+			break
+		}
+		fmt.Printf("  pitch #%d %-16s active=%-5v windows=%d events=%d has_schedule=%v\n",
+			p.PitchID, p.PitchName, p.IsActive, len(p.OpenWindows), len(p.Events), p.HasSchedule)
+	}
+	fmt.Println("✓ calendar repository SQL executes cleanly against live data.")
 }
 
 func must(err error) {
