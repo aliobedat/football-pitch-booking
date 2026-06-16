@@ -15,6 +15,7 @@ import {
 import { BarChart3, Loader2 } from 'lucide-react';
 import api from '@/lib/api';
 import { formatCurrency, formatNumber, formatDate } from '@/lib/format';
+import FinancialsSection from '@/components/FinancialsSection';
 
 type Granularity = 'day' | 'week' | 'month';
 
@@ -146,6 +147,9 @@ export default function AnalyticsPage() {
           <Bar dataKey="volume" fill="#3b82f6" radius={[4, 4, 0, 0]} />
         </BarChart>
       </ChartCard>
+
+      {/* WO-F2: Net Profit + Expense Ledger, sharing the same period granularity. */}
+      <FinancialsSection granularity={granularity} />
 
       <p className="text-[13px] text-white/35">
         أرقام مباشرة ضمن نطاق ملاعبك فقط، بتوقيت عمّان. تُحتسب الحجوزات المؤكدة، وتُستثنى أوقات الصيانة من العدد.

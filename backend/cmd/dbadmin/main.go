@@ -14,9 +14,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -42,6 +44,9 @@ func main() {
 	smokeFin := flag.Bool("smoke-fin", false, "exercise analytics KPIs + timeseries (Expected vs Collected) against live data")
 	verifySettle := flag.Bool("verify-settle", false, "exercise the real SetPayment path on one in-week booking, show Collected move, then revert")
 	smokeSched := flag.String("smoke-sched", "", "exercise the real DailySchedule repository for a date YYYY-MM-DD")
+	introspect := flag.String("introspect", "", "print column types of a table, then exit")
+	verifyRecon := flag.Bool("verify-recon", false, "reconciliation audit: Net == collected(F1) − Σexpenses to the fil (create+soft-delete round-trip)")
+	verifyExpTenant := flag.Bool("verify-exp-tenant", false, "cross-tenant: Owner A cannot read/edit/delete Owner B's expense")
 	flag.Parse()
 
 	_ = godotenv.Load()
@@ -85,6 +90,12 @@ func main() {
 		verifySettlement(ctx, pool)
 	case *smokeSched != "":
 		smokeSchedule(ctx, pool, *smokeSched)
+	case *introspect != "":
+		introspectTable(ctx, pool, *introspect)
+	case *verifyRecon:
+		verifyReconciliation(ctx, pool)
+	case *verifyExpTenant:
+		verifyExpenseTenant(ctx, pool)
 	default:
 		flag.Usage()
 		os.Exit(2)
@@ -450,6 +461,170 @@ func smokeSchedule(ctx context.Context, pool *pgxpool.Pool, dateStr string) {
 			r.ID, r.PitchName, r.Attendance, r.PaymentStatus, r.AttendeeName)
 	}
 	fmt.Println("✓ DailySchedule returns payment_status cleanly.")
+}
+
+// verifyReconciliation is the WO-F2 headline audit. For a real owner over the
+// trailing 30 Amman days it: (1) reads the F1 collected leg via the SAME
+// OwnerTimeSeries aggregation, (2) reads Σexpenses, (3) creates a known expense and
+// proves Net moves by exactly that amount, then (4) soft-deletes it and proves the
+// ledger returns to baseline — all to the fil (NUMERIC(10,3)). The collected leg
+// must be byte-identical before and after (expenses never touch it).
+func verifyReconciliation(ctx context.Context, pool *pgxpool.Pool) {
+	fmt.Println("── WO-F2 Reconciliation Audit: Net == Collected − Σexpenses (to the fil) ──")
+	an := repository.NewAnalyticsRepository(pool)
+	ex := repository.NewExpenseRepository(pool)
+
+	now := time.Now().UTC()
+	from, _ := timeutil.AmmanDayBoundsUTC(timeutil.InAmman(now).AddDate(0, 0, -29))
+	_, to := timeutil.AmmanDayBoundsUTC(timeutil.InAmman(now))
+
+	// Pick an owner that actually has paid_cash collected in the window.
+	var ownerID int64
+	err := pool.QueryRow(ctx, `
+		SELECT p.owner_id
+		FROM bookings b JOIN pitches p ON p.id = b.pitch_id
+		WHERE b.payment_status = 'paid_cash'
+		  AND lower(b.booking_range) >= $1 AND lower(b.booking_range) < $2
+		GROUP BY p.owner_id ORDER BY SUM(b.total_price) DESC LIMIT 1
+	`, from, to).Scan(&ownerID)
+	if err != nil {
+		fmt.Printf("(no paid_cash collected in window to reconcile against: %v)\n", err)
+		return
+	}
+	actor := auth.Actor{UserID: int(ownerID), Role: auth.RoleOwner}
+	round3 := func(v float64) float64 { return math.Round(v*1000) / 1000 }
+
+	collected := func() float64 {
+		s, e := an.OwnerTimeSeries(ctx, actor, repository.TimeSeriesParams{Granularity: "day", From: from, To: to})
+		must(e)
+		var c float64
+		for _, b := range s {
+			c += b.Collected
+		}
+		return round3(c)
+	}
+
+	col0 := collected()
+	exp0, err := ex.SumExpenses(ctx, actor, from, to)
+	must(err)
+	net0 := round3(col0 - exp0)
+	fmt.Printf("owner %d baseline: collected=%.3f expenses=%.3f net=%.3f\n", ownerID, col0, exp0, net0)
+
+	// Create a known expense (3-dp to stress the fil).
+	const amt = 123.456
+	created, err := ex.Create(ctx, actor, repository.ExpenseInput{
+		Category: "Other", Amount: amt, OccurredAt: now, Note: "recon-audit (temp)",
+	})
+	must(err)
+	col1 := collected()
+	exp1, err := ex.SumExpenses(ctx, actor, from, to)
+	must(err)
+	net1 := round3(col1 - exp1)
+	fmt.Printf("after +%.3f expense: collected=%.3f expenses=%.3f net=%.3f\n", amt, col1, exp1, net1)
+
+	okCollected := col1 == col0
+	okExpDelta := round3(exp1-exp0) == amt
+	okNetDelta := round3(net0-net1) == amt
+	fmt.Printf("  collected unchanged: %v | Σexpenses Δ == %.3f: %v | net Δ == %.3f: %v\n",
+		okCollected, amt, okExpDelta, amt, okNetDelta)
+
+	// Soft-delete → ledger returns to baseline.
+	must(ex.SoftDelete(ctx, actor, created.ID))
+	exp2, err := ex.SumExpenses(ctx, actor, from, to)
+	must(err)
+	okRevert := exp2 == exp0
+	fmt.Printf("after soft-delete: expenses=%.3f (baseline %.3f) revert-clean: %v\n", exp2, exp0, okRevert)
+
+	if okCollected && okExpDelta && okNetDelta && okRevert {
+		fmt.Println("✓ RECONCILED to the fil: Net == Collected − Σexpenses; collected leg untouched; soft-delete clean.")
+	} else {
+		fmt.Println("✗ RECONCILIATION FAILED")
+		os.Exit(1)
+	}
+}
+
+// verifyExpenseTenant proves an owner can only touch their OWN expenses: it creates
+// one as owner A, then attempts read/update/delete as a different owner B and asserts
+// each is denied (invisible / ErrExpenseNotFound). Cleans up afterward.
+func verifyExpenseTenant(ctx context.Context, pool *pgxpool.Pool) {
+	fmt.Println("── WO-F2 cross-tenant: Owner A's expense is invisible to Owner B ──")
+	ex := repository.NewExpenseRepository(pool)
+
+	// Two distinct owners (users that own at least one pitch).
+	rows, err := pool.Query(ctx, `SELECT DISTINCT owner_id FROM pitches WHERE owner_id IS NOT NULL ORDER BY owner_id LIMIT 2`)
+	must(err)
+	var owners []int
+	for rows.Next() {
+		var o int
+		must(rows.Scan(&o))
+		owners = append(owners, o)
+	}
+	rows.Close()
+	if len(owners) < 2 {
+		fmt.Println("(need ≥2 owners; structural scoping still holds)")
+		return
+	}
+	a := auth.Actor{UserID: owners[0], Role: auth.RoleOwner}
+	b := auth.Actor{UserID: owners[1], Role: auth.RoleOwner}
+	now := time.Now().UTC()
+	from, _ := timeutil.AmmanDayBoundsUTC(timeutil.InAmman(now).AddDate(0, 0, -1))
+	_, to := timeutil.AmmanDayBoundsUTC(timeutil.InAmman(now).AddDate(0, 0, 1))
+
+	created, err := ex.Create(ctx, a, repository.ExpenseInput{Category: "Water", Amount: 7.001, OccurredAt: now, Note: "tenant-test"})
+	must(err)
+	fmt.Printf("owner A (%d) created expense #%d\n", owners[0], created.ID)
+
+	// B lists → must not see A's row.
+	bList, err := ex.List(ctx, b, from, to, "")
+	must(err)
+	leaked := false
+	for _, e := range bList {
+		if e.ID == created.ID {
+			leaked = true
+		}
+	}
+	// B update → ErrExpenseNotFound.
+	_, updErr := ex.Update(ctx, b, created.ID, repository.ExpenseInput{Category: "Staff", Amount: 1, OccurredAt: now})
+	// B delete → ErrExpenseNotFound.
+	delErr := ex.SoftDelete(ctx, b, created.ID)
+
+	fmt.Printf("  B sees A's row: %v | B update→%v | B delete→%v\n",
+		leaked, errIs(updErr, repository.ErrExpenseNotFound), errIs(delErr, repository.ErrExpenseNotFound))
+
+	// A can still delete its own (proves the row was untouched by B).
+	aDel := ex.SoftDelete(ctx, a, created.ID)
+	pass := !leaked && errIs(updErr, repository.ErrExpenseNotFound) && errIs(delErr, repository.ErrExpenseNotFound) && aDel == nil
+	if pass {
+		fmt.Println("✓ Owner B cannot read/edit/delete Owner A's expense; A's own delete works. Cleaned up.")
+	} else {
+		fmt.Println("✗ CROSS-TENANT LEAK")
+		os.Exit(1)
+	}
+}
+
+func errIs(err, target error) bool { return err != nil && errors.Is(err, target) }
+
+// introspectTable prints each column's type (with numeric precision/scale) for a
+// table, so a new money column can be drafted to MIRROR the existing convention.
+func introspectTable(ctx context.Context, pool *pgxpool.Pool, table string) {
+	rows, err := pool.Query(ctx, `
+		SELECT column_name, data_type, udt_name,
+		       COALESCE(numeric_precision::text, '-'), COALESCE(numeric_scale::text, '-'),
+		       is_nullable, COALESCE(column_default, '')
+		FROM information_schema.columns
+		WHERE table_name = $1
+		ORDER BY ordinal_position
+	`, table)
+	must(err)
+	defer rows.Close()
+	fmt.Printf("── columns of %q ──\n", table)
+	for rows.Next() {
+		var name, dtype, udt, prec, scale, nullable, def string
+		must(rows.Scan(&name, &dtype, &udt, &prec, &scale, &nullable, &def))
+		fmt.Printf("  %-22s %-12s prec=%-4s scale=%-4s null=%-3s default=%s\n",
+			name, dtype, prec, scale, nullable, def)
+	}
+	must(rows.Err())
 }
 
 // printEnum lists the labels of a Postgres enum type in sort order.

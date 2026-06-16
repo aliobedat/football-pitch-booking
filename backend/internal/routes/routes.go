@@ -35,6 +35,11 @@ func Register(
 	customerHandler := handlers.NewCustomerHandler(customerRepo)
 	// Cockpit WO2: Visual Calendar Command Center (read).
 	calendarHandler := handlers.NewCalendarHandler(repository.NewCalendarRepository(db))
+	// Phase 2 / WO-F2: Expense Ledger + Net Profit (reuses the analytics collected leg).
+	analyticsRepo := repository.NewAnalyticsRepository(db)
+	expenseRepo := repository.NewExpenseRepository(db)
+	expenseHandler := handlers.NewExpenseHandler(expenseRepo)
+	financialsHandler := handlers.NewFinancialsHandler(analyticsRepo, expenseRepo)
 	bookingHandler := handlers.NewBookingHandler(db, bookingSvc).WithCustomers(customerRepo)
 	// The Cloudinary credentials are validated at config load (fail-fast), so the
 	// only error here would be a programming/SDK error — panic to fail fast,
@@ -227,6 +232,30 @@ func Register(
 		protected.GET("/owner/calendar",
 			middleware.RequireRole("owner", "admin"),
 			calendarHandler.GetDayCalendar,
+		)
+
+		// ── Financials / Expense Ledger (owner/admin ONLY) ─────────────────────
+		// Net Profit = (WO-F1 collected) − expenses. CRUD mutations are CSRF-guarded
+		// by the protected group; reads/writes owner-scoped in SQL.
+		protected.GET("/owner/financials",
+			middleware.RequireRole("owner", "admin"),
+			financialsHandler.GetNetSummary,
+		)
+		protected.GET("/owner/expenses",
+			middleware.RequireRole("owner", "admin"),
+			expenseHandler.ListExpenses,
+		)
+		protected.POST("/owner/expenses",
+			middleware.RequireRole("owner", "admin"),
+			expenseHandler.CreateExpense,
+		)
+		protected.PATCH("/owner/expenses/:id",
+			middleware.RequireRole("owner", "admin"),
+			expenseHandler.UpdateExpense,
+		)
+		protected.DELETE("/owner/expenses/:id",
+			middleware.RequireRole("owner", "admin"),
+			expenseHandler.DeleteExpense,
 		)
 
 		// ── Staff provisioning (owner-scoped) ──────────────────────────────────
