@@ -12,6 +12,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   BookOpen, CheckCircle2, XCircle, CalendarDays, Ban, AlertTriangle,
+  SlidersHorizontal, X, Download,
 } from 'lucide-react';
 import api from '@/lib/api';
 import { formatCurrency, formatDate, formatTime } from '@/lib/format';
@@ -124,7 +125,14 @@ function BookingRow({
                 )}
               </p>
               {phone
-                ? <p className="text-[12px] text-white/55 mt-0.5 font-mono" dir="ltr">{phone}</p>
+                ? <a
+                    href={`tel:${phone}`}
+                    dir="ltr"
+                    className="inline-block text-[12px] text-emerald-400/80 hover:text-emerald-400 hover:underline mt-0.5 font-mono transition-colors"
+                    aria-label={`اتصل بـ ${name} على الرقم ${phone}`}
+                  >
+                    {phone}
+                  </a>
                 : !isBlock && <p className="text-[12px] text-white/30 mt-0.5">لا يوجد رقم</p>}
               {!isManual && !isBlock && booking.user_email && (
                 <p className="text-[11px] text-white/30 mt-0.5 truncate max-w-[160px]">{booking.user_email}</p>
@@ -337,10 +345,60 @@ function CancelModal({
 // Page
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── Filters ───────────────────────────────────────────────────────────────
+// Status + Amman date-range, applied SERVER-SIDE (query params on the owner-
+// scoped GET /admin/bookings). The server is the only filter authority that
+// matters for tenancy: owner scoping is enforced in SQL regardless of params, so
+// no client-side narrowing can ever widen the result past the owner's own rows.
+
+type StatusFilter = '' | BookingStatus;
+
+interface Filters {
+  status: StatusFilter;
+  from:   string; // YYYY-MM-DD (Amman calendar day) or ''
+  to:     string; // YYYY-MM-DD (Amman calendar day) or ''
+}
+
+const EMPTY_FILTERS: Filters = { status: '', from: '', to: '' };
+
+const STATUS_FILTER_OPTIONS: { value: StatusFilter; label: string }[] = [
+  { value: '',          label: 'كل الحالات' },
+  { value: 'confirmed', label: 'مؤكد'        },
+  { value: 'cancelled', label: 'ملغى'        },
+  { value: 'pending',   label: 'قيد الانتظار' },
+];
+
+// Build the CSV text for the (already owner-scoped, already filtered) rows. The
+// export reuses exactly the rows on screen — it never issues an unscoped fetch —
+// so it inherits the server's owner scoping. UTF-8 BOM so Excel renders Arabic.
+function buildBookingsCsv(rows: AdminBooking[]): string {
+  const headers = ['#', 'الاسم', 'الهاتف', 'الملعب', 'التاريخ', 'من', 'إلى', 'المبلغ', 'الحالة', 'المصدر'];
+  const esc = (v: string | number) => {
+    const s = String(v ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = rows.map(b => {
+    const isManual = b.source === 'manual';
+    const isBlock  = b.source === 'block';
+    const name  = isManual ? (b.guest_name || 'ضيف') : isBlock ? 'صيانة / مغلق' : (b.user_name || '');
+    const phone = isManual ? (b.guest_phone || '') : isBlock ? '' : b.user_phone;
+    return [
+      b.id, name, phone, b.pitch_name || `#${b.pitch_id}`,
+      fmtDate(b.start_time), fmtTime(b.start_time), fmtTime(b.end_time),
+      b.total_price, STATUS_CONFIG[b.status]?.label ?? b.status, b.source,
+    ].map(esc).join(',');
+  });
+  return '﻿' + [headers.join(','), ...lines].join('\r\n');
+}
+
 export default function BookingsPage() {
   const [bookings, setBookings]             = useState<AdminBooking[]>([]);
   const [loading, setLoading]               = useState(true);
   const [error, setError]                   = useState<string | null>(null);
+
+  // ── filter state ────────────────────────────────────────────────────────
+  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
+  const hasActiveFilters = filters.status !== '' || filters.from !== '' || filters.to !== '';
 
   // ── cancel-booking modal state ──────────────────────────────────────────
   const [cancelTarget, setCancelTarget] = useState<AdminBooking | null>(null);
@@ -348,11 +406,35 @@ export default function BookingsPage() {
   const [cancelError,  setCancelError]  = useState<string | null>(null);
 
   useEffect(() => {
-    api.get('/admin/bookings')
+    // Server-side filtering: pass only the set params. Owner scoping is applied in
+    // SQL irrespective of these, so the result can never cross tenants.
+    const params: Record<string, string> = {};
+    if (filters.status) params.status = filters.status;
+    if (filters.from)   params.from   = filters.from;
+    if (filters.to)     params.to     = filters.to;
+
+    setLoading(true);
+    setError(null);
+    api.get('/admin/bookings', { params })
       .then(res  => setBookings(res.data.data ?? []))
       .catch(()  => setError('تعذّر تحميل البيانات. تأكد من صلاحيات الحساب.'))
       .finally(() => setLoading(false));
-  }, []);
+  }, [filters]);
+
+  const clearFilters = useCallback(() => setFilters(EMPTY_FILTERS), []);
+
+  const exportCsv = useCallback(() => {
+    const csv  = buildBookingsCsv(bookings);
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url;
+    a.download = `bookings-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, [bookings]);
 
   const openCancelModal = useCallback((booking: AdminBooking) => {
     setCancelError(null);
@@ -398,7 +480,76 @@ export default function BookingsPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <h1 className="text-[20px] font-bold tracking-tight">الحجوزات</h1>
+      <div className="flex items-center justify-between gap-4 flex-wrap">
+        <h1 className="text-[20px] font-bold tracking-tight">الحجوزات</h1>
+        <button
+          type="button"
+          onClick={exportCsv}
+          disabled={loading || bookings.length === 0}
+          className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-[12px] font-semibold border border-white/[0.09] bg-white/[0.03] text-white/65 hover:text-white/90 hover:border-white/20 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+        >
+          <Download size={14} aria-hidden />
+          تصدير CSV
+        </button>
+      </div>
+
+      {/* Filter bar — server-side status + Amman date-range. Always visible so the
+          owner can clear filters even from an empty result. */}
+      <div className="rounded-2xl bg-[#141715] border border-white/[0.07] p-4 flex flex-col gap-3">
+        <div className="flex items-center gap-2 text-white/35">
+          <SlidersHorizontal size={13} aria-hidden />
+          <span className="text-[11px] font-semibold tracking-widest uppercase">تصفية</span>
+        </div>
+        <div className="flex flex-wrap items-end gap-3">
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-white/40">الحالة</span>
+            <select
+              value={filters.status}
+              onChange={e => setFilters(f => ({ ...f, status: e.target.value as StatusFilter }))}
+              className="bg-[#0f1110] border border-white/[0.09] rounded-lg px-3 py-2 text-[12px] text-white/80 focus:outline-none focus:border-emerald-500/40 min-w-[140px]"
+            >
+              {STATUS_FILTER_OPTIONS.map(o => (
+                <option key={o.value} value={o.value} className="bg-[#0f1110]">{o.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-white/40">من تاريخ</span>
+            <input
+              type="date"
+              value={filters.from}
+              max={filters.to || undefined}
+              onChange={e => setFilters(f => ({ ...f, from: e.target.value }))}
+              className="bg-[#0f1110] border border-white/[0.09] rounded-lg px-3 py-2 text-[12px] text-white/80 focus:outline-none focus:border-emerald-500/40"
+              dir="ltr"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-white/40">إلى تاريخ</span>
+            <input
+              type="date"
+              value={filters.to}
+              min={filters.from || undefined}
+              onChange={e => setFilters(f => ({ ...f, to: e.target.value }))}
+              className="bg-[#0f1110] border border-white/[0.09] rounded-lg px-3 py-2 text-[12px] text-white/80 focus:outline-none focus:border-emerald-500/40"
+              dir="ltr"
+            />
+          </label>
+          {hasActiveFilters && (
+            <button
+              type="button"
+              onClick={clearFilters}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-[12px] font-semibold text-white/50 hover:text-white/80 border border-white/[0.07] hover:border-white/[0.16] transition-all"
+            >
+              <X size={13} aria-hidden />
+              مسح الكل
+            </button>
+          )}
+        </div>
+        {hasActiveFilters && (
+          <p className="text-[11px] text-emerald-400/70">عوامل التصفية مفعّلة — تُطبّق على الخادم ضمن نطاق ملاعبك فقط.</p>
+        )}
+      </div>
 
       {loading ? (
         <div className="rounded-2xl bg-[#141715] border border-white/[0.08] p-12 text-center">
@@ -421,8 +572,12 @@ export default function BookingsPage() {
                 <CalendarDays size={28} className="text-white/15" aria-hidden />
               </div>
               <div className="text-center">
-                <p className="text-[16px] font-semibold text-white/45 mb-1">لا توجد حجوزات بعد</p>
-                <p className="text-[13px] text-white/25">ستظهر هنا الحجوزات الواردة على ملاعبك</p>
+                <p className="text-[16px] font-semibold text-white/45 mb-1">
+                  {hasActiveFilters ? 'لا توجد حجوزات مطابقة' : 'لا توجد حجوزات بعد'}
+                </p>
+                <p className="text-[13px] text-white/25">
+                  {hasActiveFilters ? 'جرّب تغيير عوامل التصفية أو مسحها' : 'ستظهر هنا الحجوزات الواردة على ملاعبك'}
+                </p>
               </div>
             </div>
           ) : (

@@ -87,7 +87,7 @@ func TestBookingScoping_GetAllBookings_OwnerVsAdmin(t *testing.T) {
 	repo := NewBookingRepository(pool)
 
 	// Owner A sees only bookings for pitch A.
-	aBookings, err := repo.GetAllBookings(ctx, auth.Actor{UserID: int(ownerA), Role: auth.RoleOwner})
+	aBookings, err := repo.GetAllBookings(ctx, auth.Actor{UserID: int(ownerA), Role: auth.RoleOwner}, BookingFilter{})
 	if err != nil {
 		t.Fatalf("GetAllBookings owner A: %v", err)
 	}
@@ -101,7 +101,7 @@ func TestBookingScoping_GetAllBookings_OwnerVsAdmin(t *testing.T) {
 	}
 
 	// Admin sees bookings for both pitches.
-	adminBookings, err := repo.GetAllBookings(ctx, auth.Actor{UserID: int(admin), Role: auth.RoleAdmin})
+	adminBookings, err := repo.GetAllBookings(ctx, auth.Actor{UserID: int(admin), Role: auth.RoleAdmin}, BookingFilter{})
 	if err != nil {
 		t.Fatalf("GetAllBookings admin: %v", err)
 	}

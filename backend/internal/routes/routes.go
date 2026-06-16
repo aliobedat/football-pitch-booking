@@ -192,6 +192,14 @@ func Register(
 			middleware.RequireRole("owner", "admin"),
 			analyticsHandler.GetRevenueSummary,
 		)
+		protected.GET("/owner/analytics/kpis",
+			middleware.RequireRole("owner", "admin"),
+			analyticsHandler.GetKPIs,
+		)
+		protected.GET("/owner/analytics/timeseries",
+			middleware.RequireRole("owner", "admin"),
+			analyticsHandler.GetTimeSeries,
+		)
 
 		// ── Staff provisioning (owner-scoped) ──────────────────────────────────
 		// Owner invites a guard by phone and binds them to a pitch they OWN. The

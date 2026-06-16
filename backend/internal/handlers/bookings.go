@@ -20,6 +20,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/middleware"
 	"github.com/ali/football-pitch-api/internal/models"
 	"github.com/ali/football-pitch-api/internal/repository"
+	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
 // idempotencyHeader is the request header carrying the client's per-attempt UUID.
@@ -159,9 +160,16 @@ func (h *BookingHandler) GetUserBookings(c *gin.Context) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func (h *BookingHandler) GetAllBookings(c *gin.Context) {
+	// Optional filters (status + Amman date range) narrow the listing server-side.
+	// They compose with — and never widen past — the owner scoping enforced below.
+	filter, ok := parseBookingFilter(c)
+	if !ok {
+		return
+	}
+
 	// Admin → all bookings; owner → only bookings for pitches they own. Scoping
 	// is enforced in SQL by the repository via the Actor.
-	bookings, err := h.repo.GetAllBookings(c.Request.Context(), middleware.GetActor(c))
+	bookings, err := h.repo.GetAllBookings(c.Request.Context(), middleware.GetActor(c), filter)
 	if err != nil {
 		c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -584,6 +592,59 @@ func parseIDParam(c *gin.Context, param string) (int, bool) {
 		return 0, false
 	}
 	return id, true
+}
+
+// parseBookingFilter reads the optional admin-bookings filter query params:
+//
+//	status — one of confirmed | cancelled | pending (anything else → 400)
+//	from   — inclusive start date  (YYYY-MM-DD, Asia/Amman calendar day)
+//	to     — inclusive end date    (YYYY-MM-DD, Asia/Amman calendar day)
+//
+// Dates are bucketed in Asia/Amman: `from` resolves to the START of that Amman
+// day (UTC) and `to` resolves to the END of that Amman day (UTC), giving the
+// half-open instant range [fromStart, toEnd) that the repository applies to the
+// booking start time. Absent params leave the corresponding bound unset. On a
+// malformed value it writes a 400 and returns ok=false so the caller bails.
+func parseBookingFilter(c *gin.Context) (repository.BookingFilter, bool) {
+	var filter repository.BookingFilter
+
+	if status := strings.TrimSpace(c.Query("status")); status != "" {
+		switch models.BookingStatus(status) {
+		case models.StatusConfirmed, models.StatusCancelled, models.StatusPending:
+			filter.Status = status
+		default:
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "invalid_status", "message": "status must be one of: confirmed, cancelled, pending",
+			})
+			return filter, false
+		}
+	}
+
+	if raw := strings.TrimSpace(c.Query("from")); raw != "" {
+		date, err := time.Parse("2006-01-02", raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "invalid_date", "message": "from must be in YYYY-MM-DD format",
+			})
+			return filter, false
+		}
+		start, _ := timeutil.AmmanDayBoundsUTC(date)
+		filter.From = &start
+	}
+
+	if raw := strings.TrimSpace(c.Query("to")); raw != "" {
+		date, err := time.Parse("2006-01-02", raw)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "invalid_date", "message": "to must be in YYYY-MM-DD format",
+			})
+			return filter, false
+		}
+		_, end := timeutil.AmmanDayBoundsUTC(date)
+		filter.To = &end
+	}
+
+	return filter, true
 }
 
 // handleBookingError is a single, centralised error-to-HTTP-response mapper

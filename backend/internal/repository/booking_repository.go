@@ -111,8 +111,10 @@ type BookingRepository interface {
 
 	// GetAllBookings lists bookings scoped to the actor: an admin sees every
 	// booking on the platform, an owner sees only bookings whose pitch they own
-	// (the ownership predicate is applied in SQL via the pitches join).
-	GetAllBookings(ctx context.Context, actor auth.Actor) ([]models.AdminBooking, error)
+	// (the ownership predicate is applied in SQL via the pitches join). The
+	// optional filter narrows the result by status and/or booking start instant;
+	// it composes with — and can never widen past — the owner scoping.
+	GetAllBookings(ctx context.Context, actor auth.Actor, filter BookingFilter) ([]models.AdminBooking, error)
 	UpdateBookingStatus(
 		ctx context.Context,
 		bookingID int,
@@ -1078,7 +1080,19 @@ func (r *bookingRepo) GetUserBookings(ctx context.Context, userID int64) ([]mode
 // GetAllBookings
 // ─────────────────────────────────────────────────────────────────────────────
 
-func (r *bookingRepo) GetAllBookings(ctx context.Context, actor auth.Actor) ([]models.AdminBooking, error) {
+// BookingFilter narrows an owner/admin booking listing. Every field is optional;
+// the zero value is "no filter" (the original unfiltered listing). Status is a
+// raw booking status string ("confirmed" | "cancelled" | "pending"); From/To are
+// absolute UTC instants bounding the booking START time as the half-open range
+// [From, To) — the handler derives them from Amman calendar dates. Filters only
+// ever narrow within the actor's existing scope; they never widen it.
+type BookingFilter struct {
+	Status string
+	From   *time.Time
+	To     *time.Time
+}
+
+func (r *bookingRepo) GetAllBookings(ctx context.Context, actor auth.Actor, filter BookingFilter) ([]models.AdminBooking, error) {
 	// Owner scoping is the pitches join: owners get an extra ownership predicate,
 	// admins get none (every booking). Booking history is preserved across pitch
 	// soft-deletion, so no deleted_at filter is applied here.
@@ -1087,6 +1101,24 @@ func (r *bookingRepo) GetAllBookings(ctx context.Context, actor auth.Actor) ([]m
 	if !actor.IsAdmin() {
 		args = append(args, actor.UserID)
 		pitchJoin = fmt.Sprintf("INNER JOIN pitches p ON p.id = b.pitch_id AND p.owner_id = $%d", len(args))
+	}
+
+	// Optional filters compose as additional WHERE predicates. They are appended
+	// AFTER the owner-scope arg so they can only ever narrow the owner's own rows —
+	// never reach across tenants. Each predicate is parameterised (no interpolation
+	// of caller values into SQL text).
+	where := ""
+	if filter.Status != "" {
+		args = append(args, filter.Status)
+		where += fmt.Sprintf(" AND b.status = $%d", len(args))
+	}
+	if filter.From != nil {
+		args = append(args, *filter.From)
+		where += fmt.Sprintf(" AND lower(b.booking_range) >= $%d", len(args))
+	}
+	if filter.To != nil {
+		args = append(args, *filter.To)
+		where += fmt.Sprintf(" AND lower(b.booking_range) < $%d", len(args))
 	}
 
 	rows, err := r.db.Query(ctx, fmt.Sprintf(`
@@ -1102,8 +1134,9 @@ func (r *bookingRepo) GetAllBookings(ctx context.Context, actor auth.Actor) ([]m
 		FROM bookings b
 		%s
 		LEFT JOIN  users   u ON u.id = b.player_id
+		WHERE TRUE%s
 		ORDER BY b.created_at DESC
-	`, pitchJoin), args...)
+	`, pitchJoin, where), args...)
 	if err != nil {
 		return nil, fmt.Errorf("GetAllBookings: query: %w", err)
 	}
