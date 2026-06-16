@@ -52,15 +52,43 @@ type BookingService interface {
 	Cancel(ctx context.Context, params repository.CancelBookingParams) (*models.Booking, error)
 }
 
+// customerAssociator links a freshly-created booking to its owner-scoped CRM
+// customer (Cockpit WO1). It is called best-effort AFTER a booking commits, so a
+// CRM hiccup can never fail the booking write path; the idempotent backfill
+// reconciles anything missed. *repository.customerRepo satisfies it.
+type customerAssociator interface {
+	AssociateBookingCustomer(ctx context.Context, bookingID int64) error
+}
+
 type BookingHandler struct {
-	repo    repository.BookingRepository // read paths: list + availability
-	service BookingService               // write paths: create + cancel (audited + notified)
+	repo      repository.BookingRepository // read paths: list + availability
+	service   BookingService               // write paths: create + cancel (audited + notified)
+	customers customerAssociator           // go-forward CRM linkage (optional; nil-safe)
 }
 
 func NewBookingHandler(db *pgxpool.Pool, service BookingService) *BookingHandler {
 	return &BookingHandler{
 		repo:    repository.NewBookingRepository(db),
 		service: service,
+	}
+}
+
+// WithCustomers enables go-forward CRM association on the create paths. Kept
+// separate from the constructor so existing call sites/tests are unaffected.
+func (h *BookingHandler) WithCustomers(c customerAssociator) *BookingHandler {
+	h.customers = c
+	return h
+}
+
+// associateCustomer links a created booking to its CRM customer, best-effort. Any
+// error is logged on the gin context but never surfaced to the client — the
+// booking already succeeded and the backfill is idempotent.
+func (h *BookingHandler) associateCustomer(c *gin.Context, bookingID int64) {
+	if h.customers == nil {
+		return
+	}
+	if err := h.customers.AssociateBookingCustomer(c.Request.Context(), bookingID); err != nil {
+		c.Error(err)
 	}
 }
 
@@ -125,6 +153,9 @@ func (h *BookingHandler) CreateBooking(c *gin.Context) {
 		h.handleBookingError(c, err)
 		return
 	}
+
+	// Go-forward CRM linkage (best-effort, never fails the booking).
+	h.associateCustomer(c, booking.ID)
 
 	c.JSON(http.StatusCreated, gin.H{
 		"message": "تم تأكيد طلب الحجز بنجاح",
@@ -487,6 +518,12 @@ func (h *BookingHandler) CreateManualBooking(c *gin.Context) {
 			h.handleBookingError(c, err)
 		}
 		return
+	}
+
+	// Go-forward CRM linkage for each created occurrence (best-effort). Walk-ins
+	// are the highest-value CRM signal — the owner typed the contact themselves.
+	for _, b := range bookings {
+		h.associateCustomer(c, b.ID)
 	}
 
 	// Replay (idempotent resubmit) → 200; a fresh materialization → 201.

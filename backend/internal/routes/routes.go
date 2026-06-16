@@ -29,7 +29,11 @@ func Register(
 	healthHandler := handlers.NewHealthHandler(db)
 	authHandler := handlers.NewAuthHandler(db, jwtManager, cfg)
 	phoneAuthHandler := handlers.NewPhoneAuthHandler(otpSvc, authStore, jwtManager, cfg)
-	bookingHandler := handlers.NewBookingHandler(db, bookingSvc)
+	// Cockpit WO1: Regulars CRM. The booking create paths attach the customer
+	// go-forward via the same repository the CRM reads from.
+	customerRepo := repository.NewCustomerRepository(db)
+	customerHandler := handlers.NewCustomerHandler(customerRepo)
+	bookingHandler := handlers.NewBookingHandler(db, bookingSvc).WithCustomers(customerRepo)
 	// The Cloudinary credentials are validated at config load (fail-fast), so the
 	// only error here would be a programming/SDK error — panic to fail fast,
 	// consistent with the other startup security assertions.
@@ -199,6 +203,22 @@ func Register(
 		protected.GET("/owner/analytics/timeseries",
 			middleware.RequireRole("owner", "admin"),
 			analyticsHandler.GetTimeSeries,
+		)
+
+		// ── Regulars CRM (owner/admin ONLY — staff/players barred) ─────────────
+		// Owner-scoped customer directory + per-customer profile + private notes.
+		// Scope enforced in SQL via the repository's OwnerScopeFilter.
+		protected.GET("/owner/customers",
+			middleware.RequireRole("owner", "admin"),
+			customerHandler.GetCustomers,
+		)
+		protected.GET("/owner/customers/:id",
+			middleware.RequireRole("owner", "admin"),
+			customerHandler.GetCustomerProfile,
+		)
+		protected.PATCH("/owner/customers/:id/notes",
+			middleware.RequireRole("owner", "admin"),
+			customerHandler.PatchCustomerNotes,
 		)
 
 		// ── Staff provisioning (owner-scoped) ──────────────────────────────────
