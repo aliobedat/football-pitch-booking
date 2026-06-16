@@ -1,10 +1,11 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Loader2, Check, X, Clock, Lock } from 'lucide-react';
+import { Loader2, Check, X, Clock, Lock, Banknote } from 'lucide-react';
 import api from '@/lib/api';
 
 type Attendance = 'pending' | 'checked_in' | 'no_show';
+type Payment = 'unpaid' | 'paid_cash';
 
 interface Row {
   id: number;
@@ -15,6 +16,7 @@ interface Row {
   source: 'player' | 'manual' | 'block';
   status: string;
   attendance: Attendance;
+  payment_status: Payment;
   attendee_name: string;
 }
 
@@ -79,6 +81,19 @@ export default function SchedulePage() {
     }
   }
 
+  // One-click cash settlement (WO-F1 endpoint). Optimistic flip with rollback so
+  // the floor operator never waits on the network mid-shift.
+  async function togglePayment(row: Row) {
+    const target: Payment = row.payment_status === 'paid_cash' ? 'unpaid' : 'paid_cash';
+    const prev = row.payment_status;
+    setRows((rs) => rs.map((r) => (r.id === row.id ? { ...r, payment_status: target } : r))); // optimistic
+    try {
+      await api.patch(`/bookings/${row.id}/payment`, { payment_status: target });
+    } catch {
+      setRows((rs) => rs.map((r) => (r.id === row.id ? { ...r, payment_status: prev } : r))); // rollback
+    }
+  }
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between gap-3">
@@ -138,6 +153,17 @@ export default function SchedulePage() {
                       className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-bold border transition-colors ${r.attendance === 'no_show' ? 'bg-red-500/20 border-red-500/40 text-red-300' : 'border-white/10 text-white/55 hover:text-red-300 hover:border-red-500/30'}`}
                     >
                       <X size={12} aria-hidden /> لم يحضر
+                    </button>
+                    {/* Divider then the one-click cash-settlement toggle. Emerald =
+                        paid, amber = unpaid (consistent with the calendar view). */}
+                    <span className="w-px h-5 bg-white/10 mx-0.5" aria-hidden />
+                    <button
+                      type="button"
+                      onClick={() => togglePayment(r)}
+                      aria-pressed={r.payment_status === 'paid_cash'}
+                      className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-bold border transition-colors ${r.payment_status === 'paid_cash' ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300' : 'border-amber-500/25 text-amber-300/80 hover:text-amber-300 hover:border-amber-500/40'}`}
+                    >
+                      <Banknote size={12} aria-hidden /> {r.payment_status === 'paid_cash' ? 'مدفوع' : 'تحصيل'}
                     </button>
                   </div>
                 )}
