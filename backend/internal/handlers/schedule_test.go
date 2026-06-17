@@ -16,21 +16,21 @@ import (
 type fakeScheduleRepo struct {
 	setErr        error
 	row           *repository.ScheduleRow
-	lastBound     int
+	lastBound     []int
 	lastBookingID int
 	lastAttend    string
 	lastPayment   string
 	setCalls      int
 }
 
-func (f *fakeScheduleRepo) DailySchedule(_ context.Context, _ auth.Actor, boundPitchID, _ int, _, _ time.Time) ([]repository.ScheduleRow, error) {
-	f.lastBound = boundPitchID
+func (f *fakeScheduleRepo) DailySchedule(_ context.Context, _ auth.Actor, boundPitchIDs []int, _ int, _, _ time.Time) ([]repository.ScheduleRow, error) {
+	f.lastBound = boundPitchIDs
 	return []repository.ScheduleRow{}, nil
 }
 
-func (f *fakeScheduleRepo) SetAttendance(_ context.Context, _ auth.Actor, boundPitchID, bookingID int, attendance string) (*repository.ScheduleRow, error) {
+func (f *fakeScheduleRepo) SetAttendance(_ context.Context, _ auth.Actor, boundPitchIDs []int, bookingID int, attendance string) (*repository.ScheduleRow, error) {
 	f.setCalls++
-	f.lastBound, f.lastBookingID, f.lastAttend = boundPitchID, bookingID, attendance
+	f.lastBound, f.lastBookingID, f.lastAttend = boundPitchIDs, bookingID, attendance
 	if f.setErr != nil {
 		return nil, f.setErr
 	}
@@ -40,9 +40,9 @@ func (f *fakeScheduleRepo) SetAttendance(_ context.Context, _ auth.Actor, boundP
 	return &repository.ScheduleRow{ID: int64(bookingID), Attendance: attendance}, nil
 }
 
-func (f *fakeScheduleRepo) SetPayment(_ context.Context, _ auth.Actor, boundPitchID, bookingID int, payment string) (*repository.ScheduleRow, error) {
+func (f *fakeScheduleRepo) SetPayment(_ context.Context, _ auth.Actor, boundPitchIDs []int, bookingID int, payment string) (*repository.ScheduleRow, error) {
 	f.setCalls++
-	f.lastBound, f.lastBookingID, f.lastPayment = boundPitchID, bookingID, payment
+	f.lastBound, f.lastBookingID, f.lastPayment = boundPitchIDs, bookingID, payment
 	if f.setErr != nil {
 		return nil, f.setErr
 	}
@@ -59,7 +59,7 @@ func scheduleRouter(h *ScheduleHandler, userID int, role string, boundPitch int)
 		c.Set(middleware.ContextKeyUserID, userID)
 		c.Set(middleware.ContextKeyRole, role)
 		c.Set(middleware.ContextKeyActor, auth.Actor{UserID: userID, Role: role})
-		c.Set(middleware.ContextKeyScope, auth.Scope{BoundPitchID: boundPitch, ProvisionedBy: 1})
+		c.Set(middleware.ContextKeyScope, auth.Scope{BoundPitchIDs: []int{boundPitch}, ProvisionedBy: 1})
 		c.Next()
 	}
 	r.GET("/schedule", inject, middleware.RequireRole("staff", "owner", "admin"), h.GetDailySchedule)
@@ -91,8 +91,8 @@ func TestAttendance_OutOfScopeForbidden(t *testing.T) {
 		t.Fatalf("status = %d, want 403 for staff acting on another pitch's booking (body: %s)", rec.Code, rec.Body.String())
 	}
 	// Staff's bound pitch must be what the repo is scoped to.
-	if repo.lastBound != 7 {
-		t.Fatalf("boundPitch = %d, want 7", repo.lastBound)
+	if len(repo.lastBound) != 1 || repo.lastBound[0] != 7 {
+		t.Fatalf("boundPitchIDs = %v, want [7]", repo.lastBound)
 	}
 }
 

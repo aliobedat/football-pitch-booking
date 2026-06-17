@@ -1,59 +1,58 @@
 'use client';
 
-// Staff management — owner-scoped (Dashboard PR2 UI). An owner provisions a guard
-// by PHONE and binds them to a pitch they own; the backend promotes that already-
-// registered player to the `staff` role. Revoke unbinds + demotes back to player.
-// All scoping (own pitches, own staff) is enforced server-side; this is UX only —
-// the route guard + backend RequireRole("owner","admin") are the real boundary.
+// Staff management — owner-scoped (Dashboard PR2 UI, 1:N). An owner provisions a
+// guard by PHONE and binds them to ONE OR MORE pitches they own; the backend
+// promotes that already-registered player to the `staff` role. Revoke unbinds ALL
+// of their pitches + demotes back to player. All scoping (own pitches, own staff)
+// is enforced server-side; this is UX only — the route guard + backend
+// RequireRole("owner","admin") are the real boundary.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { UserCog, Phone as PhoneIcon, Loader2, UserPlus, Trash2, ShieldAlert } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { UserCog, Phone as PhoneIcon, Loader2, UserPlus, Trash2, ShieldAlert, MapPin } from 'lucide-react';
 import api from '@/lib/api';
 
 interface OwnerPitch { id: number; name: string }
-interface StaffBinding {
-  id: number; user_id: number; pitch_id: number; owner_id: number;
+interface StaffPitch { pitch_id: number; pitch_name: string }
+interface StaffMember {
+  user_id: number; owner_id: number;
   phone: string; full_name: string;
+  pitches: StaffPitch[];
 }
 
 // Map an InviteStaff error code to an Arabic message for the owner.
 const INVITE_ERRORS: Record<string, string> = {
   staff_user_not_found: 'هذا الرقم لم يسجّل في التطبيق بعد — اطلب من الموظف تسجيل الدخول مرة واحدة أولاً.',
-  staff_already_assigned: 'هذا المستخدم معيّن بالفعل كموظف على ملعب.',
-  not_pitch_owner: 'لا يمكنك تعيين موظف على ملعب لا تملكه.',
+  not_pitch_owner: 'لا يمكنك تعيين موظف إلا على ملاعبك.',
   cannot_assign_user: 'لا يمكن تعيين هذا المستخدم كموظف.',
   invalid_phone: 'رقم الهاتف غير صالح.',
+  no_pitches: 'اختر ملعباً واحداً على الأقل.',
 };
 
 export default function StaffPage() {
   const [pitches, setPitches] = useState<OwnerPitch[]>([]);
-  const [staff, setStaff]     = useState<StaffBinding[]>([]);
+  const [staff, setStaff]     = useState<StaffMember[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError]     = useState<string | null>(null);
 
-  // Invite form state.
+  // Invite form state — multi-pitch (1:N).
   const [phone, setPhone]   = useState('');
-  const [pitchId, setPitchId] = useState<number | ''>('');
+  const [selectedPitches, setSelectedPitches] = useState<number[]>([]);
   const [inviting, setInviting] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [inviteOK, setInviteOK] = useState<string | null>(null);
 
   const [revoking, setRevoking] = useState<number | null>(null);
 
-  const pitchName = useMemo(() => {
-    const m = new Map(pitches.map(p => [p.id, p.name]));
-    return (id: number) => m.get(id) ?? `#${id}`;
-  }, [pitches]);
+  const togglePitch = (id: number) =>
+    setSelectedPitches(s => (s.includes(id) ? s.filter(x => x !== id) : [...s, id]));
 
   const load = useCallback(() => {
     setLoading(true);
     setError(null);
     Promise.all([api.get('/owner/pitches'), api.get('/owner/staff')])
       .then(([p, s]) => {
-        const list = (p.data.data ?? p.data ?? []) as OwnerPitch[];
-        setPitches(list);
-        setStaff((s.data.data ?? []) as StaffBinding[]);
-        setPitchId(prev => (prev === '' && list.length > 0 ? list[0].id : prev));
+        setPitches((p.data.data ?? p.data ?? []) as OwnerPitch[]);
+        setStaff((s.data.data ?? []) as StaffMember[]);
       })
       .catch(() => setError('تعذّر تحميل البيانات. تأكد من صلاحيات الحساب.'))
       .finally(() => setLoading(false));
@@ -65,12 +64,13 @@ export default function StaffPage() {
     e.preventDefault();
     setInviteError(null);
     setInviteOK(null);
-    if (pitchId === '') { setInviteError('اختر الملعب.'); return; }
     if (!phone.trim()) { setInviteError('رقم الهاتف مطلوب.'); return; }
+    if (selectedPitches.length === 0) { setInviteError('اختر ملعباً واحداً على الأقل.'); return; }
     setInviting(true);
     try {
-      await api.post(`/pitches/${pitchId}/staff`, { phone: phone.trim() });
+      await api.post('/owner/staff', { phone: phone.trim(), pitch_ids: selectedPitches });
       setPhone('');
+      setSelectedPitches([]);
       setInviteOK('تم تعيين الموظف.');
       load();
     } catch (err: any) {
@@ -79,14 +79,14 @@ export default function StaffPage() {
     } finally {
       setInviting(false);
     }
-  }, [phone, pitchId, load]);
+  }, [phone, selectedPitches, load]);
 
-  const revoke = useCallback(async (b: StaffBinding) => {
-    if (!confirm(`تسريح ${b.full_name || b.phone}؟ سيعود حسابه إلى مستخدم عادي.`)) return;
-    setRevoking(b.user_id);
+  const revoke = useCallback(async (m: StaffMember) => {
+    if (!confirm(`تسريح ${m.full_name || m.phone}؟ سيُلغى وصوله لكل الملاعب ويعود حسابه إلى مستخدم عادي.`)) return;
+    setRevoking(m.user_id);
     try {
-      await api.delete(`/owner/staff/${b.user_id}`);
-      setStaff(prev => prev.filter(x => x.user_id !== b.user_id));
+      await api.delete(`/owner/staff/${m.user_id}`);
+      setStaff(prev => prev.filter(x => x.user_id !== m.user_id));
     } catch {
       setError('تعذّر تسريح الموظف. حاول مرة أخرى.');
     } finally {
@@ -106,21 +106,33 @@ export default function StaffPage() {
       {/* Invite form */}
       <form onSubmit={invite} className="rounded-2xl border border-white/[0.07] bg-[#141715] p-5 flex flex-col gap-3.5">
         <p className="text-[12px] text-white/45 leading-relaxed">
-          عيّن موظفاً (حارس ملعب) عبر رقم هاتفه. يجب أن يكون قد سجّل دخوله للتطبيق مرة واحدة على الأقل. سيُمنح صلاحية الوصول إلى جدول الملعب المحدد فقط — دون الوصول للتحليلات أو المالية.
+          عيّن موظفاً (حارس ملعب) عبر رقم هاتفه. يجب أن يكون قد سجّل دخوله للتطبيق مرة واحدة على الأقل. سيُمنح صلاحية الوصول إلى جداول الملاعب المحدّدة فقط — دون الوصول للتحليلات أو المالية.
         </p>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <label className="flex flex-col gap-1.5">
-            <span className="text-[12px] text-white/45">رقم الهاتف *</span>
-            <input value={phone} onChange={e => setPhone(e.target.value)} dir="ltr"
-              className="staff-input font-mono" placeholder="+9627…" />
-          </label>
-          <label className="flex flex-col gap-1.5">
-            <span className="text-[12px] text-white/45">الملعب *</span>
-            <select value={pitchId} onChange={e => setPitchId(Number(e.target.value))} className="staff-input">
-              {pitches.length === 0 && <option value="" className="bg-[#0f1110]">لا توجد ملاعب</option>}
-              {pitches.map(p => <option key={p.id} value={p.id} className="bg-[#0f1110]">{p.name}</option>)}
-            </select>
-          </label>
+        <label className="flex flex-col gap-1.5">
+          <span className="text-[12px] text-white/45">رقم الهاتف *</span>
+          <input value={phone} onChange={e => setPhone(e.target.value)} dir="ltr"
+            className="staff-input font-mono max-w-xs" placeholder="+9627…" />
+        </label>
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[12px] text-white/45">الملاعب * <span className="text-white/30">(يمكن اختيار أكثر من ملعب)</span></span>
+          {pitches.length === 0 ? (
+            <p className="text-[12px] text-white/35">لا توجد ملاعب</p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {pitches.map(p => {
+                const on = selectedPitches.includes(p.id);
+                return (
+                  <button key={p.id} type="button" onClick={() => togglePitch(p.id)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold border transition-all ${
+                      on ? 'bg-emerald-500/20 text-emerald-200 border-emerald-500/40'
+                         : 'bg-white/[0.03] text-white/55 border-white/[0.08] hover:text-white/85'
+                    }`}>
+                    <MapPin size={12} aria-hidden /> {p.name}
+                  </button>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {inviteError && <p className="text-[12px] text-amber-400">{inviteError}</p>}
@@ -151,18 +163,24 @@ export default function StaffPage() {
         </div>
       ) : (
         <div className="rounded-2xl border border-white/[0.07] bg-[#141715] overflow-hidden divide-y divide-white/[0.05]">
-          {staff.map(b => (
-            <div key={b.id} className="flex items-center justify-between gap-4 px-5 py-3.5">
+          {staff.map(m => (
+            <div key={m.user_id} className="flex items-start justify-between gap-4 px-5 py-3.5">
               <div className="min-w-0">
-                <p className="text-[14px] font-bold text-[#f0efe8] truncate">{b.full_name || 'بدون اسم'}</p>
-                <div className="flex items-center gap-3 mt-0.5 text-[12px] text-white/45">
-                  <span className="inline-flex items-center gap-1 font-mono" dir="ltr"><PhoneIcon size={11} aria-hidden /> {b.phone}</span>
-                  <span className="inline-flex items-center gap-1">· {pitchName(b.pitch_id)}</span>
+                <p className="text-[14px] font-bold text-[#f0efe8] truncate">{m.full_name || 'بدون اسم'}</p>
+                <div className="flex items-center gap-1 mt-0.5 text-[12px] text-white/45 font-mono" dir="ltr">
+                  <PhoneIcon size={11} aria-hidden /> {m.phone}
+                </div>
+                <div className="flex flex-wrap gap-1.5 mt-2">
+                  {m.pitches.map(p => (
+                    <span key={p.pitch_id} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/10 text-[11px] text-emerald-200/90">
+                      <MapPin size={10} aria-hidden /> {p.pitch_name}
+                    </span>
+                  ))}
                 </div>
               </div>
-              <button onClick={() => revoke(b)} disabled={revoking === b.user_id}
+              <button onClick={() => revoke(m)} disabled={revoking === m.user_id}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold text-red-300 bg-red-500/[0.08] border border-red-500/20 hover:bg-red-500/[0.14] disabled:opacity-50 transition-all shrink-0">
-                {revoking === b.user_id ? <Loader2 size={12} className="animate-spin" aria-hidden /> : <Trash2 size={12} aria-hidden />}
+                {revoking === m.user_id ? <Loader2 size={12} className="animate-spin" aria-hidden /> : <Trash2 size={12} aria-hidden />}
                 تسريح
               </button>
             </div>

@@ -429,13 +429,13 @@ func verifySettlement(ctx context.Context, pool *pgxpool.Pool) {
 		bookingID, ownerID, timeutil.InAmman(playedAt).Format("2006-01-02 15:04"), original)
 
 	before := bucketCollected()
-	if _, err := sched.SetPayment(ctx, admin, 0, bookingID, "paid_cash"); err != nil { // REAL endpoint path
+	if _, err := sched.SetPayment(ctx, admin, nil, bookingID, "paid_cash"); err != nil { // REAL endpoint path
 		must(fmt.Errorf("SetPayment paid_cash: %w", err))
 	}
 	after := bucketCollected()
 	fmt.Printf("that day's Collected: %.2f → %.2f (Δ=%.2f)\n", before, after, after-before)
 
-	if _, err := sched.SetPayment(ctx, admin, 0, bookingID, original); err != nil { // revert
+	if _, err := sched.SetPayment(ctx, admin, nil, bookingID, original); err != nil { // revert
 		must(fmt.Errorf("SetPayment revert: %w", err))
 	}
 	fmt.Printf("reverted that day's Collected: %.2f (baseline)\n", bucketCollected())
@@ -450,7 +450,7 @@ func smokeSchedule(ctx context.Context, pool *pgxpool.Pool, dateStr string) {
 	from, to := timeutil.AmmanDayBoundsUTC(day)
 	fmt.Printf("── DailySchedule smoke for %s (admin/unscoped) ──\n", dateStr)
 	repo := repository.NewScheduleRepository(pool)
-	rows, err := repo.DailySchedule(ctx, auth.Actor{UserID: 0, Role: auth.RoleAdmin}, 0, 0, from, to)
+	rows, err := repo.DailySchedule(ctx, auth.Actor{UserID: 0, Role: auth.RoleAdmin}, nil, 0, from, to)
 	must(err)
 	fmt.Printf("rows=%d\n", len(rows))
 	for i, r := range rows {

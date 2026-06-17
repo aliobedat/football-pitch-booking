@@ -17,16 +17,16 @@ import (
 )
 
 type fakeStaffRepo struct {
-	createErr    error
-	created      *repository.StaffBinding
-	createCalls  int
-	lastOwnerID  int
-	lastPitchID  int
-	lastPhone    string
-	bindingPitch int
-	bindingOwner int
-	bindingFound bool
-	bindingErr   error
+	createErr      error
+	created        *repository.StaffMember
+	createCalls    int
+	lastOwnerID    int
+	lastPitchIDs   []int
+	lastPhone      string
+	bindingPitches []int
+	bindingOwner   int
+	bindingFound   bool
+	bindingErr     error
 
 	revokeErr       error
 	revokeCalls     int
@@ -34,23 +34,27 @@ type fakeStaffRepo struct {
 	lastRevokeUser  int
 }
 
-func (f *fakeStaffRepo) StaffBinding(_ context.Context, _ int) (int, int, bool, error) {
-	return f.bindingPitch, f.bindingOwner, f.bindingFound, f.bindingErr
+func (f *fakeStaffRepo) StaffBindings(_ context.Context, _ int) ([]int, int, bool, error) {
+	return f.bindingPitches, f.bindingOwner, f.bindingFound, f.bindingErr
 }
 
-func (f *fakeStaffRepo) CreateStaffBinding(_ context.Context, ownerID, pitchID int, phone string) (*repository.StaffBinding, error) {
+func (f *fakeStaffRepo) CreateStaffBindings(_ context.Context, ownerID int, pitchIDs []int, phone string) (*repository.StaffMember, error) {
 	f.createCalls++
-	f.lastOwnerID, f.lastPitchID, f.lastPhone = ownerID, pitchID, phone
+	f.lastOwnerID, f.lastPitchIDs, f.lastPhone = ownerID, pitchIDs, phone
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
 	if f.created != nil {
 		return f.created, nil
 	}
-	return &repository.StaffBinding{ID: 1, UserID: 99, PitchID: pitchID, OwnerID: ownerID, Phone: phone}, nil
+	pitches := make([]repository.StaffPitch, 0, len(pitchIDs))
+	for _, pid := range pitchIDs {
+		pitches = append(pitches, repository.StaffPitch{PitchID: pid})
+	}
+	return &repository.StaffMember{UserID: 99, OwnerID: ownerID, Phone: phone, Pitches: pitches}, nil
 }
 
-func (f *fakeStaffRepo) ListStaffForOwner(_ context.Context, _ int) ([]repository.StaffBinding, error) {
+func (f *fakeStaffRepo) ListStaffForOwner(_ context.Context, _ int) ([]repository.StaffMember, error) {
 	return nil, nil
 }
 
@@ -67,16 +71,21 @@ func newStaffRouter(h *StaffHandler, userID int, role string) *gin.Engine {
 		c.Set(middleware.ContextKeyRole, role)
 		c.Next()
 	}
-	r.POST("/pitches/:id/staff", inject, middleware.RequireRole("owner", "admin"), h.InviteStaff)
+	r.POST("/owner/staff", inject, middleware.RequireRole("owner", "admin"), h.InviteStaff)
 	r.DELETE("/owner/staff/:userId", inject, middleware.RequireRole("owner", "admin"), h.RevokeStaff)
 	return r
+}
+
+// inviteBody is the multi-pitch invite payload helper.
+func inviteBody(phone string, pitchIDs ...int) map[string]any {
+	return map[string]any{"phone": phone, "pitch_ids": pitchIDs}
 }
 
 // The KEY isolation guarantee: binding to a pitch the owner does not own → 403.
 func TestInviteStaff_NotOwnedPitchForbidden(t *testing.T) {
 	repo := &fakeStaffRepo{createErr: repository.ErrPitchNotOwned}
 	r := newStaffRouter(NewStaffHandler(repo), 42, "owner")
-	rec := doJSON(t, r, http.MethodPost, "/pitches/7/staff", map[string]any{"phone": "0791234567"})
+	rec := doJSON(t, r, http.MethodPost, "/owner/staff", inviteBody("0791234567", 7))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 binding staff to an unowned pitch (body: %s)", rec.Code, rec.Body.String())
 	}
@@ -85,12 +94,12 @@ func TestInviteStaff_NotOwnedPitchForbidden(t *testing.T) {
 func TestInviteStaff_StaffCannotInvite(t *testing.T) {
 	repo := &fakeStaffRepo{}
 	r := newStaffRouter(NewStaffHandler(repo), 9, "staff")
-	rec := doJSON(t, r, http.MethodPost, "/pitches/7/staff", map[string]any{"phone": "0791234567"})
+	rec := doJSON(t, r, http.MethodPost, "/owner/staff", inviteBody("0791234567", 7))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 for staff inviting staff", rec.Code)
 	}
 	if repo.createCalls != 0 {
-		t.Fatalf("repo.CreateStaffBinding ran for a staff caller; route guard must block first")
+		t.Fatalf("repo.CreateStaffBindings ran for a staff caller; route guard must block first")
 	}
 }
 
@@ -98,7 +107,7 @@ func TestInviteStaff_Success(t *testing.T) {
 	repo := &fakeStaffRepo{}
 	const ownerID = 42
 	r := newStaffRouter(NewStaffHandler(repo), ownerID, "owner")
-	rec := doJSON(t, r, http.MethodPost, "/pitches/7/staff", map[string]any{"phone": "0791234567"})
+	rec := doJSON(t, r, http.MethodPost, "/owner/staff", inviteBody("0791234567", 7, 9))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201 (body: %s)", rec.Code, rec.Body.String())
 	}
@@ -106,8 +115,9 @@ func TestInviteStaff_Success(t *testing.T) {
 	if repo.lastOwnerID != ownerID {
 		t.Fatalf("ownerID = %d, want %d (binding must be scoped to the acting owner)", repo.lastOwnerID, ownerID)
 	}
-	if repo.lastPitchID != 7 {
-		t.Fatalf("pitchID = %d, want 7", repo.lastPitchID)
+	// The full multi-pitch set is passed through (1:N).
+	if len(repo.lastPitchIDs) != 2 || repo.lastPitchIDs[0] != 7 || repo.lastPitchIDs[1] != 9 {
+		t.Fatalf("pitchIDs = %v, want [7 9]", repo.lastPitchIDs)
 	}
 	if repo.lastPhone != "+962791234567" {
 		t.Fatalf("phone = %q, want normalised +962791234567", repo.lastPhone)
@@ -156,7 +166,6 @@ func TestInviteStaff_ErrorMapping(t *testing.T) {
 		err  error
 		want int
 	}{
-		{"already bound", repository.ErrStaffAlreadyBound, http.StatusConflict},
 		{"user not found", repository.ErrStaffUserNotFound, http.StatusNotFound},
 		{"privileged target", repository.ErrCannotBindPrivileged, http.StatusUnprocessableEntity},
 	}
@@ -164,7 +173,7 @@ func TestInviteStaff_ErrorMapping(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := &fakeStaffRepo{createErr: tc.err}
 			r := newStaffRouter(NewStaffHandler(repo), 42, "owner")
-			rec := doJSON(t, r, http.MethodPost, "/pitches/7/staff", map[string]any{"phone": "0791234567"})
+			rec := doJSON(t, r, http.MethodPost, "/owner/staff", inviteBody("0791234567", 7))
 			if rec.Code != tc.want {
 				t.Fatalf("status = %d, want %d for %s (body: %s)", rec.Code, tc.want, tc.name, rec.Body.String())
 			}

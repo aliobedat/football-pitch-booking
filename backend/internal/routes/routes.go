@@ -259,9 +259,10 @@ func Register(
 		)
 
 		// ── Staff provisioning (owner-scoped) ──────────────────────────────────
-		// Owner invites a guard by phone and binds them to a pitch they OWN. The
-		// ownership invariant is enforced in the repository transaction.
-		protected.POST("/pitches/:id/staff",
+		// Owner invites a guard by phone and binds them to ONE OR MORE pitches they
+		// OWN (1:N). pitch_ids travels in the body; the ownership invariant (owner
+		// owns every pitch) is enforced in the repository transaction.
+		protected.POST("/owner/staff",
 			middleware.RequireRole("owner", "admin"),
 			staffHandler.InviteStaff,
 		)

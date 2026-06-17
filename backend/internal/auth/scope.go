@@ -6,14 +6,15 @@ package auth
 // must take effect on the very next request, which a baked-in token claim could
 // not guarantee.
 //
-// For a `staff` actor, BoundPitchID is the single pitch (V1) they may operate and
+// For a `staff` actor, BoundPitchIDs is the set of pitches they may operate (1:N —
+// an owner may staff one guard across several pitches of the same complex) and
 // ProvisionedBy is the owner who bound them. For every other role the zero value
 // applies (owners are scoped to their owned pitches in the data layer; admins are
 // unscoped).
 type Scope struct {
-	BoundPitchID  int
+	BoundPitchIDs []int
 	ProvisionedBy int
 }
 
-// IsStaffBound reports whether this scope carries a concrete staff→pitch binding.
-func (s Scope) IsStaffBound() bool { return s.BoundPitchID > 0 }
+// IsStaffBound reports whether this scope carries at least one staff→pitch binding.
+func (s Scope) IsStaffBound() bool { return len(s.BoundPitchIDs) > 0 }
