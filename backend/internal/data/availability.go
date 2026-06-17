@@ -23,12 +23,12 @@ type AvailabilityQuery struct {
 // AvailabilityResult is one pitch that is open at the requested start and free
 // from it for at least the 60-minute floor.
 type AvailabilityResult struct {
-	ID               int      `json:"id"`
-	Name             string   `json:"name"`
-	Area             string   `json:"area"`       // neighborhood
-	ImageURL         string   `json:"image_url"`  // primary image
+	ID               int       `json:"id"`
+	Name             string    `json:"name"`
+	Area             string    `json:"area"`      // neighborhood
+	ImageURL         string    `json:"image_url"` // primary image
 	AvailableUntil   time.Time `json:"available_until"`
-	AvailableMinutes int      `json:"available_minutes"`
+	AvailableMinutes int       `json:"available_minutes"`
 	// DistanceKm is set only when BOTH the player and the pitch have usable
 	// coordinates; nil otherwise (the pitch then rides the default-order tail).
 	DistanceKm *float64 `json:"distance_km"`
@@ -40,11 +40,11 @@ const minAvailableMinutes = 60
 
 // candidate is the per-pitch working row assembled before the open/occupancy math.
 type candidate struct {
-	id      int
-	name    string
-	area    string
-	image   string
-	coords  geo.Coordinates
+	id     int
+	name   string
+	area   string
+	image  string
+	coords geo.Coordinates
 }
 
 // SearchAvailability returns player-visible pitches open at q.Start and free from

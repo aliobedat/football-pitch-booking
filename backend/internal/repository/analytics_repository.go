@@ -37,7 +37,7 @@ type KPISummary struct {
 
 	// COLLECTED (WO-F1): cash actually settled (payment_status='paid_cash'). The
 	// gap Expected − Collected is the owner's leakage.
-	TodayCollected     float64 `json:"today_collected"`
+	TodayCollected      float64 `json:"today_collected"`
 	WeekToDateCollected float64 `json:"week_to_date_collected"`
 }
 

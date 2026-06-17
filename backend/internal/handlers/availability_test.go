@@ -10,17 +10,17 @@ import (
 
 func TestParseHHMM(t *testing.T) {
 	cases := []struct {
-		in       string
-		h, m     int
-		ok       bool
+		in   string
+		h, m int
+		ok   bool
 	}{
 		{"08:00", 8, 0, true},
 		{"23:59", 23, 59, true},
 		{"00:00", 0, 0, true},
 		{"24:00", 0, 0, false},
 		{"08:60", 0, 0, false},
-		{"8:00", 0, 0, false},  // not zero-padded / wrong length
-		{"0800", 0, 0, false},  // missing colon
+		{"8:00", 0, 0, false}, // not zero-padded / wrong length
+		{"0800", 0, 0, false}, // missing colon
 		{"ab:cd", 0, 0, false},
 		{"", 0, 0, false},
 	}

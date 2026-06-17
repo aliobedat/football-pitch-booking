@@ -64,7 +64,7 @@ func (h *NotificationHandler) OptOut(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "you have been opted out of all notifications",
+		"message":   "you have been opted out of all notifications",
 		"opted_out": true,
 	})
 }

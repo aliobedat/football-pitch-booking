@@ -137,7 +137,7 @@ func TestGroupCancel_ForeignOwnerCancelsNothing(t *testing.T) {
 	otherID := e.otherID
 	n, err := e.repo.CancelFutureGroup(context.Background(), CancelGroupParams{
 		PitchID: e.pitchID, GroupID: group,
-		Actor:   auth.Actor{UserID: int(otherID), Role: auth.RoleOwner}, ActorID: otherID,
+		Actor: auth.Actor{UserID: int(otherID), Role: auth.RoleOwner}, ActorID: otherID,
 	})
 	if err != nil {
 		t.Fatalf("foreign-owner cancel: %v", err)
@@ -152,7 +152,7 @@ func TestGroupCancel_ForeignOwnerCancelsNothing(t *testing.T) {
 	// Admin, by contrast, is unscoped and CAN cancel it.
 	n2, err := e.repo.CancelFutureGroup(context.Background(), CancelGroupParams{
 		PitchID: e.pitchID, GroupID: group,
-		Actor:   auth.Actor{UserID: int(otherID), Role: auth.RoleAdmin}, ActorID: otherID,
+		Actor: auth.Actor{UserID: int(otherID), Role: auth.RoleAdmin}, ActorID: otherID,
 	})
 	if err != nil {
 		t.Fatalf("admin cancel: %v", err)

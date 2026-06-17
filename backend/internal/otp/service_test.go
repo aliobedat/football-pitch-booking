@@ -18,7 +18,7 @@ const (
 // clock is a controllable time source for deterministic expiry/cooldown tests.
 type clock struct{ t time.Time }
 
-func (c *clock) now() time.Time   { return c.t }
+func (c *clock) now() time.Time          { return c.t }
 func (c *clock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
 // harness bundles a wired OTP Service with the collaborators a test inspects.

@@ -26,13 +26,13 @@ import (
 )
 
 type blockEnv struct {
-	pool      *pgxpool.Pool
-	repo      BookingRepository
-	model     *data.PitchModel
-	ownerID   int64
-	otherID   int64 // a different owner (for the foreign-owner 404 case)
-	playerID  int64
-	pitchID   int64
+	pool     *pgxpool.Pool
+	repo     BookingRepository
+	model    *data.PitchModel
+	ownerID  int64
+	otherID  int64 // a different owner (for the foreign-owner 404 case)
+	playerID int64
+	pitchID  int64
 }
 
 func newBlockEnv(t *testing.T) *blockEnv {

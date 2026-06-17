@@ -27,9 +27,9 @@ func testTwilio(t *testing.T, srv *httptest.Server) *TwilioChannel {
 func TestNewTwilioChannel_RequiresCredentials(t *testing.T) {
 	for _, c := range []config.TwilioConfig{
 		{},
-		{AccountSID: "AC", AuthToken: "t"},        // missing from
-		{AccountSID: "AC", FromNumber: "+1"},      // missing token
-		{AuthToken: "t", FromNumber: "+1"},        // missing sid
+		{AccountSID: "AC", AuthToken: "t"},   // missing from
+		{AccountSID: "AC", FromNumber: "+1"}, // missing token
+		{AuthToken: "t", FromNumber: "+1"},   // missing sid
 	} {
 		if _, err := NewTwilioChannel(c); !errors.Is(err, ErrTwilioNotConfigured) {
 			t.Errorf("cfg %+v: err = %v, want ErrTwilioNotConfigured", c, err)
@@ -69,9 +69,9 @@ func TestTwilio_Success(t *testing.T) {
 
 func TestTwilio_TrialErrorsAreTypedAndDoNotCrash(t *testing.T) {
 	cases := []struct {
-		name     string
-		code     int
-		wantErr  error
+		name    string
+		code    int
+		wantErr error
 	}{
 		{"unverified recipient 21608", 21608, ErrTwilioUnverifiedRecipient},
 		{"daily limit 63038", 63038, ErrTwilioDailyLimit},

@@ -215,7 +215,11 @@ func TestPitchLocation_UnresolvableCreateEntersManualPinQueue(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201 (body: %s)", rec.Code, rec.Body.String())
 	}
-	var resp struct{ Data struct{ ID int `json:"id"` } `json:"data"` }
+	var resp struct {
+		Data struct {
+			ID int `json:"id"`
+		} `json:"data"`
+	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	e.pitches = append(e.pitches, resp.Data.ID)
 

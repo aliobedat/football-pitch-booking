@@ -25,12 +25,12 @@ import (
 )
 
 type scopingEnv struct {
-	pool                  *pgxpool.Pool
-	model                 *PitchModel
-	adminID               int
-	ownerAID, ownerBID    int
-	playerID              int
-	pitchA, pitchB        int // pitchA owned by ownerA, pitchB by ownerB
+	pool               *pgxpool.Pool
+	model              *PitchModel
+	adminID            int
+	ownerAID, ownerBID int
+	playerID           int
+	pitchA, pitchB     int // pitchA owned by ownerA, pitchB by ownerB
 }
 
 func newScopingEnv(t *testing.T) *scopingEnv {

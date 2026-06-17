@@ -121,8 +121,8 @@ func (h *WhatsAppWebhookHandler) Receive(c *gin.Context) {
 // ── Inbound Cloud API webhook wire types (local to this handler) ─────────────
 
 type waWebhookPayload struct {
-	Object string             `json:"object"`
-	Entry  []waWebhookEntry   `json:"entry"`
+	Object string           `json:"object"`
+	Entry  []waWebhookEntry `json:"entry"`
 }
 
 type waWebhookEntry struct {
@@ -136,13 +136,13 @@ type waWebhookChange struct {
 }
 
 type waWebhookValue struct {
-	MessagingProduct string           `json:"messaging_product"`
+	MessagingProduct string            `json:"messaging_product"`
 	Statuses         []waWebhookStatus `json:"statuses"`
 }
 
 type waWebhookStatus struct {
-	ID          string `json:"id"`           // provider message id (wamid.*)
-	Status      string `json:"status"`       // sent | delivered | read | failed
+	ID          string `json:"id"`     // provider message id (wamid.*)
+	Status      string `json:"status"` // sent | delivered | read | failed
 	Timestamp   string `json:"timestamp"`
 	RecipientID string `json:"recipient_id"` // E.164 without '+'
 	Errors      []struct {

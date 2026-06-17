@@ -215,14 +215,14 @@ func (r *customerRepo) AssociateBookingCustomer(ctx context.Context, bookingID i
 	// Resolve the booking's owner + identity. Only player/manual rows carry a
 	// customer identity; blocks/academy are ignored.
 	var (
-		ownerID            int64
-		source             string
-		playerID           *int64
-		userPhone          *string
-		userName           *string
-		guestName          string
-		guestPhone         string
-		alreadyLinked      bool
+		ownerID       int64
+		source        string
+		playerID      *int64
+		userPhone     *string
+		userName      *string
+		guestName     string
+		guestPhone    string
+		alreadyLinked bool
 	)
 	err := r.db.QueryRow(ctx, `
 		SELECT p.owner_id, b.source, b.player_id, u.phone, u.full_name,

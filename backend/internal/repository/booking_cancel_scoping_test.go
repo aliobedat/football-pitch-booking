@@ -24,14 +24,14 @@ import (
 )
 
 type cancelScopeEnv struct {
-	pool             *pgxpool.Pool
-	repo             BookingRepository
-	ownerAID         int64
-	ownerBID         int64
-	adminID          int64
-	playerID         int64
-	pitchA           int64 // owned by ownerA
-	pitchB           int64 // owned by ownerB
+	pool     *pgxpool.Pool
+	repo     BookingRepository
+	ownerAID int64
+	ownerBID int64
+	adminID  int64
+	playerID int64
+	pitchA   int64 // owned by ownerA
+	pitchB   int64 // owned by ownerB
 }
 
 func newCancelScopeEnv(t *testing.T) *cancelScopeEnv {

@@ -4,11 +4,11 @@ import "testing"
 
 func TestParseCoordinates(t *testing.T) {
 	cases := []struct {
-		name        string
-		url         string
-		wantOK      bool
-		wantLat     float64
-		wantLng     float64
+		name    string
+		url     string
+		wantOK  bool
+		wantLat float64
+		wantLng float64
 	}{
 		{
 			name:    "!3d!4d canonical pin",

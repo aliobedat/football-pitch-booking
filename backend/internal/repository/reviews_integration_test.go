@@ -78,8 +78,12 @@ func TestReviews_EligibilityAndSecurity(t *testing.T) {
 	}
 
 	now := time.Now()
-	past := func(h int) (time.Time, time.Time) { return now.Add(time.Duration(-h-1) * time.Hour), now.Add(time.Duration(-h) * time.Hour) }
-	future := func(h int) (time.Time, time.Time) { return now.Add(time.Duration(h) * time.Hour), now.Add(time.Duration(h+1) * time.Hour) }
+	past := func(h int) (time.Time, time.Time) {
+		return now.Add(time.Duration(-h-1) * time.Hour), now.Add(time.Duration(-h) * time.Hour)
+	}
+	future := func(h int) (time.Time, time.Time) {
+		return now.Add(time.Duration(h) * time.Hour), now.Add(time.Duration(h+1) * time.Hour)
+	}
 
 	// ── Case 1: no booking history → not eligible ──────────────────────────────
 	t.Run("NoHistory_NotEligible", func(t *testing.T) {

@@ -42,13 +42,13 @@ type CategorySubtotal struct {
 // Collected (REUSED from WO-F1's paid_cash aggregation) − Expenses = Net. Net may
 // be negative. All figures are owner-scoped and Amman-bucketed.
 type NetSummary struct {
-	From            string             `json:"from"`
-	To              string             `json:"to"`
-	Collected       float64            `json:"collected"`
-	Expenses        float64            `json:"expenses"`
-	Net             float64            `json:"net"`
-	ByCategory      []CategorySubtotal `json:"by_category"`
-	Series          []NetBucket        `json:"series"`
+	From       string             `json:"from"`
+	To         string             `json:"to"`
+	Collected  float64            `json:"collected"`
+	Expenses   float64            `json:"expenses"`
+	Net        float64            `json:"net"`
+	ByCategory []CategorySubtotal `json:"by_category"`
+	Series     []NetBucket        `json:"series"`
 }
 
 // NetBucket is one period bucket on the Net-over-time series: the F1 collected for

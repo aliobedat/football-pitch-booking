@@ -31,9 +31,9 @@ const (
 
 // الهيكل الأساسي للحجز. PlayerID يطابق عمود player_id في قاعدة البيانات.
 type Booking struct {
-	ID         int64         `json:"id"`
-	PitchID    int64         `json:"pitch_id"`
-	PitchName  string        `json:"pitch_name,omitempty"`
+	ID        int64  `json:"id"`
+	PitchID   int64  `json:"pitch_id"`
+	PitchName string `json:"pitch_name,omitempty"`
 	// PlayerID is a pointer because non-player rows (block, academy) have a NULL
 	// player_id (DB CHECK: source='player' ⟺ player_id IS NOT NULL). For player
 	// bookings it is always set.

@@ -33,7 +33,10 @@ func (f *fakeExpenseRepo) Update(_ context.Context, a auth.Actor, id int64, in r
 	f.lastActor = a
 	return &models.Expense{ID: id, Category: in.Category, Amount: in.Amount}, nil
 }
-func (f *fakeExpenseRepo) SoftDelete(_ context.Context, a auth.Actor, _ int64) error { f.lastActor = a; return nil }
+func (f *fakeExpenseRepo) SoftDelete(_ context.Context, a auth.Actor, _ int64) error {
+	f.lastActor = a
+	return nil
+}
 func (f *fakeExpenseRepo) List(_ context.Context, a auth.Actor, _, _ time.Time, _ string) ([]models.Expense, error) {
 	f.lastActor = a
 	return []models.Expense{}, nil

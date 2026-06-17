@@ -23,10 +23,10 @@ import (
 // CalendarEvent is one occupancy block on a pitch row. Times are absolute UTC; the
 // client converts to Amman for positioning. Title resolves player/guest/block.
 type CalendarEvent struct {
-	ID         int64     `json:"id"`
-	PitchID    int64     `json:"pitch_id"`
-	StartTime  time.Time `json:"start_time"`
-	EndTime    time.Time `json:"end_time"`
+	ID            int64     `json:"id"`
+	PitchID       int64     `json:"pitch_id"`
+	StartTime     time.Time `json:"start_time"`
+	EndTime       time.Time `json:"end_time"`
 	Source        string    `json:"source"`         // player | manual | block | academy
 	Status        string    `json:"status"`         // confirmed | pending
 	Attendance    string    `json:"attendance"`     // pending | checked_in | no_show

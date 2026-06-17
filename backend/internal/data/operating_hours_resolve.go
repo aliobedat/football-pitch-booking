@@ -84,8 +84,8 @@ func ResolveWindowsForDate(windows []OperatingWindow, ammanDate time.Time) ([]Co
 	dayStart := time.Date(y, m, d, 0, 0, 0, 0, loc) // local midnight of D
 	prevStart := dayStart.AddDate(0, 0, -1)         // local midnight of D−1 (real date)
 
-	targetWeekday := int(dayStart.Weekday())  // 0=Sun … 6=Sat
-	prevWeekday := int(prevStart.Weekday())   // == (targetWeekday+6)%7, via the real date
+	targetWeekday := int(dayStart.Weekday()) // 0=Sun … 6=Sat
+	prevWeekday := int(prevStart.Weekday())  // == (targetWeekday+6)%7, via the real date
 
 	out := make([]ConcreteInterval, 0, len(windows))
 	for _, w := range windows {
