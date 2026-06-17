@@ -116,11 +116,9 @@ func (h *BookingHandler) CreateBooking(c *gin.Context) {
 	// one. Absent header → legacy non-idempotent path (unchanged behaviour).
 	if key := strings.TrimSpace(c.GetHeader(idempotencyHeader)); key != "" {
 		req.Idempotency = &models.IdempotencyParams{
-			Key:         key,
-			Endpoint:    bookingEndpoint,
-		
-		
-		
+			Key:      key,
+			Endpoint: bookingEndpoint,
+
 			Fingerprint: bookingFingerprint(req),
 		}
 	}
@@ -532,6 +530,184 @@ func (h *BookingHandler) CreateManualBooking(c *gin.Context) {
 	if replayed {
 		status = http.StatusOK
 		msg = "تم استرجاع الحجز الحالي"
+	}
+	c.JSON(status, gin.H{"message": msg, "data": bookings, "count": len(bookings)})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/v1/pitches/:id/bookings/bulk-academy                        ← NEW
+// ─────────────────────────────────────────────────────────────────────────────
+
+// CreateAcademyBookings generates an academy contract as DISCRETE bookings
+// (source='academy'): the owner submits recurrence RULES (days_of_week × date-range
+// at a fixed time window) and the backend materialises one standard booking row per
+// session — individually cancellable/payable, picked up by the Visual Calendar and
+// Money Engine with no special handling. All-or-nothing: any overlap rolls the whole
+// series back and returns 409 with the full list of conflicting dates.
+func (h *BookingHandler) CreateAcademyBookings(c *gin.Context) {
+	pitchID, ok := parseIDParam(c, "id")
+	if !ok {
+		return
+	}
+
+	var req struct {
+		AcademyName       string `json:"academy_name"  binding:"required"`
+		DaysOfWeek        []int  `json:"days_of_week"  binding:"required"`
+		StartTime         string `json:"start_time"    binding:"required"` // "HH:MM" Amman
+		EndTime           string `json:"end_time"      binding:"required"` // "HH:MM" Amman
+		StartDate         string `json:"start_date"    binding:"required"` // "2006-01-02" Amman
+		EndDate           string `json:"end_date"      binding:"required"`
+		RecurrenceGroupID string `json:"recurrence_group_id" binding:"required"`
+		ForceBypassHours  bool   `json:"force_bypass_hours"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+
+	req.AcademyName = strings.TrimSpace(req.AcademyName)
+	if req.AcademyName == "" {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "invalid_academy_name", "message": "اسم الأكاديمية مطلوب",
+		})
+		return
+	}
+
+	// days_of_week: 1–7 distinct values, each a PG DOW (0=Sun … 6=Sat).
+	seen := map[int]bool{}
+	days := make([]int, 0, len(req.DaysOfWeek))
+	for _, d := range req.DaysOfWeek {
+		if d < 0 || d > 6 {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{
+				"error": "invalid_days", "message": "أيام الأسبوع يجب أن تكون بين 0 و 6",
+			})
+			return
+		}
+		if !seen[d] {
+			seen[d] = true
+			days = append(days, d)
+		}
+	}
+	if len(days) == 0 {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "invalid_days", "message": "اختر يوماً واحداً على الأقل",
+		})
+		return
+	}
+
+	// Times: "HH:MM" wall-clock. Validate format and compute the session duration so
+	// we can reject a sub-1-hour slot up front (the DB enforces chk_min_duration too).
+	st, errS := time.Parse("15:04", req.StartTime)
+	et, errE := time.Parse("15:04", req.EndTime)
+	if errS != nil || errE != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "invalid_time", "message": "صيغة الوقت غير صحيحة (HH:MM)",
+		})
+		return
+	}
+	durMin := et.Hour()*60 + et.Minute() - (st.Hour()*60 + st.Minute())
+	if durMin <= 0 {
+		durMin += 24 * 60 // cross-midnight session
+	}
+	if durMin < 60 {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "invalid_duration", "message": "مدة الجلسة يجب أن تكون ساعة واحدة على الأقل",
+		})
+		return
+	}
+
+	// Dates: Amman calendar dates, end on/after start.
+	loc := timeutil.Amman()
+	startDate, errSD := time.ParseInLocation("2006-01-02", req.StartDate, loc)
+	endDate, errED := time.ParseInLocation("2006-01-02", req.EndDate, loc)
+	if errSD != nil || errED != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "invalid_date", "message": "صيغة التاريخ غير صحيحة (YYYY-MM-DD)",
+		})
+		return
+	}
+	if endDate.Before(startDate) {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "invalid_date_range", "message": "تاريخ النهاية يجب أن يكون بعد تاريخ البداية",
+		})
+		return
+	}
+
+	// recurrence_group_id is the idempotency key + bulk-cancel handle; must be a UUID.
+	req.RecurrenceGroupID = strings.TrimSpace(req.RecurrenceGroupID)
+	if _, err := uuid.Parse(req.RecurrenceGroupID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_group_id", "message": "معرّف التكرار غير صالح",
+		})
+		return
+	}
+
+	bookings, replayed, err := h.repo.CreateAcademyBookings(c.Request.Context(), repository.AcademyBookingParams{
+		PitchID:           int64(pitchID),
+		Actor:             middleware.GetActor(c),
+		AcademyName:       req.AcademyName,
+		DaysOfWeek:        days,
+		StartClock:        req.StartTime,
+		EndClock:          req.EndTime,
+		StartDate:         startDate,
+		EndDate:           endDate,
+		BypassHours:       req.ForceBypassHours,
+		RecurrenceGroupID: req.RecurrenceGroupID,
+	})
+	if err != nil {
+		var ac *repository.AcademyConflictError
+		switch {
+		case errors.As(err, &ac):
+			// If EVERY blocker is an out-of-hours slot, surface the soft-override code
+			// (422) so the UI can offer "create anyway". Any real overlap → 409.
+			allHours := true
+			for _, cf := range ac.Conflicts {
+				if cf.Reason != "outside_hours" {
+					allHours = false
+					break
+				}
+			}
+			if allHours {
+				c.JSON(http.StatusUnprocessableEntity, gin.H{
+					"error":     "outside_operating_hours",
+					"message":   "بعض الجلسات خارج ساعات عمل الملعب",
+					"conflicts": ac.Conflicts,
+				})
+			} else {
+				c.JSON(http.StatusConflict, gin.H{
+					"error":     "slot_conflict",
+					"message":   "بعض الجلسات تتعارض مع حجوزات قائمة — عدّل التواريخ أو الوقت",
+					"conflicts": ac.Conflicts,
+				})
+			}
+		case errors.Is(err, pgx.ErrNoRows):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "not_found", "message": "الملعب غير موجود أو لا تملك صلاحية تعديله",
+			})
+		case err.Error() == "no_occurrences":
+			c.JSON(http.StatusUnprocessableEntity, gin.H{
+				"error": "no_occurrences", "message": "لا توجد جلسات ضمن النطاق المحدد للأيام المختارة",
+			})
+		case err.Error() == "too_many_occurrences":
+			c.JSON(http.StatusUnprocessableEntity, gin.H{
+				"error": "too_many_occurrences", "message": "عدد الجلسات كبير جداً — قلّص النطاق الزمني",
+			})
+		default:
+			h.handleBookingError(c, err)
+		}
+		return
+	}
+
+	// Go-forward CRM linkage per session (best-effort), like the walk-in path.
+	for _, b := range bookings {
+		h.associateCustomer(c, b.ID)
+	}
+
+	status := http.StatusCreated
+	msg := "تم إنشاء حجوزات الأكاديمية"
+	if replayed {
+		status = http.StatusOK
+		msg = "تم استرجاع حجوزات الأكاديمية الحالية"
 	}
 	c.JSON(status, gin.H{"message": msg, "data": bookings, "count": len(bookings)})
 }

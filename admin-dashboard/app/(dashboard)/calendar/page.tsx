@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import Link from 'next/link';
 import {
-  ChevronRight, ChevronLeft, CalendarDays, X, Loader2, Plus,
+  ChevronRight, ChevronLeft, CalendarDays, X, Loader2, Plus, GraduationCap,
 } from 'lucide-react';
 import api from '@/lib/api';
 import { formatTime, formatDate, formatNumber } from '@/lib/format';
@@ -61,6 +61,7 @@ export default function CalendarPage() {
 
   const [detail, setDetail]   = useState<CalEvent | null>(null);
   const [create, setCreate]   = useState<{ pitch: PitchRow; startMs: number } | null>(null);
+  const [academy, setAcademy] = useState(false);
 
   const fetchDay = useCallback(() => {
     setLoading(true);
@@ -94,9 +95,17 @@ export default function CalendarPage() {
     <div className="flex flex-col gap-5">
       {/* Header / date nav */}
       <div className="flex items-center justify-between gap-4 flex-wrap">
-        <h1 className="text-[20px] font-bold tracking-tight flex items-center gap-2">
-          <CalendarDays size={20} className="text-emerald-400" aria-hidden /> التقويم
-        </h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-[20px] font-bold tracking-tight flex items-center gap-2">
+            <CalendarDays size={20} className="text-emerald-400" aria-hidden /> التقويم
+          </h1>
+          <button
+            onClick={() => setAcademy(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold bg-violet-500/[0.12] text-violet-300 border border-violet-500/25 hover:bg-violet-500/[0.18] transition-all"
+          >
+            <GraduationCap size={14} aria-hidden /> حجز أكاديمية
+          </button>
+        </div>
         <div className="flex items-center gap-2">
           {/* RTL chrome: chevron-right = previous (newer to the right feels wrong; we
               map right→earlier day to match the RTL reading flow of controls). */}
@@ -193,6 +202,14 @@ export default function CalendarPage() {
           startMs={create.startMs}
           onClose={() => setCreate(null)}
           onCreated={() => { setCreate(null); fetchDay(); }}
+        />
+      )}
+      {academy && (
+        <AcademyModal
+          pitches={day?.pitches ?? []}
+          defaultDate={date}
+          onClose={() => setAcademy(false)}
+          onCreated={() => { setAcademy(false); fetchDay(); }}
         />
       )}
 
@@ -473,6 +490,177 @@ function CreateManualModal({
           outline: none;
         }
         .modal-input:focus { border-color: rgba(16,185,129,0.4); }
+      `}</style>
+    </ModalShell>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Academy Booking Generator — Discrete Bulk Insert (source='academy')
+// ─────────────────────────────────────────────────────────────────────────────
+// PG DOW (0=Sun … 6=Sat), matching the backend's days_of_week + operating_hours.
+const WEEKDAYS = [
+  { dow: 6, label: 'السبت' },
+  { dow: 0, label: 'الأحد' },
+  { dow: 1, label: 'الإثنين' },
+  { dow: 2, label: 'الثلاثاء' },
+  { dow: 3, label: 'الأربعاء' },
+  { dow: 4, label: 'الخميس' },
+  { dow: 5, label: 'الجمعة' },
+];
+
+interface AcademyConflict { date: string; reason: string }
+
+function AcademyModal({
+  pitches, defaultDate, onClose, onCreated,
+}: {
+  pitches: PitchRow[]; defaultDate: string; onClose: () => void; onCreated: () => void;
+}) {
+  const [pitchId, setPitchId] = useState<number | ''>(pitches[0]?.pitch_id ?? '');
+  const [name, setName]       = useState('');
+  const [days, setDays]       = useState<number[]>([]);
+  const [startTime, setStart] = useState('17:00');
+  const [endTime, setEnd]     = useState('19:00');
+  const [startDate, setSD]    = useState(defaultDate);
+  const [endDate, setED]      = useState(defaultDate);
+  const [saving, setSaving]   = useState(false);
+  const [error, setError]     = useState<string | null>(null);
+  const [conflicts, setConflicts] = useState<AcademyConflict[]>([]);
+  const [bypassPrompt, setBypass] = useState(false);
+  // One recurrence_group_id per modal instance: the idempotency key (a retry after a
+  // network blip replays, never duplicates) AND the bulk-cancel handle for the series.
+  const groupId = useRef<string>(crypto.randomUUID());
+
+  const toggleDay = (dow: number) =>
+    setDays(d => (d.includes(dow) ? d.filter(x => x !== dow) : [...d, dow]));
+
+  const submit = useCallback(async (forceBypassHours: boolean) => {
+    if (pitchId === '') { setError('اختر الملعب'); return; }
+    if (!name.trim())   { setError('اسم الأكاديمية مطلوب'); return; }
+    if (days.length === 0) { setError('اختر يوماً واحداً على الأقل'); return; }
+    setSaving(true);
+    setError(null);
+    setConflicts([]);
+    try {
+      const res = await api.post(`/pitches/${pitchId}/bookings/bulk-academy`, {
+        academy_name: name.trim(),
+        days_of_week: days,
+        start_time: startTime,
+        end_time: endTime,
+        start_date: startDate,
+        end_date: endDate,
+        recurrence_group_id: groupId.current,
+        force_bypass_hours: forceBypassHours,
+      });
+      onCreated();
+      return res;
+    } catch (err: any) {
+      const data = err?.response?.data;
+      const code = data?.error;
+      if (code === 'slot_conflict') {
+        setConflicts((data.conflicts ?? []) as AcademyConflict[]);
+        setError('بعض الجلسات تتعارض مع حجوزات قائمة. عدّل التواريخ أو الوقت ثم أعد المحاولة.');
+      } else if (code === 'outside_operating_hours') {
+        setConflicts((data.conflicts ?? []) as AcademyConflict[]);
+        setBypass(true);
+        setError('بعض الجلسات خارج ساعات عمل الملعب. إنشاؤها رغم ذلك؟');
+      } else {
+        setError(data?.message ?? 'تعذّر إنشاء حجوزات الأكاديمية.');
+      }
+    } finally {
+      setSaving(false);
+    }
+  }, [pitchId, name, days, startTime, endTime, startDate, endDate, onCreated]);
+
+  return (
+    <ModalShell onClose={onClose} title="حجز أكاديمية متكرر">
+      <div className="flex flex-col gap-3.5">
+        <p className="text-[11.5px] text-white/40 leading-relaxed">
+          تُنشأ جلسات منفصلة (واحدة لكل موعد) — كل جلسة قابلة للإلغاء والدفع بشكل مستقل. إذا تعارضت أي جلسة مع حجز قائم، لن يُنشأ أي شيء.
+        </p>
+
+        <Field label="الملعب *">
+          <select value={pitchId} onChange={e => setPitchId(Number(e.target.value))} className="modal-input">
+            {pitches.length === 0 && <option value="" className="bg-[#0f1110]">لا توجد ملاعب</option>}
+            {pitches.map(p => <option key={p.pitch_id} value={p.pitch_id} className="bg-[#0f1110]">{p.pitch_name}</option>)}
+          </select>
+        </Field>
+
+        <Field label="اسم الأكاديمية *">
+          <input value={name} onChange={e => setName(e.target.value)} autoFocus
+            className="modal-input" placeholder="مثال: أكاديمية النسور" />
+        </Field>
+
+        <Field label="أيام التكرار *">
+          <div className="flex flex-wrap gap-1.5">
+            {WEEKDAYS.map(d => {
+              const on = days.includes(d.dow);
+              return (
+                <button key={d.dow} type="button" onClick={() => toggleDay(d.dow)}
+                  className={`px-2.5 py-1.5 rounded-lg text-[11.5px] font-semibold border transition-all ${
+                    on ? 'bg-violet-500/20 text-violet-200 border-violet-500/40'
+                       : 'bg-white/[0.03] text-white/50 border-white/[0.08] hover:text-white/80'
+                  }`}>
+                  {d.label}
+                </button>
+              );
+            })}
+          </div>
+        </Field>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="من الساعة *">
+            <input type="time" value={startTime} onChange={e => setStart(e.target.value)} dir="ltr" className="modal-input font-mono" />
+          </Field>
+          <Field label="إلى الساعة *">
+            <input type="time" value={endTime} onChange={e => setEnd(e.target.value)} dir="ltr" className="modal-input font-mono" />
+          </Field>
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="تاريخ البداية *">
+            <input type="date" value={startDate} onChange={e => setSD(e.target.value)} dir="ltr" className="modal-input font-mono" />
+          </Field>
+          <Field label="تاريخ النهاية *">
+            <input type="date" value={endDate} onChange={e => setED(e.target.value)} dir="ltr" className="modal-input font-mono" />
+          </Field>
+        </div>
+
+        {error && <p className="text-[12px] text-amber-400">{error}</p>}
+
+        {conflicts.length > 0 && (
+          <div className="rounded-xl border border-red-500/15 bg-red-500/[0.06] p-3 max-h-32 overflow-y-auto">
+            <p className="text-[11px] font-semibold text-red-300 mb-1.5">التواريخ المتعارضة ({conflicts.length}):</p>
+            <div className="flex flex-wrap gap-1.5">
+              {conflicts.map((c, i) => (
+                <span key={i} className="px-2 py-0.5 rounded bg-red-500/10 text-[11px] font-mono text-red-200" dir="ltr">{c.date}</span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="flex items-center justify-end gap-3 mt-1">
+          <button onClick={onClose} disabled={saving} className="px-4 py-2 rounded-xl text-[12px] font-semibold text-white/50 hover:text-white/80 border border-white/[0.08] disabled:opacity-50 transition-all">إلغاء</button>
+          {bypassPrompt ? (
+            <button onClick={() => submit(true)} disabled={saving}
+              className="inline-flex items-center gap-2 px-5 py-2 rounded-xl text-[12px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30 hover:bg-amber-500/20 disabled:opacity-50 transition-all">
+              {saving && <Loader2 size={13} className="animate-spin" aria-hidden />} إنشاء رغم خارج الدوام
+            </button>
+          ) : (
+            <button onClick={() => submit(false)} disabled={saving}
+              className="inline-flex items-center gap-2 px-5 py-2 rounded-xl text-[12px] font-bold bg-violet-500/[0.14] text-violet-300 border border-violet-500/30 hover:bg-violet-500/20 disabled:opacity-50 transition-all">
+              {saving ? <Loader2 size={13} className="animate-spin" aria-hidden /> : <GraduationCap size={13} aria-hidden />} إنشاء الجلسات
+            </button>
+          )}
+        </div>
+      </div>
+      <style jsx>{`
+        .modal-input {
+          width: 100%; background: #0f1110; border: 1px solid rgba(255,255,255,0.09);
+          border-radius: 12px; padding: 10px 12px; font-size: 13px; color: rgba(255,255,255,0.85);
+          outline: none;
+        }
+        .modal-input:focus { border-color: rgba(139,92,246,0.4); }
       `}</style>
     </ModalShell>
   );

@@ -147,6 +147,16 @@ type BookingRepository interface {
 	// missing/foreign pitch yields pgx.ErrNoRows.
 	CreateManualBooking(ctx context.Context, params ManualBookingParams) (bookings []models.Booking, replayed bool, err error)
 
+	// CreateAcademyBookings expands an academy contract's recurrence rules
+	// (days_of_week × [start_date,end_date] at start_time–end_time) into DISCRETE
+	// occurrences and inserts them (source='academy', player_id=NULL,
+	// guest_name=academy_name, priced) all-or-nothing in one transaction. It HONOURS
+	// the operating-hours gate unless params.BypassHours, replays an existing
+	// RecurrenceGroupID verbatim (replayed=true), and on any blocking occurrence
+	// returns *AcademyConflictError listing EVERY conflicting date (zero rows written).
+	// A missing/foreign pitch yields pgx.ErrNoRows.
+	CreateAcademyBookings(ctx context.Context, params AcademyBookingParams) (bookings []models.Booking, replayed bool, err error)
+
 	// CancelFutureGroup bulk-cancels every NON-PAST (start_time > now) child of a
 	// recurrence group on the pitch, auditing each, in one set-based transaction.
 	// Owner/admin scoped via the pitch ownership predicate. Returns how many rows
@@ -175,11 +185,11 @@ type CreateBlockParams struct {
 // requested block, so the dashboard can tell the owner exactly what's in the way.
 // PlayerName is nil for a block-vs-block conflict (a block has no player).
 type BlockConflict struct {
-	BookingID  int64               `json:"booking_id"`
+	BookingID  int64                `json:"booking_id"`
 	Source     models.BookingSource `json:"source"`
-	StartTime  time.Time           `json:"start"`
-	EndTime    time.Time           `json:"end"`
-	PlayerName *string             `json:"player_name"`
+	StartTime  time.Time            `json:"start"`
+	EndTime    time.Time            `json:"end"`
+	PlayerName *string              `json:"player_name"`
 }
 
 // BlockConflictError is returned by CreateBlock when the requested range overlaps
@@ -506,7 +516,9 @@ func (r *bookingRepo) CreateManualBooking(ctx context.Context, p ManualBookingPa
 	return created, false, nil
 }
 
-// manualOccInsert is the per-occurrence input to the shared manual insert builder.
+// manualOccInsert is the per-occurrence input to the shared named-source insert
+// builder (manual walk-ins AND academy sessions — both are null-player, named-guest,
+// priced rows).
 type manualOccInsert struct {
 	pitchID      int64
 	start, end   time.Time
@@ -515,26 +527,46 @@ type manualOccInsert struct {
 	guestPhone   *string
 	groupID      *string // nil → one-off (NULL recurrence_group_id)
 	actor        auth.Actor
+
+	// source is the booking discriminator written to the row — models.SourceManual
+	// for walk-ins, models.SourceAcademy for academy sessions. reason is the audit
+	// text recorded on the NULL→confirmed status_transition. Both default to the
+	// manual path when zero (see insertManualOccurrenceTx) so existing callers are
+	// unaffected.
+	source models.BookingSource
+	reason string
 }
 
-// insertManualOccurrenceTx inserts ONE manual booking row + its creation audit,
-// inside the caller's tx. This is the single manual insert builder — the price
-// (rounded pitch-rate × duration), source, status, and guest/group columns are all
-// set here so the recurring loop and any future caller share one revenue-correct
-// path (no thinner reimplementation that could drop offline revenue).
+// insertManualOccurrenceTx inserts ONE null-player, named-guest booking row (manual
+// or academy) + its creation audit, inside the caller's tx. This is the single
+// offline insert builder — the price (rounded pitch-rate × duration), status, and
+// guest/group columns are all set here so the recurring loop, the academy generator,
+// and any future caller share one revenue-correct path (no thinner reimplementation
+// that could drop offline revenue).
 func insertManualOccurrenceTx(ctx context.Context, tx pgx.Tx, o manualOccInsert) (*models.Booking, error) {
 	durationHours := o.end.Sub(o.start).Hours()
 	totalPrice := math.Round(durationHours*o.pricePerHour*1000) / 1000
 
+	// Default to the manual path when the caller did not specify (keeps the
+	// pre-academy call sites byte-compatible).
+	source := o.source
+	if source == "" {
+		source = models.SourceManual
+	}
+	reason := o.reason
+	if reason == "" {
+		reason = reasonManualCreated
+	}
+
 	var b models.Booking
 	err := tx.QueryRow(ctx, `
 		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status, source, guest_name, guest_phone, recurrence_group_id)
-		VALUES ($1, NULL, tstzrange($2::timestamptz, $3::timestamptz, '[)'), $4, 'confirmed', 'manual', $5, $6, $7)
+		VALUES ($1, NULL, tstzrange($2::timestamptz, $3::timestamptz, '[)'), $4, 'confirmed', $5, $6, $7, $8)
 		RETURNING
 			id, pitch_id, player_id,
 			lower(booking_range) AS start_time, upper(booking_range) AS end_time,
 			status, source, total_price, created_at, guest_name, guest_phone, recurrence_group_id
-	`, o.pitchID, o.start.UTC(), o.end.UTC(), totalPrice, o.guestName, o.guestPhone, o.groupID).Scan(
+	`, o.pitchID, o.start.UTC(), o.end.UTC(), totalPrice, source, o.guestName, o.guestPhone, o.groupID).Scan(
 		&b.ID, &b.PitchID, &b.PlayerID,
 		&b.StartTime, &b.EndTime,
 		&b.Status, &b.Source, &b.TotalPrice, &b.CreatedAt,
@@ -553,7 +585,7 @@ func insertManualOccurrenceTx(ctx context.Context, tx pgx.Tx, o manualOccInsert)
 		INSERT INTO status_transitions
 			(booking_id, from_status, to_status, actor_id, actor_role, reason)
 		VALUES ($1, NULL, 'confirmed', $2, $3, $4)
-	`, b.ID, o.actor.UserID, o.actor.Role, reasonManualCreated); err != nil {
+	`, b.ID, o.actor.UserID, o.actor.Role, reason); err != nil {
 		return nil, fmt.Errorf("insertManualOccurrence: record transition: %w", err)
 	}
 	return &b, nil
@@ -591,6 +623,242 @@ func loadGroupRowsTx(ctx context.Context, tx pgx.Tx, groupID string, pitchID int
 		out = append(out, b)
 	}
 	return out, rows.Err()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Academy Booking Generator (Discrete Bulk Insert)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// reasonAcademyCreated is the audit reason for an academy session's creation.
+const reasonAcademyCreated = "owner/admin generated academy session"
+
+// maxAcademyOccurrences caps a single bulk-academy request. A Fri+Sat contract over
+// a year is ~104 rows; 366 is a generous ceiling that still bounds the single
+// transaction (and the lock hold time) against an abusive payload.
+const maxAcademyOccurrences = 366
+
+// AcademyBookingParams drives the bulk academy generator. The frontend collects the
+// recurrence RULES; the backend expands them into DISCRETE occurrences. start_time/
+// end_time are Asia/Amman wall-clock "HH:MM"; startDate/endDate are Amman calendar
+// dates (inclusive). daysOfWeek uses PG DOW (0=Sun … 6=Sat), matching operating_hours.
+type AcademyBookingParams struct {
+	PitchID     int64
+	Actor       auth.Actor
+	AcademyName string // → guest_name
+	DaysOfWeek  []int  // PG DOW 0..6
+	StartClock  string // "HH:MM" Amman wall-clock
+	EndClock    string // "HH:MM" Amman wall-clock (cross-midnight when ≤ StartClock)
+	StartDate   time.Time
+	EndDate     time.Time
+	BypassHours bool
+
+	// RecurrenceGroupID is the client-supplied UUID tying every generated session
+	// together: BOTH the idempotency key (resubmit replays stored rows verbatim under
+	// the lock) and the bulk-cancel handle (DELETE …/bookings/group/:groupId). Required.
+	RecurrenceGroupID string
+}
+
+// AcademyConflict names one occurrence that cannot be placed, so the 409 payload can
+// list EVERY blocking date at once (the generator scans all occurrences before it
+// writes anything, so the owner sees the full set to adjust — not one-at-a-time).
+type AcademyConflict struct {
+	Date      string          `json:"date"` // Amman calendar date "2006-01-02"
+	OccStart  time.Time       `json:"start"`
+	OccEnd    time.Time       `json:"end"`
+	Reason    string          `json:"reason"` // "conflict" | "outside_hours"
+	Conflicts []BlockConflict `json:"conflicts,omitempty"`
+}
+
+// AcademyConflictError is returned (rolling back the whole series) when one or more
+// generated sessions cannot be placed. Empty Conflicts is never returned with this
+// type — a clean series commits.
+type AcademyConflictError struct {
+	Conflicts []AcademyConflict
+}
+
+func (e *AcademyConflictError) Error() string {
+	return fmt.Sprintf("academy generator: %d occurrence(s) blocked", len(e.Conflicts))
+}
+
+// parseAmmanClock parses an "HH:MM" wall-clock string. Returns hours, minutes.
+func parseAmmanClock(s string) (int, int, error) {
+	t, err := time.Parse("15:04", s)
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid time %q (want HH:MM): %w", s, err)
+	}
+	return t.Hour(), t.Minute(), nil
+}
+
+// expandAcademyOccurrences materialises every concrete [start,end) instant pair for
+// the contract: each calendar date in [StartDate, EndDate] whose Amman weekday is in
+// DaysOfWeek, anchored at StartClock→EndClock. Cross-midnight (EndClock ≤ StartClock)
+// rolls the end to the next day, mirroring operating_hours' real-date resolution.
+func expandAcademyOccurrences(p AcademyBookingParams) ([][2]time.Time, error) {
+	sh, sm, err := parseAmmanClock(p.StartClock)
+	if err != nil {
+		return nil, err
+	}
+	eh, em, err := parseAmmanClock(p.EndClock)
+	if err != nil {
+		return nil, err
+	}
+	dow := make(map[int]bool, len(p.DaysOfWeek))
+	for _, d := range p.DaysOfWeek {
+		dow[d] = true
+	}
+	loc := timeutil.Amman()
+	// Normalise the range bounds to Amman calendar dates (drop any time component).
+	cur := time.Date(p.StartDate.Year(), p.StartDate.Month(), p.StartDate.Day(), 0, 0, 0, 0, loc)
+	last := time.Date(p.EndDate.Year(), p.EndDate.Month(), p.EndDate.Day(), 0, 0, 0, 0, loc)
+
+	var out [][2]time.Time
+	for !cur.After(last) {
+		if dow[int(cur.Weekday())] {
+			start := time.Date(cur.Year(), cur.Month(), cur.Day(), sh, sm, 0, 0, loc)
+			endDay := cur
+			if eh < sh || (eh == sh && em <= sm) {
+				endDay = cur.AddDate(0, 0, 1) // cross-midnight
+			}
+			end := time.Date(endDay.Year(), endDay.Month(), endDay.Day(), eh, em, 0, 0, loc)
+			out = append(out, [2]time.Time{start, end})
+			if len(out) > maxAcademyOccurrences {
+				return nil, fmt.Errorf("too_many_occurrences")
+			}
+		}
+		cur = cur.AddDate(0, 0, 1)
+	}
+	return out, nil
+}
+
+// CreateAcademyBookings is the Discrete Bulk Insert engine for academy contracts. It
+// expands the recurrence rules into discrete occurrences and inserts them
+// (source='academy', player_id=NULL, guest_name=academy_name, priced) ALL-OR-NOTHING
+// in ONE transaction, mirroring CreateManualBooking's safety guarantees:
+//   - Acquire the pitch FOR UPDATE lock (owner-scoped; admin unscoped).
+//   - IDEMPOTENCY: under the lock, a resubmit of an already-materialised group
+//     replays the stored rows verbatim (replayed=true) — the loop never runs.
+//   - Otherwise SCAN every occurrence (operating-hours gate unless BypassHours, plus
+//     the race-free overlap pre-check). UNLIKE the manual path it collects ALL
+//     blocking occurrences (not just the first) so the owner gets the complete list,
+//     then returns *AcademyConflictError and rolls the whole tx back (zero rows).
+//   - On a clean series, insert every occurrence via the shared offline insert
+//     builder (identical price/duration/status path as walk-ins) tagged with the
+//     group id + an audited NULL→confirmed transition, then commit.
+//
+// Returns the created (or replayed) bookings in chronological order.
+func (r *bookingRepo) CreateAcademyBookings(ctx context.Context, p AcademyBookingParams) ([]models.Booking, bool, error) {
+	occurrences, err := expandAcademyOccurrences(p)
+	if err != nil {
+		return nil, false, err
+	}
+	if len(occurrences) == 0 {
+		return nil, false, fmt.Errorf("no_occurrences") // no selected weekday falls in range
+	}
+
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, false, fmt.Errorf("CreateAcademyBookings: begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	// Resolve + LOCK the pitch with the ownership predicate (admin unscoped). The lock
+	// serialises against concurrent bookings AND makes the idempotency replay race-free.
+	var pricePerHour float64
+	if p.Actor.IsAdmin() {
+		err = tx.QueryRow(ctx,
+			`SELECT price_per_hour FROM pitches WHERE id = $1 AND deleted_at IS NULL FOR UPDATE`,
+			p.PitchID,
+		).Scan(&pricePerHour)
+	} else {
+		err = tx.QueryRow(ctx,
+			`SELECT price_per_hour FROM pitches WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL FOR UPDATE`,
+			p.PitchID, p.Actor.UserID,
+		).Scan(&pricePerHour)
+	}
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, false, pgx.ErrNoRows // → 404 (not found OR not owned)
+		}
+		return nil, false, fmt.Errorf("CreateAcademyBookings: resolve pitch: %w", err)
+	}
+
+	// IDEMPOTENCY REPLAY (under the held lock): a resubmit of an already-materialised
+	// group returns the stored rows verbatim — no scan, no insert, no 409.
+	existing, err := loadGroupRowsTx(ctx, tx, p.RecurrenceGroupID, p.PitchID)
+	if err != nil {
+		return nil, false, fmt.Errorf("CreateAcademyBookings: replay lookup: %w", err)
+	}
+	if len(existing) > 0 {
+		return existing, true, nil
+	}
+
+	loc := timeutil.Amman()
+
+	// PASS 1 — scan ALL occurrences, collecting every blocking one (no writes yet).
+	var conflicts []AcademyConflict
+	for _, occ := range occurrences {
+		occStart, occEnd := occ[0], occ[1]
+		dateLabel := occStart.In(loc).Format("2006-01-02")
+
+		if !p.BypassHours {
+			windows, err := loadOperatingWindowsTx(ctx, tx, p.PitchID)
+			if err != nil {
+				return nil, false, err
+			}
+			if len(windows) > 0 {
+				resolved, err := data.ResolveWindowsForDate(windows, timeutil.InAmman(occStart))
+				if err != nil {
+					return nil, false, fmt.Errorf("CreateAcademyBookings: resolve operating hours: %w", err)
+				}
+				if !data.SlotContained(occStart, occEnd, resolved) {
+					conflicts = append(conflicts, AcademyConflict{
+						Date: dateLabel, OccStart: occStart.UTC(), OccEnd: occEnd.UTC(), Reason: "outside_hours",
+					})
+					continue
+				}
+			}
+		}
+
+		overlaps, err := precheckOverlapTx(ctx, tx, p.PitchID, occStart, occEnd)
+		if err != nil {
+			return nil, false, fmt.Errorf("CreateAcademyBookings: overlap precheck: %w", err)
+		}
+		if len(overlaps) > 0 {
+			conflicts = append(conflicts, AcademyConflict{
+				Date: dateLabel, OccStart: occStart.UTC(), OccEnd: occEnd.UTC(),
+				Reason: "conflict", Conflicts: overlaps,
+			})
+		}
+	}
+	if len(conflicts) > 0 {
+		return nil, false, &AcademyConflictError{Conflicts: conflicts} // rollback (defer), zero rows
+	}
+
+	// PASS 2 — clean series: insert every occurrence via the shared offline builder.
+	groupID := p.RecurrenceGroupID
+	created := make([]models.Booking, 0, len(occurrences))
+	for _, occ := range occurrences {
+		b, err := insertManualOccurrenceTx(ctx, tx, manualOccInsert{
+			pitchID:      p.PitchID,
+			start:        occ[0],
+			end:          occ[1],
+			pricePerHour: pricePerHour,
+			guestName:    p.AcademyName,
+			groupID:      &groupID,
+			actor:        p.Actor,
+			source:       models.SourceAcademy,
+			reason:       reasonAcademyCreated,
+		})
+		if err != nil {
+			return nil, false, err
+		}
+		created = append(created, *b)
+	}
+
+	if err = tx.Commit(ctx); err != nil {
+		return nil, false, fmt.Errorf("CreateAcademyBookings: commit: %w", err)
+	}
+	return created, false, nil
 }
 
 // reasonGroupCancelled is the audit reason stored per child cancelled in a bulk

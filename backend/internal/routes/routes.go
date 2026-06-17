@@ -312,6 +312,14 @@ func Register(
 			middleware.RequireRole("owner", "admin"),
 			bookingHandler.CreateManualBooking,
 		)
+		// Owner/admin ACADEMY generator: expand recurrence rules (days_of_week ×
+		// date-range at a fixed time window) into DISCRETE bookings (source='academy').
+		// All-or-nothing — any overlap rolls the series back and returns the conflicting
+		// dates. recurrence_group_id is the idempotency key + bulk-cancel handle.
+		protected.POST("/pitches/:id/bookings/bulk-academy",
+			middleware.RequireRole("owner", "admin"),
+			bookingHandler.CreateAcademyBookings,
+		)
 		// Bulk-cancel all FUTURE occurrences of a recurring walk-in group (past
 		// occurrences preserved). Owner/admin-scoped; idempotent (empty → 200, count 0).
 		protected.DELETE("/pitches/:id/bookings/group/:groupId",
