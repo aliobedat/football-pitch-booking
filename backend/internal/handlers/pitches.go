@@ -48,6 +48,17 @@ func (h *PitchHandler) ListPitches(c *gin.Context) {
 		FeaturedOnly: c.Query("featured") == "true",
 	}
 
+	// Optional player coordinates for the "الأقرب إلي" (nearest) sort. Reuses Path
+	// A's parser/contract: both-or-neither; exactly-one or unparseable → 422. Absent
+	// → no location supplied (the listing keeps its default order).
+	player, ok := parsePlayerCoords(c)
+	if !ok {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "invalid_coords", "message": "lat and lng must be provided together as numbers",
+		})
+		return
+	}
+
 	pitches, err := h.Model.GetAll(c.Request.Context(), filters)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -55,6 +66,20 @@ func (h *PitchHandler) ListPitches(c *gin.Context) {
 			"message": "حدث خطأ داخلي في الخادم",
 		})
 		return
+	}
+
+	// Nearest-first ONLY when usable player coordinates were supplied. The SQL
+	// fetch order (is_featured DESC, price_per_hour ASC, id ASC) is untouched; the
+	// shared, STABLE geo.SortByDistance reorders ascending by distance and keeps
+	// that SQL order as the tiebreak among equidistant pitches. NULL/(0,0)-coord
+	// pitches stay in the stable tail. No coords → the default order is returned as-is.
+	if player.HasUsableCoords() {
+		geo.SortByDistance(
+			pitches, player,
+			func(p data.Pitch) geo.Coordinates { return geo.Coordinates{Lat: &p.Latitude, Lng: &p.Longitude} },
+			func(p *data.Pitch, d *float64) { p.DistanceKm = d },
+			func(p data.Pitch) *float64 { return p.DistanceKm },
+		)
 	}
 
 	c.JSON(http.StatusOK, gin.H{

@@ -105,6 +105,12 @@ type Pitch struct {
 	ImagePublicID string   `json:"image_public_id"`
 	Description   string   `json:"description"`
 	MapsURL       string   `json:"maps_url" db:"maps_url"`
+
+	// DistanceKm is the great-circle distance (km) from the requesting player to
+	// this pitch, populated ONLY on the nearest-sorted /pitches read when usable
+	// player coordinates were supplied AND this pitch has usable coordinates; nil
+	// otherwise. It is computed (geo.SortByDistance), never scanned from a column.
+	DistanceKm *float64 `json:"distance_km,omitempty"`
 }
 
 type CreatePitchRequest struct {

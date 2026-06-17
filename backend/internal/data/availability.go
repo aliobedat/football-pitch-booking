@@ -3,7 +3,6 @@ package data
 import (
 	"context"
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/ali/football-pitch-api/internal/geo"
@@ -32,6 +31,11 @@ type AvailabilityResult struct {
 	// DistanceKm is set only when BOTH the player and the pitch have usable
 	// coordinates; nil otherwise (the pitch then rides the default-order tail).
 	DistanceKm *float64 `json:"distance_km"`
+
+	// coords carries the pitch's own coordinates to the shared distance sorter
+	// (geo.SortByDistance). Unexported → never serialized; the result shape is
+	// unchanged.
+	coords geo.Coordinates
 }
 
 // minAvailableMinutes is the continuous-availability floor: a pitch must be free
@@ -144,29 +148,21 @@ func (m *PitchModel) SearchAvailability(ctx context.Context, q AvailabilityQuery
 		res := AvailabilityResult{
 			ID: c.id, Name: c.name, Area: c.area, ImageURL: c.image,
 			AvailableUntil: availableUntil, AvailableMinutes: mins,
-		}
-		// Distance only when BOTH endpoints carry usable coordinates.
-		if q.Player.HasUsableCoords() && c.coords.HasUsableCoords() {
-			d := geo.HaversineKm(*q.Player.Lat, *q.Player.Lng, *c.coords.Lat, *c.coords.Lng)
-			res.DistanceKm = &d
+			coords: c.coords, // carried for the shared distance sorter
 		}
 		results = append(results, res)
 	}
 
-	// 4. Nearest-first: rows WITH a distance sort ascending and lead; rows WITHOUT
-	//    one keep their (default) relative order in the tail. Stable sort preserves
-	//    the default order for the nil-distance group.
-	sort.SliceStable(results, func(i, j int) bool {
-		di, dj := results[i].DistanceKm, results[j].DistanceKm
-		switch {
-		case di != nil && dj != nil:
-			return *di < *dj
-		case di != nil:
-			return true // i has a distance, j doesn't → i first
-		default:
-			return false // j first, or both nil → keep stable default order
-		}
-	})
+	// 4. Nearest-first via the SINGLE shared distance referee: ascending distance,
+	//    nil-distance rows in a stable tail, default (featured/price/id) order kept
+	//    as the tiebreak. Same Haversine + same stable order as the prior inline
+	//    block — byte-identical output.
+	geo.SortByDistance(
+		results, q.Player,
+		func(r AvailabilityResult) geo.Coordinates { return r.coords },
+		func(r *AvailabilityResult, d *float64) { r.DistanceKm = d },
+		func(r AvailabilityResult) *float64 { return r.DistanceKm },
+	)
 
 	return results, nil
 }
