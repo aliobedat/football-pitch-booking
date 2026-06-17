@@ -248,7 +248,9 @@ export default function PitchDetailPage() {
                   افتح في خرائط Google
                 </a>
               )}
-              {hasCoords && (
+              {/* Only render the map when both coordinates and an API key exist —
+                  otherwise we hide the container entirely (no empty placeholder). */}
+              {hasCoords && process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY && (
                 <div className="h-56 rounded-xl overflow-hidden">
                   <PitchMap lat={pitch.lat} lng={pitch.lng} zoom={15} />
                 </div>

@@ -396,11 +396,12 @@ function EventDetailModal({ event, onClose, onChanged }: { event: CalEvent; onCl
 // ─────────────────────────────────────────────────────────────────────────────
 // Tap-to-create-manual
 // ─────────────────────────────────────────────────────────────────────────────
+// Minimum bookable duration is 1 hour (DB enforces chk_min_duration too); the 30-min
+// option is intentionally excluded so the UI can never submit a sub-hour slot.
 const DURATIONS = [
   { min: 60, label: 'ساعة' },
   { min: 90, label: 'ساعة ونصف' },
   { min: 120, label: 'ساعتان' },
-  { min: 30, label: 'نصف ساعة' },
 ];
 
 function CreateManualModal({
