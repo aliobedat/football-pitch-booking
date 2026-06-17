@@ -37,6 +37,9 @@ var (
 	// ErrCannotBindPrivileged — the target is an owner/admin (or the inviting
 	// owner themselves); they cannot be demoted into a staff binding. Maps to 422.
 	ErrCannotBindPrivileged = errors.New("staff: target user cannot be assigned as staff")
+	// ErrStaffBindingNotFound — no staff binding for that user under this owner
+	// (never bound, already revoked, or belongs to a different owner). Maps to 404.
+	ErrStaffBindingNotFound = errors.New("staff: no binding for that user under this owner")
 )
 
 // StaffBinding is one staff→pitch assignment.
@@ -64,6 +67,13 @@ type StaffRepository interface {
 
 	// ListStaffForOwner returns every staff member the owner has provisioned.
 	ListStaffForOwner(ctx context.Context, ownerID int) ([]StaffBinding, error)
+
+	// RevokeStaff removes a staff member the owner provisioned: it deletes the
+	// binding and demotes the user back to `player`, in one transaction. Strictly
+	// owner-scoped — an owner can only revoke a staff member bound to THEM
+	// (staff.owner_id = ownerID); a foreign or non-existent binding yields
+	// ErrStaffBindingNotFound (→404) and writes nothing.
+	RevokeStaff(ctx context.Context, ownerID, staffUserID int) error
 }
 
 type staffRepo struct {
@@ -154,6 +164,38 @@ func (r *staffRepo) CreateStaffBinding(ctx context.Context, ownerID, pitchID int
 		ID: bindingID, UserID: targetID, PitchID: pitchID, OwnerID: ownerID,
 		Phone: phoneE164, FullName: fullName,
 	}, nil
+}
+
+func (r *staffRepo) RevokeStaff(ctx context.Context, ownerID, staffUserID int) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("RevokeStaff: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// 1. Delete the binding ONLY when it belongs to this owner. The owner_id
+	//    predicate is the isolation guard: an owner can never revoke another owner's
+	//    staff. No row deleted (foreign/absent binding) → ErrStaffBindingNotFound.
+	ct, err := tx.Exec(ctx,
+		`DELETE FROM staff WHERE user_id = $1 AND owner_id = $2`, staffUserID, ownerID)
+	if err != nil {
+		return fmt.Errorf("RevokeStaff: delete binding: %w", err)
+	}
+	if ct.RowsAffected() == 0 {
+		return ErrStaffBindingNotFound
+	}
+
+	// 2. Demote back to player. Scoped to role='staff' so we never clobber a role
+	//    that changed out from under us (defensive; the binding implies staff).
+	if _, err := tx.Exec(ctx,
+		`UPDATE users SET role = 'player' WHERE id = $1 AND role = 'staff'`, staffUserID); err != nil {
+		return fmt.Errorf("RevokeStaff: demote: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("RevokeStaff: commit: %w", err)
+	}
+	return nil
 }
 
 func (r *staffRepo) ListStaffForOwner(ctx context.Context, ownerID int) ([]StaffBinding, error) {

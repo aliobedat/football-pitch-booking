@@ -89,6 +89,36 @@ func (h *StaffHandler) InviteStaff(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"data": binding})
 }
 
+// RevokeStaff removes a staff member the owner provisioned: the binding is deleted
+// and the user demoted back to `player`, atomically. Owner-scoped — an owner can
+// only revoke their OWN staff (the repository's owner_id predicate enforces it).
+// DELETE /owner/staff/:userId
+func (h *StaffHandler) RevokeStaff(c *gin.Context) {
+	staffUserID, err := strconv.Atoi(c.Param("userId"))
+	if err != nil || staffUserID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_user_id", "message": "معرّف المستخدم غير صالح"})
+		return
+	}
+
+	ownerID := middleware.GetUserID(c)
+	if err := h.repo.RevokeStaff(c.Request.Context(), ownerID, staffUserID); err != nil {
+		switch {
+		case errors.Is(err, repository.ErrStaffBindingNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "staff_not_found", "message": "لا يوجد موظف بهذا المعرّف ضمن حسابك",
+			})
+		default:
+			c.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal_error", "message": "تعذّر تسريح الموظف، حاول مرة أخرى",
+			})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "تم تسريح الموظف"})
+}
+
 // ListStaff returns the staff members the authenticated owner has provisioned.
 // GET /owner/staff
 func (h *StaffHandler) ListStaff(c *gin.Context) {

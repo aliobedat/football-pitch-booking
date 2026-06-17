@@ -269,6 +269,12 @@ func Register(
 			middleware.RequireRole("owner", "admin"),
 			staffHandler.ListStaff,
 		)
+		// Revoke: delete the binding + demote the user to player. Owner-scoped
+		// (an owner can only revoke staff they provisioned).
+		protected.DELETE("/owner/staff/:userId",
+			middleware.RequireRole("owner", "admin"),
+			staffHandler.RevokeStaff,
+		)
 
 		// ── Staff daily schedule + attendance (staff/owner/admin; players barred) ──
 		// Scope enforced in SQL (staff → bound pitch, owner → owned, admin → any).

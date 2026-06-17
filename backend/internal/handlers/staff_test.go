@@ -27,6 +27,11 @@ type fakeStaffRepo struct {
 	bindingOwner int
 	bindingFound bool
 	bindingErr   error
+
+	revokeErr       error
+	revokeCalls     int
+	lastRevokeOwner int
+	lastRevokeUser  int
 }
 
 func (f *fakeStaffRepo) StaffBinding(_ context.Context, _ int) (int, int, bool, error) {
@@ -49,6 +54,12 @@ func (f *fakeStaffRepo) ListStaffForOwner(_ context.Context, _ int) ([]repositor
 	return nil, nil
 }
 
+func (f *fakeStaffRepo) RevokeStaff(_ context.Context, ownerID, staffUserID int) error {
+	f.revokeCalls++
+	f.lastRevokeOwner, f.lastRevokeUser = ownerID, staffUserID
+	return f.revokeErr
+}
+
 func newStaffRouter(h *StaffHandler, userID int, role string) *gin.Engine {
 	r := gin.New()
 	inject := func(c *gin.Context) {
@@ -57,6 +68,7 @@ func newStaffRouter(h *StaffHandler, userID int, role string) *gin.Engine {
 		c.Next()
 	}
 	r.POST("/pitches/:id/staff", inject, middleware.RequireRole("owner", "admin"), h.InviteStaff)
+	r.DELETE("/owner/staff/:userId", inject, middleware.RequireRole("owner", "admin"), h.RevokeStaff)
 	return r
 }
 
@@ -99,6 +111,42 @@ func TestInviteStaff_Success(t *testing.T) {
 	}
 	if repo.lastPhone != "+962791234567" {
 		t.Fatalf("phone = %q, want normalised +962791234567", repo.lastPhone)
+	}
+}
+
+func TestRevokeStaff_Success(t *testing.T) {
+	repo := &fakeStaffRepo{}
+	const ownerID = 42
+	r := newStaffRouter(NewStaffHandler(repo), ownerID, "owner")
+	rec := doJSON(t, r, http.MethodDelete, "/owner/staff/99", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	// Owner id MUST come from the session, not the request — the isolation guard.
+	if repo.lastRevokeOwner != ownerID || repo.lastRevokeUser != 99 {
+		t.Fatalf("revoke args = (owner %d, user %d), want (%d, 99)", repo.lastRevokeOwner, repo.lastRevokeUser, ownerID)
+	}
+}
+
+func TestRevokeStaff_ForeignBindingNotFound(t *testing.T) {
+	// The repo reports no binding under this owner (e.g. another owner's staff) → 404.
+	repo := &fakeStaffRepo{revokeErr: repository.ErrStaffBindingNotFound}
+	r := newStaffRouter(NewStaffHandler(repo), 42, "owner")
+	rec := doJSON(t, r, http.MethodDelete, "/owner/staff/99", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for a binding outside the owner's scope", rec.Code)
+	}
+}
+
+func TestRevokeStaff_StaffCannotRevoke(t *testing.T) {
+	repo := &fakeStaffRepo{}
+	r := newStaffRouter(NewStaffHandler(repo), 9, "staff")
+	rec := doJSON(t, r, http.MethodDelete, "/owner/staff/99", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a staff caller", rec.Code)
+	}
+	if repo.revokeCalls != 0 {
+		t.Fatalf("RevokeStaff ran for a staff caller; route guard must block first")
 	}
 }
 
