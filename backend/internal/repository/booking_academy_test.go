@@ -11,11 +11,16 @@ package repository
 import (
 	"context"
 	"errors"
+	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/models"
 	"github.com/ali/football-pitch-api/internal/timeutil"
 )
@@ -237,5 +242,149 @@ func TestAcademy_ExactReplayShortCircuits(t *testing.T) {
 		if replay[i].ID != first[i].ID {
 			t.Errorf("replay row %d id=%d, want verbatim %d", i, replay[i].ID, first[i].ID)
 		}
+	}
+}
+
+// ── GATE 2 acceptance A (MANDATORY): round-trips are CONSTANT, not O(occurrences) ─
+// This is the test that would have caught the original N×4 hang. It counts DB
+// queries via a pgx QueryTracer and asserts a 4-occurrence and a 300-occurrence
+// contract issue the SAME number of round-trips (the robust, non-time-flaky
+// invariant). Wall-time is logged as a soft secondary only.
+
+type queryCounter struct{ n atomic.Int64 }
+
+func (q *queryCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	q.n.Add(1)
+	return ctx
+}
+func (q *queryCounter) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {}
+
+func newTracedPool(t *testing.T, counter *queryCounter) *pgxpool.Pool {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(os.Getenv("PITCH_SCOPING_TEST_DATABASE_URL"))
+	if err != nil {
+		t.Fatalf("parse DSN: %v", err)
+	}
+	cfg.ConnConfig.Tracer = counter
+	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("traced pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+func TestAcademy_ConstantRoundTrips(t *testing.T) {
+	e := newBlockEnv(t) // owner + 24/7 pitch (no operating_hours)
+	counter := &queryCounter{}
+	repo := NewBookingRepository(newTracedPool(t, counter))
+	loc := timeutil.Amman()
+
+	run := func(start time.Time, days []int, spanDays int) (trips, rowCount int) {
+		before := counter.n.Load()
+		rows, replayed, err := repo.CreateAcademyBookings(context.Background(), AcademyBookingParams{
+			PitchID: e.pitchID, Actor: e.ownerActor(), AcademyName: "أكاديمية القياس",
+			DaysOfWeek: days, StartClock: "08:00", EndClock: "09:00",
+			StartDate: start, EndDate: start.AddDate(0, 0, spanDays),
+			RecurrenceGroupID: uuid.NewString(),
+		})
+		if err != nil || replayed {
+			t.Fatalf("academy create: err=%v replayed=%v", err, replayed)
+		}
+		return int(counter.n.Load() - before), len(rows)
+	}
+
+	// Small: one weekday × 4 weeks = 4 occurrences.
+	smallStart := time.Date(2031, 3, 7, 0, 0, 0, 0, loc) // Friday
+	smallTrips, smallRows := run(smallStart, []int{5}, 21)
+	if smallRows != 4 {
+		t.Fatalf("small: %d rows, want 4", smallRows)
+	}
+
+	// Large: all 7 weekdays × 300 days = 300 occurrences (disjoint future dates).
+	largeStart := time.Date(2032, 1, 1, 0, 0, 0, 0, loc)
+	t0 := time.Now()
+	largeTrips, largeRows := run(largeStart, []int{0, 1, 2, 3, 4, 5, 6}, 299)
+	elapsed := time.Since(t0)
+	if largeRows < 300 {
+		t.Fatalf("large: %d rows, want ≥300", largeRows)
+	}
+
+	// THE invariant: round-trips do NOT scale with occurrence count.
+	if smallTrips != largeTrips {
+		t.Fatalf("round-trips not constant: 4-occ=%d, 300-occ=%d (must be equal)", smallTrips, largeTrips)
+	}
+	if largeTrips > 10 {
+		t.Fatalf("round-trips=%d, want a small constant (~7)", largeTrips)
+	}
+	if elapsed > 2*time.Second { // soft secondary — log, don't fail (DB-latency dependent)
+		t.Logf("WARNING: 300-occurrence batch took %v (>2s) — check DB latency", elapsed)
+	}
+	t.Logf("round-trips constant: 4-occ=%d == 300-occ=%d; 300-occ wall=%v", smallTrips, largeTrips, elapsed)
+}
+
+// ── GATE 2 acceptance C: ops-hours parity — in-Go validation matches the prior SQL
+// result (an occurrence outside the configured window is still rejected). ──────────
+func TestAcademy_OutsideHoursRejected(t *testing.T) {
+	e := newBlockEnv(t)
+	loc := timeutil.Amman()
+	date := time.Now().In(loc).AddDate(0, 0, 400)
+	for date.Weekday() != time.Friday {
+		date = date.AddDate(0, 0, 1)
+	}
+	// Open 09:00–12:00 that weekday → a 20:00 session is off-hours.
+	if err := e.model.ReplaceOperatingHours(context.Background(), int(e.pitchID), e.ownerActor(),
+		[]data.OperatingWindow{{Weekday: int(date.Weekday()), OpenTime: "09:00", CloseTime: "12:00"}}); err != nil {
+		t.Fatalf("set hours: %v", err)
+	}
+	d := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, loc)
+
+	_, _, err := e.repo.CreateAcademyBookings(context.Background(), AcademyBookingParams{
+		PitchID: e.pitchID, Actor: e.ownerActor(), AcademyName: "أكاديمية مسائية",
+		DaysOfWeek: []int{5}, StartClock: "20:00", EndClock: "21:00",
+		StartDate: d, EndDate: d, RecurrenceGroupID: uuid.NewString(),
+	})
+	var ac *AcademyConflictError
+	if !errors.As(err, &ac) {
+		t.Fatalf("err=%v, want *AcademyConflictError", err)
+	}
+	if len(ac.Conflicts) != 1 || ac.Conflicts[0].Reason != "outside_hours" {
+		t.Fatalf("conflicts=%+v, want exactly 1 outside_hours", ac.Conflicts)
+	}
+}
+
+// ── GATE 2 acceptance D: row shape + audit correlation (one transition per booking) ─
+func TestAcademy_RowShapeAndAuditCorrelation(t *testing.T) {
+	e := newBlockEnv(t)
+	loc := timeutil.Amman()
+	start := time.Date(2033, 6, 3, 0, 0, 0, 0, loc)
+	for start.Weekday() != time.Friday {
+		start = start.AddDate(0, 0, 1)
+	}
+	group := uuid.NewString()
+	rows, _, err := e.repo.CreateAcademyBookings(context.Background(), AcademyBookingParams{
+		PitchID: e.pitchID, Actor: e.ownerActor(), AcademyName: "أكاديمية مدققة",
+		DaysOfWeek: []int{5}, StartClock: "08:00", EndClock: "09:00",
+		StartDate: start, EndDate: start.AddDate(0, 0, 28), RecurrenceGroupID: group,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	for _, b := range rows {
+		if b.Source != models.SourceAcademy || b.PlayerID != nil {
+			t.Errorf("row %d: source=%q player_id=%v, want academy/nil", b.ID, b.Source, b.PlayerID)
+		}
+	}
+	// Exactly one NULL→confirmed transition per created booking, correctly correlated.
+	var trans int
+	if err := e.pool.QueryRow(context.Background(), `
+		SELECT count(*) FROM status_transitions st
+		JOIN bookings b ON b.id = st.booking_id
+		WHERE b.recurrence_group_id = $1 AND st.from_status IS NULL AND st.to_status = 'confirmed'
+	`, group).Scan(&trans); err != nil {
+		t.Fatalf("count transitions: %v", err)
+	}
+	if trans != len(rows) {
+		t.Fatalf("transitions=%d, want %d (one per booking)", trans, len(rows))
 	}
 }

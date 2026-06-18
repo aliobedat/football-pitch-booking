@@ -299,6 +299,7 @@ func (r *bookingRepo) CreateBlock(ctx context.Context, p CreateBlockParams) (*mo
 //   - player → the player's users.full_name (via the LEFT JOIN)
 //   - manual → the row's guest_name (no platform user exists)
 //   - block  → NULL (held time has no party; the client labels it generically)
+//
 // Built in SQL with a CASE so the Go scan target is a single *string that is
 // simply nil for a block — no dereference of an absent player ever occurs.
 func precheckOverlapTx(ctx context.Context, tx pgx.Tx, pitchID int64, start, end time.Time) ([]BlockConflict, error) {
@@ -333,6 +334,55 @@ func precheckOverlapTx(ctx context.Context, tx pgx.Tx, pitchID int64, start, end
 		conflicts = append(conflicts, c)
 	}
 	return conflicts, rows.Err()
+}
+
+// precheckOverlapsBatchTx is the SET-BASED form of precheckOverlapTx: it checks ALL
+// proposed [start,end) ranges (parallel UTC arrays) against the pitch's existing
+// non-cancelled bookings in ONE query (unnest WITH ORDINALITY → `&&` join), so N
+// per-occurrence round-trips collapse to a single one. It returns a slice indexed by
+// occurrence (0-based) of the overlapping rows for that occurrence — the SAME
+// predicate (pitch + status<>'cancelled' + range &&) and the SAME null-safe
+// display-name CASE as precheckOverlapTx, so the 409 detail is identical.
+func precheckOverlapsBatchTx(ctx context.Context, tx pgx.Tx, pitchID int64, starts, ends []time.Time) ([][]BlockConflict, error) {
+	out := make([][]BlockConflict, len(starts))
+	rows, err := tx.Query(ctx, `
+		WITH proposed AS (
+			SELECT ord, tstzrange(s, e, '[)') AS rng
+			FROM unnest($2::timestamptz[], $3::timestamptz[]) WITH ORDINALITY AS u(s, e, ord)
+		)
+		SELECT p.ord, b.id, b.source,
+		       lower(b.booking_range), upper(b.booking_range),
+		       CASE
+		           WHEN b.source = 'manual' THEN b.guest_name
+		           WHEN b.source = 'player' THEN u.full_name
+		           ELSE NULL
+		       END AS display_name
+		FROM proposed p
+		JOIN bookings b
+		  ON b.pitch_id = $1
+		 AND b.status <> 'cancelled'
+		 AND b.booking_range && p.rng
+		LEFT JOIN users u ON u.id = b.player_id
+		ORDER BY p.ord, lower(b.booking_range)
+	`, pitchID, starts, ends)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var ord int
+		var c BlockConflict
+		var name *string // NULL-safe: nil for a block (no party)
+		if err := rows.Scan(&ord, &c.BookingID, &c.Source, &c.StartTime, &c.EndTime, &name); err != nil {
+			return nil, err
+		}
+		c.PlayerName = name
+		if ord >= 1 && ord <= len(out) {
+			out[ord-1] = append(out[ord-1], c)
+		}
+	}
+	return out, rows.Err()
 }
 
 // ManualBookingParams carries the inputs for an owner/admin walk-in booking,
@@ -737,13 +787,14 @@ func expandAcademyOccurrences(p AcademyBookingParams) ([][2]time.Time, error) {
 //   - Acquire the pitch FOR UPDATE lock (owner-scoped; admin unscoped).
 //   - IDEMPOTENCY: under the lock, a resubmit of an already-materialised group
 //     replays the stored rows verbatim (replayed=true) — the loop never runs.
-//   - Otherwise SCAN every occurrence (operating-hours gate unless BypassHours, plus
-//     the race-free overlap pre-check). UNLIKE the manual path it collects ALL
-//     blocking occurrences (not just the first) so the owner gets the complete list,
-//     then returns *AcademyConflictError and rolls the whole tx back (zero rows).
-//   - On a clean series, insert every occurrence via the shared offline insert
-//     builder (identical price/duration/status path as walk-ins) tagged with the
-//     group id + an audited NULL→confirmed transition, then commit.
+//   - Otherwise validate in a CONSTANT ~3 round-trips regardless of occurrence count:
+//     operating-hours windows loaded ONCE + validated in Go (unless BypassHours), then
+//     ONE set-based overlap precheck. UNLIKE the manual path it collects ALL blocking
+//     occurrences (not just the first) so the owner gets the complete list, then
+//     returns *AcademyConflictError and rolls the whole tx back (zero rows).
+//   - On a clean series, insert the WHOLE batch in ONE CTE statement (bookings +
+//     correlated NULL→confirmed transitions), then commit. The GIST EXCLUDE is the
+//     authoritative backstop (23P01 → 409).
 //
 // Returns the created (or replayed) bookings in chronological order.
 func (r *bookingRepo) CreateAcademyBookings(ctx context.Context, p AcademyBookingParams) ([]models.Booking, bool, error) {
@@ -794,39 +845,60 @@ func (r *bookingRepo) CreateAcademyBookings(ctx context.Context, p AcademyBookin
 
 	loc := timeutil.Amman()
 
-	// PASS 1 — scan ALL occurrences, collecting every blocking one (no writes yet).
-	var conflicts []AcademyConflict
-	for _, occ := range occurrences {
-		occStart, occEnd := occ[0], occ[1]
-		dateLabel := occStart.In(loc).Format("2006-01-02")
+	// Proposed [start,end) instants as parallel UTC arrays — the input to BOTH the
+	// batched overlap precheck and the batched insert. The per-occurrence DB
+	// round-trips collapse to a CONSTANT ~3 (ops-load + precheck + insert),
+	// independent of occurrence count.
+	starts := make([]time.Time, len(occurrences))
+	ends := make([]time.Time, len(occurrences))
+	for i, occ := range occurrences {
+		starts[i] = occ[0].UTC()
+		ends[i] = occ[1].UTC()
+	}
 
-		if !p.BypassHours {
-			windows, err := loadOperatingWindowsTx(ctx, tx, p.PitchID)
-			if err != nil {
-				return nil, false, err
-			}
-			if len(windows) > 0 {
-				resolved, err := data.ResolveWindowsForDate(windows, timeutil.InAmman(occStart))
+	// ── Operating-hours gate, in Go, windows loaded ONCE (1 round-trip) ──────────
+	// Semantically identical to the former per-occurrence path — SAME resolver
+	// (ResolveWindowsForDate) + SAME containment comparator (SlotContained) — only
+	// the windows fetch is hoisted out of the loop.
+	outsideHours := make([]bool, len(occurrences))
+	if !p.BypassHours {
+		windows, err := loadOperatingWindowsTx(ctx, tx, p.PitchID)
+		if err != nil {
+			return nil, false, err
+		}
+		if len(windows) > 0 {
+			for i, occ := range occurrences {
+				resolved, err := data.ResolveWindowsForDate(windows, timeutil.InAmman(occ[0]))
 				if err != nil {
 					return nil, false, fmt.Errorf("CreateAcademyBookings: resolve operating hours: %w", err)
 				}
-				if !data.SlotContained(occStart, occEnd, resolved) {
-					conflicts = append(conflicts, AcademyConflict{
-						Date: dateLabel, OccStart: occStart.UTC(), OccEnd: occEnd.UTC(), Reason: "outside_hours",
-					})
-					continue
+				if !data.SlotContained(occ[0], occ[1], resolved) {
+					outsideHours[i] = true
 				}
 			}
 		}
+	}
 
-		overlaps, err := precheckOverlapTx(ctx, tx, p.PitchID, occStart, occEnd)
-		if err != nil {
-			return nil, false, fmt.Errorf("CreateAcademyBookings: overlap precheck: %w", err)
-		}
-		if len(overlaps) > 0 {
+	// ── Overlap precheck: ONE set-based query for ALL occurrences (1 round-trip) ──
+	overlaps, err := precheckOverlapsBatchTx(ctx, tx, p.PitchID, starts, ends)
+	if err != nil {
+		return nil, false, fmt.Errorf("CreateAcademyBookings: overlap precheck: %w", err)
+	}
+
+	// Assemble every blocking occurrence in chronological order. Out-of-hours takes
+	// precedence over an overlap for the same slot (mirrors the prior `continue`).
+	var conflicts []AcademyConflict
+	for i, occ := range occurrences {
+		dateLabel := occ[0].In(loc).Format("2006-01-02")
+		switch {
+		case outsideHours[i]:
 			conflicts = append(conflicts, AcademyConflict{
-				Date: dateLabel, OccStart: occStart.UTC(), OccEnd: occEnd.UTC(),
-				Reason: "conflict", Conflicts: overlaps,
+				Date: dateLabel, OccStart: occ[0].UTC(), OccEnd: occ[1].UTC(), Reason: "outside_hours",
+			})
+		case len(overlaps[i]) > 0:
+			conflicts = append(conflicts, AcademyConflict{
+				Date: dateLabel, OccStart: occ[0].UTC(), OccEnd: occ[1].UTC(),
+				Reason: "conflict", Conflicts: overlaps[i],
 			})
 		}
 	}
@@ -834,31 +906,111 @@ func (r *bookingRepo) CreateAcademyBookings(ctx context.Context, p AcademyBookin
 		return nil, false, &AcademyConflictError{Conflicts: conflicts} // rollback (defer), zero rows
 	}
 
-	// PASS 2 — clean series: insert every occurrence via the shared offline builder.
-	groupID := p.RecurrenceGroupID
-	created := make([]models.Booking, 0, len(occurrences))
-	for _, occ := range occurrences {
-		b, err := insertManualOccurrenceTx(ctx, tx, manualOccInsert{
-			pitchID:      p.PitchID,
-			start:        occ[0],
-			end:          occ[1],
-			pricePerHour: pricePerHour,
-			guestName:    p.AcademyName,
-			groupID:      &groupID,
-			actor:        p.Actor,
-			source:       models.SourceAcademy,
-			reason:       reasonAcademyCreated,
-		})
-		if err != nil {
-			return nil, false, err
-		}
-		created = append(created, *b)
+	// ── Insert the whole series: ONE CTE (bookings + correlated transitions) ─────
+	// All occurrences share one clock window → one duration → one price scalar,
+	// computed exactly as the shared single-row builder does.
+	durationHours := occurrences[0][1].Sub(occurrences[0][0]).Hours()
+	totalPrice := math.Round(durationHours*pricePerHour*1000) / 1000
+
+	created, err := insertAcademyBatchTx(ctx, tx, academyBatchInsert{
+		pitchID:    p.PitchID,
+		starts:     starts,
+		ends:       ends,
+		totalPrice: totalPrice,
+		guestName:  p.AcademyName,
+		groupID:    p.RecurrenceGroupID,
+		actor:      p.Actor,
+		reason:     reasonAcademyCreated,
+	})
+	if err != nil {
+		return nil, false, err
 	}
 
 	if err = tx.Commit(ctx); err != nil {
 		return nil, false, fmt.Errorf("CreateAcademyBookings: commit: %w", err)
 	}
 	return created, false, nil
+}
+
+// academyBatchInsert is the input to the single-statement academy series insert.
+type academyBatchInsert struct {
+	pitchID      int64
+	starts, ends []time.Time // parallel, UTC, occurrence order
+	totalPrice   float64     // identical across occurrences (one clock window)
+	guestName    string      // academy_name
+	groupID      string      // recurrence_group_id
+	actor        auth.Actor
+	reason       string
+}
+
+// insertAcademyBatchTx inserts the WHOLE academy series in ONE statement: a CTE that
+// unnests the proposed ranges, INSERTs every booking (source='academy',
+// player_id=NULL, guest_phone=NULL, tagged with the recurrence group), INSERTs one
+// correlated status_transitions row per booking from the RETURNING set, then reads
+// the inserted rows back chronologically. The data-modifying CTEs always execute even
+// though the final SELECT references only `ins`. The GIST EXCLUDE stays the
+// authoritative referee: any slipped-through overlap — including an intra-batch
+// self-overlap the advisory precheck can't see — raises 23P01, mapped to a conflict
+// (→409) exactly like the single-row path.
+func insertAcademyBatchTx(ctx context.Context, tx pgx.Tx, o academyBatchInsert) ([]models.Booking, error) {
+	rows, err := tx.Query(ctx, `
+		WITH proposed AS (
+			SELECT s, e, ord
+			FROM unnest($2::timestamptz[], $3::timestamptz[]) WITH ORDINALITY AS u(s, e, ord)
+		),
+		ins AS (
+			INSERT INTO bookings
+				(pitch_id, player_id, booking_range, total_price, status, source, guest_name, guest_phone, recurrence_group_id)
+			SELECT $1, NULL, tstzrange(s, e, '[)'), $4, 'confirmed', 'academy', $5, NULL, $6
+			FROM proposed ORDER BY ord
+			RETURNING id, pitch_id, player_id,
+			          lower(booking_range) AS start_time, upper(booking_range) AS end_time,
+			          status, source, total_price, created_at, guest_name, guest_phone, recurrence_group_id
+		),
+		trans AS (
+			INSERT INTO status_transitions
+				(booking_id, from_status, to_status, actor_id, actor_role, reason)
+			SELECT id, NULL, 'confirmed', $7, $8, $9 FROM ins
+			RETURNING booking_id
+		)
+		SELECT id, pitch_id, player_id, start_time, end_time,
+		       status, source, total_price, created_at, guest_name, guest_phone, recurrence_group_id
+		FROM ins
+		ORDER BY start_time
+	`, o.pitchID, o.starts, o.ends, o.totalPrice, o.guestName, o.groupID, o.actor.UserID, o.actor.Role, o.reason)
+	if err != nil {
+		return nil, mapAcademyInsertErr(err)
+	}
+	defer rows.Close()
+
+	var created []models.Booking
+	for rows.Next() {
+		var b models.Booking
+		if err := rows.Scan(
+			&b.ID, &b.PitchID, &b.PlayerID,
+			&b.StartTime, &b.EndTime,
+			&b.Status, &b.Source, &b.TotalPrice, &b.CreatedAt,
+			&b.GuestName, &b.GuestPhone, &b.RecurrenceGroupID,
+		); err != nil {
+			return nil, fmt.Errorf("insertAcademyBatch: scan: %w", err)
+		}
+		created = append(created, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, mapAcademyInsertErr(err)
+	}
+	return created, nil
+}
+
+// mapAcademyInsertErr maps a GIST-EXCLUDE violation (23P01) raised by the batch
+// insert to a conflict (→409 via the handler); anything else is wrapped verbatim.
+// pgx may surface the violation from Query OR from rows.Err(), so both call it.
+func mapAcademyInsertErr(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == pgExclusionViolation {
+		return &BlockConflictError{} // backstop → 409 (incl. intra-batch self-overlap)
+	}
+	return fmt.Errorf("insertAcademyBatch: %w", err)
 }
 
 // reasonGroupCancelled is the audit reason stored per child cancelled in a bulk
