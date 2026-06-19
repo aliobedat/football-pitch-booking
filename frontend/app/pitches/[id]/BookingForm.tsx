@@ -192,7 +192,9 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
   // ── Guest capture (unauthenticated path) ──────────────────────────────────
   // Shown only when !user. Mutually exclusive with the needsName block above.
   const isGuest = !user;
-  const [guestName,         setGuestName]         = useState('');
+  // Seed from the session profile when present so a returning user never re-types
+  // their name (the field is hidden for them anyway — see conditional render).
+  const [guestName,         setGuestName]         = useState(user?.full_name ?? '');
   const [guestNameTouched,  setGuestNameTouched]  = useState(false);
   const [guestPhone,        setGuestPhone]        = useState('');
   const [guestPhoneTouched, setGuestPhoneTouched] = useState(false);
@@ -389,7 +391,12 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const total           = actualStartMins >= 0
     ? Math.round((duration / 60) * pricePerHour * 100) / 100 : 0;
 
-  const guestNameOK  = !isGuest || isValidFullName(guestName);
+  // A returning user's stored name satisfies validity without re-entry; a guest
+  // (or a new account with no name yet) must supply a valid guestName.
+  const nameValid = (user?.full_name?.trim() ?? guestName.trim()).length >= 2;
+  // Keep the isGuest gate so the separate needsName/FullNameField path (an authed
+  // user who never set a name) stays governed by nameOK above, not by nameValid.
+  const guestNameOK  = !isGuest || nameValid;
   const guestPhoneOK = !isGuest || normalizePhone(guestPhone).e164 !== null;
 
   const canSubmit =
@@ -1031,7 +1038,11 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
               بياناتك
             </p>
 
-            {/* Name */}
+            {/* Name. This block renders only inside the guest path (outer
+                `{isGuest && …}` gate), so a returning user with a stored name
+                never reaches it — the field is already hidden for them. TS narrows
+                `user` to null here, which is exactly the "(!user || !full_name)"
+                contract: the field shows for a guest / new-no-name account only. */}
             <div className="flex flex-col gap-1.5">
               <label htmlFor="guest-name" className="text-[11px] font-bold text-white/40 tracking-wide">
                 الاسم الكامل <span className="text-emerald-500">*</span>

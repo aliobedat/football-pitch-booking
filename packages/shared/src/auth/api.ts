@@ -43,12 +43,18 @@ export interface ApiClientOptions {
   baseURL: string;
   // Readable CSRF cookie name set by the backend at sign-in.
   csrfCookie?: string;
-  // Where to send the browser when the session is unrecoverable.
+  // @deprecated No longer used. The response interceptor does not navigate on
+  // auth failure; login navigation is owned by AuthContext.logout() and inline
+  // auth flows. Retained so existing callers that still pass it do not break.
   loginPath?: string;
 }
 
 export function createApiClient(opts: ApiClientOptions): AxiosInstance {
-  const { baseURL, csrfCookie = 'malaab_csrf', loginPath = '/login' } = opts;
+  // NOTE: loginPath is intentionally NOT destructured here. The response
+  // interceptor no longer navigates on auth failure (see below) — navigation is
+  // exclusively the caller's / AuthContext.logout()'s responsibility. The option
+  // is retained on ApiClientOptions only for backward compatibility.
+  const { baseURL, csrfCookie = 'malaab_csrf' } = opts;
 
   // withCredentials makes the browser send/store the httpOnly session cookies
   // (malaab_access / malaab_refresh). No token is read or written by JS.
@@ -90,9 +96,13 @@ export function createApiClient(opts: ApiClientOptions): AxiosInstance {
           await refreshing;
           return api(original);
         } catch (refreshErr) {
-          if (!original._silent && typeof window !== 'undefined') {
-            window.location.href = loginPath;
-          }
+          // The session is unrecoverable. The interceptor has NO authority to
+          // navigate — it simply rejects so the caller can degrade to a UI state
+          // (e.g. AuthContext.refreshUser sets user=null; the booking flow shows
+          // an inline error). The only login navigation in the app is the
+          // user-initiated AuthContext.logout(). This keeps every public read
+          // path (pitch details, availability, reviews) free of auth-driven
+          // redirects: a stray 401 can never bounce a guest to /login.
           return Promise.reject(refreshErr);
         } finally {
           refreshing = null;
