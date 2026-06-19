@@ -179,7 +179,7 @@ function formatTime12(totalMins: number): string {
 
 export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const router = useRouter();
-  const { user, login, refreshUser } = useAuth();
+  const { user, login, refreshUser, isLoading: authLoading } = useAuth();
 
   // ── JIT name capture ──────────────────────────────────────────────────────
   // If the authed user has no full_name yet, we collect it inline in the confirm
@@ -1032,7 +1032,9 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
         )}
 
         {/* ── Guest fields — name / phone / SMS consent ── */}
-        {isGuest && (
+        {/* Gate on !authLoading so the block never flashes during the /auth/me
+            in-flight window: a returning user is null until the probe resolves. */}
+        {!authLoading && isGuest && (
           <div className="rounded-xl border border-white/[0.08] bg-[#0d0f0e] px-4 py-4 flex flex-col gap-4">
             <p className="text-[11px] font-bold text-white/30 tracking-widest uppercase">
               بياناتك
@@ -1159,23 +1161,27 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
         )}
 
         {/* ── Confirm button ── */}
+        {/* While auth is resolving, show a neutral, non-actionable loading state
+            rather than an active/disabled state derived from incomplete user data. */}
         <button
           type="button"
           onClick={handleSubmit}
-          disabled={!canSubmit}
+          disabled={authLoading || !canSubmit}
           className={[
             'flex items-center justify-center gap-2.5 w-full py-3.5 rounded-xl mb-1',
             'text-[13px] font-bold tracking-wide',
             'transition-all duration-200 active:scale-[0.98]',
             'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500',
             'focus-visible:ring-offset-2 focus-visible:ring-offset-[#141715]',
-            canSubmit
+            !authLoading && canSubmit
               ? 'bg-gradient-to-r from-green-600 to-emerald-500 text-white ' +
                 'shadow-[0_4px_20px_rgba(16,185,129,0.22)] hover:shadow-[0_4px_28px_rgba(16,185,129,0.38)]'
               : 'bg-white/[0.04] text-white/20 border border-white/[0.05] cursor-not-allowed',
           ].join(' ')}
         >
-          {submitting ? (
+          {authLoading ? (
+            <div className="w-4 h-4 rounded-full border-2 border-white/25 border-t-white/60 animate-spin" />
+          ) : submitting ? (
             <>
               <div className="w-4 h-4 rounded-full border-2 border-white/25 border-t-white animate-spin" />
               جاري الحجز...
