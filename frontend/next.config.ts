@@ -47,6 +47,9 @@ const securityHeaders = [
 const nextConfig: NextConfig = {
   // @malaab/shared ships TS source consumed directly from the workspace.
   transpilePackages: ['@malaab/shared'],
+  // Permit cross-origin dev requests from a phone on the same LAN. Next.js
+  // otherwise blocks the device's LAN-IP origin against the dev server.
+  allowedDevOrigins: ['192.168.100.46:3000', '192.168.100.46'],
   // The legacy email/password /register page was removed in the auth-hardening
   // pass — phone OTP via /login is now the sole auth entry point. Permanently
   // redirect any stale bookmarks/links so they land on login instead of a 404.

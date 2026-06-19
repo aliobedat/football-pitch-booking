@@ -41,6 +41,15 @@ const FILTER_CHIPS: FilterChip[] = [
   { label: 'متاح الآن',     value: 'available_now', type: 'availability' },
 ];
 
+// Size chips use Latin labels ('5x5'/'7x7'); the backend `format` enum stores the
+// Arabic values (خماسي = 5-a-side, سباعي = 7-a-side). This maps the chip value to
+// the wire `format` so the client-side filter compares the field the API actually
+// sends (pitch.size is an unpopulated future field).
+const SIZE_TO_FORMAT: Partial<Record<FilterValue, string>> = {
+  '5x5': 'خماسي',
+  '7x7': 'سباعي',
+};
+
 const SORT_OPTIONS: { label: string; value: SortKey }[] = [
   { label: 'الأقرب إليك',      value: 'distance'   },
   { label: 'السعر: من الأقل',  value: 'price_asc'  },
@@ -202,8 +211,10 @@ function PitchesContent() {
   // this is always true when sortKey === 'distance' — but the guard keeps the fetch
   // and render fail-closed (never a silent coordless "nearest").
   const nearestActive = sortKey === 'distance' && locStatus === 'granted' && !!coords;
-  // Stable cache key for the coord-bearing fetch: only changes when nearest turns
-  // on/off or the position changes — NOT on price/rating sort toggles.
+  // coordParam is a STABLE DEPENDENCY STRING ONLY — it drives the effect (re-fetch
+  // when nearest turns on/off or the position changes, NOT on price/rating toggles).
+  // It is NEVER the wire format; the request params are built separately from the
+  // numeric coords below.
   const coordParam = nearestActive ? `${coords!.lat},${coords!.lng}` : '';
 
   // HOP 3 FIX — serialize lat/lng onto the /pitches request when nearest is active.
@@ -212,16 +223,23 @@ function PitchesContent() {
     setIsLoading(true);
     setError(null);
 
-    const params = coordParam
-      ? { lat: coordParam.split(',')[0], lng: coordParam.split(',')[1] }
+    // Wire format: TWO separate float params named EXACTLY as parsePlayerCoords
+    // binds them (lat, lng), full precision, built DIRECTLY from the numeric coords
+    // (not by re-parsing coordParam). Both-or-neither is structural — params are
+    // emitted only when nearest is active, where coords is guaranteed non-null — so
+    // a lone coordinate can never be sent.
+    const config = nearestActive
+      ? { params: { lat: coords!.lat, lng: coords!.lng } }
       : undefined;
 
-    api.get('/pitches', params ? { params } : undefined)
+    api.get('/pitches', config)
       .then(res => { if (!cancelled) setPitches(res.data.data ?? []); })
       .catch(() => { if (!cancelled) setError('fetch_failed'); })
       .finally(() => { if (!cancelled) setIsLoading(false); });
 
     return () => { cancelled = true; };
+    // coordParam fully encodes nearestActive + the coord values for re-fetch intent.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fetchKey, coordParam]);
 
   // Resolve a pending nearest intent once geolocation settles. On grant → activate
@@ -287,7 +305,10 @@ function PitchesContent() {
         : chip.type === 'area'
           ? pitch.neighborhood === activeFilter
           : chip.type === 'size'
-            ? pitch.size === activeFilter
+            // Compare the backend `format` enum (خماسي/سباعي) via the chip→format map.
+            ? pitch.format === SIZE_TO_FORMAT[activeFilter]
+            // availability: the listing payload carries no availability data yet, so
+            // this is a no-op (matches all). Real "available at a time" is Path A.
             : pitch.availabilityToday !== 'full';
 
       return matchesQuery && matchesFilter;
@@ -403,6 +424,8 @@ function PitchesContent() {
                   'px-4 py-1.5 rounded-full text-[12px] font-semibold border',
                   'transition-all duration-150',
                   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500',
+                  // V1: location/area filter chips hidden (UI only — logic intact, re-enable in V2).
+                  chip.type === 'area' ? 'hidden' : '',
                   isActive
                     ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-400'
                     : 'bg-transparent border-white/[0.08] text-white/40 hover:border-white/[0.18] hover:text-white/65',
@@ -415,6 +438,8 @@ function PitchesContent() {
 
           {/* Nearest toggle — gates on geolocation; click again to turn OFF. Active
               ONLY when the distance sort is engaged (i.e. a usable position exists). */}
+          {/* V1: nearest toggle hidden (UI only — requestNearest/useLocation intact, re-enable in V2). */}
+          {false && (
           <button
             type="button"
             onClick={requestNearest}
@@ -436,11 +461,13 @@ function PitchesContent() {
             }
             الملاعب الأقرب لي
           </button>
+          )}
 
           {/* DENIED-GEO UX — surfaced state, NEVER a silent coordless request. Shown
               when the user asked for nearest without a usable position, or when the
               browser reported the permission denied/unavailable. */}
-          {(geoPrompt || locStatus === 'denied' || locStatus === 'unavailable') && sortKey !== 'distance' && (
+          {/* V1: hidden with the nearest toggle (UI only — re-enable in V2). */}
+          {false && (geoPrompt || locStatus === 'denied' || locStatus === 'unavailable') && sortKey !== 'distance' && (
             <span className="text-[11px] text-amber-400/80 flex items-center gap-1">
               {locStatus === 'unavailable'
                 ? 'خدمة الموقع غير متوفّرة في هذا المتصفح'
@@ -462,7 +489,8 @@ function PitchesContent() {
           ) : (
             <span />
           )}
-          <SortDropdown value={sortKey} onChange={handleSortChange} />
+          {/* V1: sort dropdown hidden (UI only — SortDropdown/handleSortChange intact, re-enable in V2). */}
+          {false && <SortDropdown value={sortKey} onChange={handleSortChange} />}
         </div>
       </section>
 
