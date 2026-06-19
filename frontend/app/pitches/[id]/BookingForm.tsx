@@ -5,8 +5,9 @@ import { useRouter } from 'next/navigation';
 import { CalendarDays, CheckCircle2 } from 'lucide-react';
 import axios from 'axios';
 import api from '@/lib/api';
-import { useAuth } from '@/context/AuthContext';
+import { useAuth, type User } from '@/context/AuthContext';
 import FullNameField, { isValidFullName, saveFullName } from '@/components/FullNameField';
+import OtpModal from './OtpModal';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -135,6 +136,22 @@ function projectWindowToDay(w: OpenWindow, dayStr: string): LocalRange | null {
   return { start, end };
 }
 
+// Accepts: 07XXXXXXXX | 7XXXXXXXX | +9627XXXXXXXX | 009627XXXXXXXX
+// Outputs: { e164: '+9627XXXXXXXX' } or { error: <Arabic message> }
+// Local-part regex: ^7[789]\d{7}$ — Jordanian mobile prefixes 77/78/79 only.
+function normalizePhone(raw: string): { e164: string | null; error: string | null } {
+  const cleaned = raw.replace(/[\s\-().]/g, '');
+  let local: string;
+  if      (cleaned.startsWith('+962'))  local = cleaned.slice(4);
+  else if (cleaned.startsWith('00962')) local = cleaned.slice(5);
+  else if (cleaned.startsWith('07'))    local = cleaned.slice(1);
+  else if (cleaned.startsWith('7'))     local = cleaned;
+  else return { e164: null, error: 'رقم هاتف غير صالح — أدخل رقماً أردنياً صحيحاً' };
+  if (!/^7[789]\d{7}$/.test(local))
+    return { e164: null, error: 'رقم هاتف غير صالح — يجب أن يبدأ بـ 077 أو 078 أو 079 ومكوّن من 10 أرقام' };
+  return { e164: `+962${local}`, error: null };
+}
+
 function durationLabel(mins: number): string {
   if (mins === 60)  return 'ساعة';
   if (mins === 90)  return 'ساعة ونصف';
@@ -162,7 +179,7 @@ function formatTime12(totalMins: number): string {
 
 export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const router = useRouter();
-  const { user, refreshUser } = useAuth();
+  const { user, login, refreshUser } = useAuth();
 
   // ── JIT name capture ──────────────────────────────────────────────────────
   // If the authed user has no full_name yet, we collect it inline in the confirm
@@ -171,6 +188,18 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const [nameInput, setNameInput] = useState('');
   const [nameTouched, setNameTouched] = useState(false);
   const nameOK = !needsName || isValidFullName(nameInput);
+
+  // ── Guest capture (unauthenticated path) ──────────────────────────────────
+  // Shown only when !user. Mutually exclusive with the needsName block above.
+  const isGuest = !user;
+  const [guestName,         setGuestName]         = useState('');
+  const [guestNameTouched,  setGuestNameTouched]  = useState(false);
+  const [guestPhone,        setGuestPhone]        = useState('');
+  const [guestPhoneTouched, setGuestPhoneTouched] = useState(false);
+  const [guestPhoneError,   setGuestPhoneError]   = useState<string | null>(null);
+  const [smsConsent,        setSmsConsent]        = useState(false);
+  const [consentAt,         setConsentAt]         = useState<string | null>(null);
+  const [otpOpen,           setOtpOpen]           = useState(false);
 
   // ── Server time (Asia/Amman) — source of truth for all time logic ─────────
   const [serverNow,      setServerNow]      = useState<Date | null>(null);
@@ -360,11 +389,16 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const total           = actualStartMins >= 0
     ? Math.round((duration / 60) * pricePerHour * 100) / 100 : 0;
 
+  const guestNameOK  = !isGuest || isValidFullName(guestName);
+  const guestPhoneOK = !isGuest || normalizePhone(guestPhone).e164 !== null;
+
   const canSubmit =
     baseHour !== null &&
     !isModDisabled(startMod) &&
     !isDurationDisabled(duration) &&
     nameOK &&
+    guestNameOK &&
+    guestPhoneOK &&
     !submitting;
 
   // ── Handlers ─────────────────────────────────────────────────────────────
@@ -404,12 +438,121 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
     setApiError(null);
   }
 
-  // ── Submit — re-validates against server before confirming ────────────────
-
   // Synchronous re-entry guard: blocks a double-tap from firing two POSTs before
-  // React re-renders the disabled button. Combined with the per-attempt
-  // Idempotency-Key below, a duplicate booking cannot be created.
+  // React re-renders the disabled button. Declared here so createBooking and
+  // handleSubmit both close over the same ref.
   const inFlightRef = useRef(false);
+
+  // ── Booking POST — shared by the authenticated path and the post-OTP path ──
+  // Owns its own inFlightRef acquisition so it is safe to call from both
+  // handleSubmit (auth'd users) and handleOtpVerified (guest → verify → book).
+
+  async function createBooking() {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    setSubmitting(true);
+    setApiError(null);
+
+    const idempotencyKey =
+      (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    // Fresh availability check — catches the race where another player booked
+    // the same slot while the OTP window was open (or between submit and POST).
+    try {
+      const avail = await api.get(`/pitches/${pitchId}/availability?date=${selDayStr}`, { _silent: true });
+      const freshBooked: BookedSlot[] = avail.data.booked_slots ?? [];
+      setBooked(freshBooked);
+      setOpenWindows(avail.data.open_windows ?? []);
+      setHasSchedule(!!avail.data.has_schedule);
+      if (rangeOverlapsBookings(actualStartMins, actualEndMins, freshBooked, selDayStr)) {
+        setApiError('هذا الموعد لم يعد متاحاً');
+        setBaseHour(null);
+        setSubmitting(false);
+        inFlightRef.current = false;
+        return;
+      }
+    } catch {
+      // Non-fatal — the server's GIST EXCLUDE constraint is the authoritative
+      // conflict guard; proceed and let the 409 path below handle it if needed.
+    }
+
+    try {
+      await api.post('/bookings', {
+        pitch_id:    pitchId,
+        start_time:  buildDateTime(selDayStr, actualStartStr!).toISOString(),
+        end_time:    buildDateTime(selDayStr, actualEndStr!).toISOString(),
+        total_price: total,
+      }, {
+        _silent: true,
+        headers: { 'Idempotency-Key': idempotencyKey },
+      });
+      setSuccess(true);
+      setTimeout(() => router.push('/bookings'), 1800);
+    } catch (err) {
+      if (axios.isAxiosError(err)) {
+        const code = err.response?.data?.error as string | undefined;
+        const msg  = err.response?.data?.message as string | undefined;
+        if (err.response?.status === 409 || code === 'slot_unavailable') {
+          // GIST EXCLUDE fired — slot was taken during the OTP window.
+          // Stay on screen, clear the selected slot, re-fetch the grid.
+          setApiError('هذا الموعد لم يعد متاحاً');
+          setBaseHour(null);
+          api.get(`/pitches/${pitchId}/availability?date=${selDayStr}`)
+            .then(r => {
+              setBooked(r.data.booked_slots ?? []);
+              setOpenWindows(r.data.open_windows ?? []);
+              setHasSchedule(!!r.data.has_schedule);
+            })
+            .catch(() => { /* stale grid is safe — user will retry */ });
+        } else if (code === 'outside_operating_hours')
+          setApiError('الوقت المطلوب خارج ساعات عمل الملعب، اختر وقتاً آخر');
+        else if (err.response?.status === 401)
+          // _silent suppresses the interceptor's redirect; surface here instead.
+          setApiError('حدث خطأ، يرجى المحاولة مرة أخرى');
+        else if (code === 'invalid_time' || code === 'invalid_duration')
+          setApiError(msg ?? 'الوقت المحدد غير صالح');
+        else
+          setApiError(msg ?? 'حدث خطأ ما، يرجى المحاولة مرة أخرى');
+      } else {
+        setApiError('تعذّر الاتصال بالخادم، تحقق من اتصالك');
+      }
+    } finally {
+      setSubmitting(false);
+      inFlightRef.current = false;
+    }
+  }
+
+  // ── OTP modal callbacks ───────────────────────────────────────────────────
+
+  function handleOtpDismiss() {
+    // Fields (name, phone, slot) are intact — user can edit and retry.
+    setOtpOpen(false);
+  }
+
+  async function handleOtpVerified(verifiedUser: User) {
+    // /auth/verify-otp succeeded. httpOnly cookies + CSRF cookie are set.
+    setOtpOpen(false);
+    login(verifiedUser);
+
+    // Step 1 — JIT name: write the guest-typed name only when the returned
+    // profile has none. Never overwrite an existing verified user's name.
+    if (!verifiedUser.full_name?.trim() && isValidFullName(guestName)) {
+      try {
+        await saveFullName(guestName);
+      } catch {
+        // Non-fatal: a failed name write doesn't block the booking.
+      }
+    }
+
+    // Steps 2-4 — create the booking now that the session is live.
+    // createBooking() handles: idempotency key, fresh avail check, POST,
+    // 2xx → redirect, 409 → stay + re-fetch grid.
+    await createBooking();
+  }
+
+  // ── Submit ────────────────────────────────────────────────────────────────
 
   async function handleSubmit() {
     if (!canSubmit || !actualStartStr || !actualEndStr) return;
@@ -432,64 +575,30 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
       }
     }
 
-    // One idempotency key per booking ATTEMPT. The backend dedupes on it, so a
-    // network retry (the axios 401→refresh path reuses this same request config)
-    // replays the original booking instead of creating a second one.
-    const idempotencyKey =
-      (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-
-    // Fresh availability check to catch race-condition double-bookings
-    try {
-      const avail = await api.get(`/pitches/${pitchId}/availability?date=${selDayStr}`);
-      const freshBooked: BookedSlot[] = avail.data.booked_slots ?? [];
-      setBooked(freshBooked);
-      setOpenWindows(avail.data.open_windows ?? []);
-      setHasSchedule(!!avail.data.has_schedule);
-      if (rangeOverlapsBookings(actualStartMins, actualEndMins, freshBooked, selDayStr)) {
-        setApiError('تم حجز هذا الوقت للتو — يرجى اختيار وقت آخر');
-        setBaseHour(null);
+    // ── Guest field validation ─────────────────────────────────────────────
+    if (isGuest) {
+      const { e164, error: phoneErr } = normalizePhone(guestPhone);
+      const nameValid = isValidFullName(guestName);
+      setGuestNameTouched(true);
+      setGuestPhoneTouched(true);
+      if (!nameValid || !e164) {
+        if (phoneErr) setGuestPhoneError(phoneErr);
         setSubmitting(false);
         inFlightRef.current = false;
         return;
       }
-    } catch {
-      // server will validate; proceed
-    }
+      setGuestPhoneError(null);
 
-    try {
-      await api.post('/bookings', {
-        pitch_id:    pitchId,
-        start_time:  buildDateTime(selDayStr, actualStartStr).toISOString(),
-        end_time:    buildDateTime(selDayStr, actualEndStr).toISOString(),
-        total_price: total,
-      }, {
-        headers: { 'Idempotency-Key': idempotencyKey },
-      });
-      setSuccess(true);
-      setTimeout(() => router.push('/bookings'), 1800);
-    } catch (err) {
-      if (axios.isAxiosError(err)) {
-        const code = err.response?.data?.error as string | undefined;
-        const msg  = err.response?.data?.message as string | undefined;
-        if (code === 'slot_unavailable')
-          setApiError('هذا الوقت محجوز بالفعل، اختر وقتاً آخر');
-        else if (code === 'outside_operating_hours')
-          setApiError('الوقت المطلوب خارج ساعات عمل الملعب، اختر وقتاً آخر');
-        else if (err.response?.status === 401)
-          setApiError('يجب تسجيل الدخول أولاً للقيام بالحجز');
-        else if (code === 'invalid_time' || code === 'invalid_duration')
-          setApiError(msg ?? 'الوقت المحدد غير صالح');
-        else
-          setApiError(msg ?? 'حدث خطأ ما، يرجى المحاولة مرة أخرى');
-      } else {
-        setApiError('تعذّر الاتصال بالخادم، تحقق من اتصالك');
-      }
-    } finally {
+      // Guest fields are valid. Open the OTP modal — the modal fires onVerified
+      // with the session-bearing User after /auth/verify-otp succeeds. The booking
+      // POST happens in handleOtpVerified once the caller confirms the chain.
+      setOtpOpen(true);
       setSubmitting(false);
       inFlightRef.current = false;
+      return;
     }
+
+    await createBooking();
   }
 
   // ── Success screen ────────────────────────────────────────────────────────
@@ -539,6 +648,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
   // ── Main render ───────────────────────────────────────────────────────────
 
   return (
+    <>
     <div className="rounded-2xl bg-[#141715] border border-white/[0.07] overflow-hidden">
 
       {/* ── Header ── */}
@@ -914,6 +1024,119 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
           </div>
         )}
 
+        {/* ── Guest fields — name / phone / SMS consent ── */}
+        {isGuest && (
+          <div className="rounded-xl border border-white/[0.08] bg-[#0d0f0e] px-4 py-4 flex flex-col gap-4">
+            <p className="text-[11px] font-bold text-white/30 tracking-widest uppercase">
+              بياناتك
+            </p>
+
+            {/* Name */}
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="guest-name" className="text-[11px] font-bold text-white/40 tracking-wide">
+                الاسم الكامل <span className="text-emerald-500">*</span>
+              </label>
+              <input
+                id="guest-name"
+                type="text"
+                dir="rtl"
+                value={guestName}
+                disabled={submitting}
+                onChange={(e) => { setGuestName(e.target.value); setGuestNameTouched(true); }}
+                onBlur={() => setGuestNameTouched(true)}
+                placeholder="مثال: أحمد خالد"
+                aria-invalid={guestNameTouched && !isValidFullName(guestName) || undefined}
+                className={[
+                  'w-full rounded-xl px-4 py-2.5 bg-[#121413] text-[13px] text-[#f0efe8]',
+                  'border transition-all duration-150 focus:outline-none',
+                  'placeholder:text-white/20 disabled:opacity-50',
+                  guestNameTouched && !isValidFullName(guestName)
+                    ? 'border-red-500/50 focus:ring-1 focus:ring-red-500/30'
+                    : 'border-white/[0.09] hover:border-white/[0.18] focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/15',
+                ].join(' ')}
+              />
+              {guestNameTouched && !isValidFullName(guestName) && (
+                <span className="text-[11px] text-red-400/80">الاسم يجب أن يكون بين حرفين و100 حرف</span>
+              )}
+            </div>
+
+            {/* Phone */}
+            <div className="flex flex-col gap-1.5">
+              <label htmlFor="guest-phone" className="text-[11px] font-bold text-white/40 tracking-wide">
+                رقم الجوال <span className="text-emerald-500">*</span>
+              </label>
+              <input
+                id="guest-phone"
+                type="tel"
+                dir="ltr"
+                value={guestPhone}
+                disabled={submitting}
+                onChange={(e) => {
+                  setGuestPhone(e.target.value);
+                  setGuestPhoneTouched(true);
+                  const { error } = normalizePhone(e.target.value);
+                  setGuestPhoneError(e.target.value.trim() ? error : null);
+                }}
+                onBlur={() => {
+                  if (guestPhone.trim()) {
+                    setGuestPhoneTouched(true);
+                    setGuestPhoneError(normalizePhone(guestPhone).error);
+                  }
+                }}
+                placeholder="07XXXXXXXX"
+                aria-invalid={!!guestPhoneError || undefined}
+                className={[
+                  'w-full rounded-xl px-4 py-2.5 bg-[#121413] text-[13px] text-[#f0efe8] font-mono',
+                  'border transition-all duration-150 focus:outline-none',
+                  'placeholder:text-white/20 disabled:opacity-50',
+                  guestPhoneTouched && guestPhoneError
+                    ? 'border-red-500/50 focus:ring-1 focus:ring-red-500/30'
+                    : 'border-white/[0.09] hover:border-white/[0.18] focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/15',
+                ].join(' ')}
+              />
+              {guestPhoneTouched && guestPhoneError && (
+                <span className="text-[11px] text-red-400/80">{guestPhoneError}</span>
+              )}
+              {guestPhoneTouched && !guestPhoneError && guestPhone.trim() && (
+                <span className="text-[11px] text-emerald-500/70 font-mono">
+                  {normalizePhone(guestPhone).e164}
+                </span>
+              )}
+            </div>
+
+            {/* SMS consent */}
+            <label className="flex items-start gap-3 cursor-pointer select-none group">
+              <div className="relative mt-0.5 flex-shrink-0">
+                <input
+                  type="checkbox"
+                  checked={smsConsent}
+                  disabled={submitting}
+                  onChange={(e) => {
+                    setSmsConsent(e.target.checked);
+                    setConsentAt(e.target.checked ? new Date().toISOString() : null);
+                  }}
+                  className="sr-only"
+                />
+                <div className={[
+                  'w-4 h-4 rounded border transition-all duration-150',
+                  smsConsent
+                    ? 'bg-emerald-500 border-emerald-500'
+                    : 'bg-transparent border-white/25 group-hover:border-white/40',
+                ].join(' ')}>
+                  {smsConsent && (
+                    <svg viewBox="0 0 12 12" fill="none" className="w-full h-full p-0.5" aria-hidden>
+                      <path d="M2 6l3 3 5-5" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )}
+                </div>
+              </div>
+              <span className="text-[11px] text-white/40 leading-relaxed group-hover:text-white/55 transition-colors duration-150">
+                أوافق على تلقّي تأكيد الحجز والتذكيرات عبر الرسائل النصية
+              </span>
+            </label>
+          </div>
+        )}
+
         {/* ── API error ── */}
         {apiError && (
           <div
@@ -953,5 +1176,16 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
 
       </div>
     </div>
+
+    {/* OTP modal — rendered outside the booking card via portal-like fixed positioning.
+        Only mounts for unauthenticated guests; already-authed users never reach this. */}
+    {otpOpen && (
+      <OtpModal
+        phone={normalizePhone(guestPhone).e164 ?? guestPhone}
+        onVerified={handleOtpVerified}
+        onDismiss={handleOtpDismiss}
+      />
+    )}
+    </>
   );
 }
