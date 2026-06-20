@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { canViewFinance, isDashboardRole } from '@malaab/shared/auth';
 import { useAuth } from '@/context/AuthContext';
@@ -19,6 +19,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const { user, isLoading } = useAuth();
   const pathname = usePathname();
   const router = useRouter();
+  // Mobile drawer open/closed. Desktop ignores it (sidebar is persistent at md+).
+  const [isOpen, setIsOpen] = useState(false);
+
+  // Close the drawer whenever the route changes (covers any nav not routed
+  // through the drawer's own onClick).
+  useEffect(() => { setIsOpen(false); }, [pathname]);
 
   useEffect(() => {
     if (isLoading) return;
@@ -47,9 +53,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <div className="min-h-screen flex">
-      <Sidebar role={user.role} />
+      <Sidebar role={user.role} isOpen={isOpen} onClose={() => setIsOpen(false)} />
       <div className="flex-1 flex flex-col min-w-0">
-        <Header />
+        <Header isOpen={isOpen} onOpen={() => setIsOpen(true)} onClose={() => setIsOpen(false)} />
         <main className="flex-1 p-6 overflow-auto">{children}</main>
       </div>
     </div>
