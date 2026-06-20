@@ -92,9 +92,13 @@ func Register(
 		authRoutes.POST("/request-otp", phoneAuthHandler.RequestOTP)
 		authRoutes.POST("/verify-otp", phoneAuthHandler.VerifyOTP)
 
-		// Refresh is cookie-authenticated and state-changing (token rotation), so
-		// it is CSRF-protected even though it lives outside the protected group.
-		authRoutes.POST("/refresh", middleware.RequireCSRF(), authHandler.Refresh)
+		// Refresh is cookie-authenticated and state-changing (token rotation). CSRF
+		// protection is intentionally NOT applied here: the interceptor's automatic
+		// refresh fires before a readable malaab_csrf cookie is reliably available
+		// (e.g. first load after sign-in), and a CSRF attacker gains nothing from a
+		// forced rotation — the rotated tokens are httpOnly and the response is
+		// CORS-blocked. (Defense-in-depth trade-off, accepted.)
+		authRoutes.POST("/refresh", authHandler.Refresh)
 	}
 
 	// ════════════════════════════════════════════════════════════════════════
