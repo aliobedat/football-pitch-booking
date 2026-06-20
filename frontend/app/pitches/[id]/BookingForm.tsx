@@ -563,8 +563,13 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
 
   async function handleSubmit() {
     if (!canSubmit || !actualStartStr || !actualEndStr) return;
+    // Re-entry guard only — do NOT acquire the ref here. createBooking is the
+    // SOLE acquirer/releaser (it sets true on entry, resets in its finally). If
+    // handleSubmit set it true, the delegated createBooking call below would see
+    // it already true and bail out instantly, hanging the button. The pre-steps
+    // (saveFullName / OTP open) are synchronous-to-dispatch, so this read guard
+    // is enough to block a double-tap before createBooking takes over.
     if (inFlightRef.current) return;
-    inFlightRef.current = true;
     setSubmitting(true);
     setApiError(null);
 
