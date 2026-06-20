@@ -208,7 +208,8 @@ export default function FinancialsSection({ granularity }: { granularity: Granul
         ) : expenses.length === 0 ? (
           <div className="bg-[#141715] py-10 text-center text-[13px] text-white/30">لا مصروفات في هذه الفترة</div>
         ) : (
-          <div className="bg-[#141715] divide-y divide-white/[0.04]">
+          <div className="overflow-x-auto">
+            <div className="bg-[#141715] divide-y divide-white/[0.04] min-w-[460px]">
             {expenses.map(e => (
               <div key={e.id} className="px-5 py-3 flex items-center gap-4">
                 <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold bg-white/[0.04] border border-white/[0.08] text-white/60 min-w-[64px] justify-center">
@@ -225,6 +226,7 @@ export default function FinancialsSection({ granularity }: { granularity: Granul
                 <button onClick={() => remove(e)} className="text-white/35 hover:text-red-400 transition-colors" aria-label="حذف"><Trash2 size={14} /></button>
               </div>
             ))}
+            </div>
           </div>
         )}
       </div>
