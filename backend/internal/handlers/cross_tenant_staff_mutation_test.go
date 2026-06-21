@@ -48,6 +48,8 @@ type xtEnv struct {
 	staffA         int // bound to pitchA1 ONLY
 	staffAToken    string
 	ownerAToken    string
+	admin          int // platform admin (unscoped)
+	adminToken     string
 	unboundStaff   int // role=staff, zero bindings
 	unboundToken   string
 
@@ -93,6 +95,7 @@ func newXTEnv(t *testing.T) *xtEnv {
 	e.staffA = mkUser("XT Staff A", "63", auth.RolePlayer)
 	// Unprovisioned staff: role=staff directly, with NO rows in the staff table.
 	e.unboundStaff = mkUser("XT Unbound Staff", "64", auth.RoleStaff)
+	e.admin = mkUser("XT Admin", "65", auth.RoleAdmin)
 
 	pitchModel := &data.PitchModel{DB: pool}
 	mkPitch := func(name string, owner int) int64 {
@@ -142,6 +145,7 @@ func newXTEnv(t *testing.T) *xtEnv {
 	}
 	e.staffAToken = mkToken(e.staffA, auth.RoleStaff)
 	e.ownerAToken = mkToken(e.ownerA, auth.RoleOwner)
+	e.adminToken = mkToken(e.admin, auth.RoleAdmin)
 	e.unboundToken = mkToken(e.unboundStaff, auth.RoleStaff)
 
 	// REAL middleware chain — identical order to routes.go's protected group.
@@ -161,7 +165,7 @@ func newXTEnv(t *testing.T) *xtEnv {
 		_, _ = pool.Exec(cctx, `DELETE FROM staff WHERE pitch_id = ANY($1)`, []int64{e.pitchA1, e.pitchA2, e.pitchB1})
 		_, _ = pool.Exec(cctx, `DELETE FROM bookings WHERE pitch_id = ANY($1)`, []int64{e.pitchA1, e.pitchA2, e.pitchB1})
 		_, _ = pool.Exec(cctx, `DELETE FROM pitches WHERE id = ANY($1)`, []int64{e.pitchA1, e.pitchA2, e.pitchB1})
-		_, _ = pool.Exec(cctx, `DELETE FROM users WHERE id = ANY($1)`, []int{e.ownerA, e.ownerB, player, e.staffA, e.unboundStaff})
+		_, _ = pool.Exec(cctx, `DELETE FROM users WHERE id = ANY($1)`, []int{e.ownerA, e.ownerB, player, e.staffA, e.unboundStaff, e.admin})
 		pool.Close()
 	})
 
