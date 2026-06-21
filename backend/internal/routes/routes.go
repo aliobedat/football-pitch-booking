@@ -332,9 +332,11 @@ func Register(
 			bookingHandler.CancelGroup,
 		)
 
-		// Owner/admin: list all bookings across all users and pitches
+		// Owner/admin: list all bookings across all users and pitches. Staff are
+		// also permitted but scoped in SQL to their bound pitch(es) (ResolveScope
+		// 403s unprovisioned staff before this handler).
 		protected.GET("/admin/bookings",
-			middleware.RequireRole("owner", "admin"),
+			middleware.RequireRole("staff", "owner", "admin"),
 			bookingHandler.GetAllBookings,
 		)
 

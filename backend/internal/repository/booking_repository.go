@@ -110,11 +110,12 @@ type BookingRepository interface {
 	GetUserBookings(ctx context.Context, userID int64) ([]models.Booking, error)
 
 	// GetAllBookings lists bookings scoped to the actor: an admin sees every
-	// booking on the platform, an owner sees only bookings whose pitch they own
-	// (the ownership predicate is applied in SQL via the pitches join). The
-	// optional filter narrows the result by status and/or booking start instant;
-	// it composes with — and can never widen past — the owner scoping.
-	GetAllBookings(ctx context.Context, actor auth.Actor, filter BookingFilter) ([]models.AdminBooking, error)
+	// booking on the platform, an owner sees only bookings whose pitch they own,
+	// and a staff member sees only bookings on their bound pitches (boundPitchIDs,
+	// resolved by ResolveScope). The scope predicate is applied in SQL via the
+	// pitches join. The optional filter narrows the result by status and/or
+	// booking start instant; it composes with — and can never widen past — scope.
+	GetAllBookings(ctx context.Context, actor auth.Actor, boundPitchIDs []int, filter BookingFilter) ([]models.AdminBooking, error)
 	UpdateBookingStatus(
 		ctx context.Context,
 		bookingID int,
@@ -1512,13 +1513,20 @@ type BookingFilter struct {
 	To     *time.Time
 }
 
-func (r *bookingRepo) GetAllBookings(ctx context.Context, actor auth.Actor, filter BookingFilter) ([]models.AdminBooking, error) {
-	// Owner scoping is the pitches join: owners get an extra ownership predicate,
-	// admins get none (every booking). Booking history is preserved across pitch
+func (r *bookingRepo) GetAllBookings(ctx context.Context, actor auth.Actor, boundPitchIDs []int, filter BookingFilter) ([]models.AdminBooking, error) {
+	// Scope is the pitches join: a staff member is constrained to their bound
+	// pitch set (b.pitch_id = ANY), an owner to pitches they own, an admin to
+	// nothing (every booking). Booking history is preserved across pitch
 	// soft-deletion, so no deleted_at filter is applied here.
 	pitchJoin := "INNER JOIN pitches p ON p.id = b.pitch_id"
 	args := []any{}
-	if !actor.IsAdmin() {
+	if actor.Role == auth.RoleStaff {
+		// Staff: scope to the bound pitch set (mirrors schedule repo's ANY($n)).
+		// ResolveScope 403s unbound staff before the handler; ANY(empty) also
+		// matches nothing — fail-closed either way.
+		args = append(args, boundPitchIDs)
+		pitchJoin = fmt.Sprintf("INNER JOIN pitches p ON p.id = b.pitch_id AND b.pitch_id = ANY($%d)", len(args))
+	} else if !actor.IsAdmin() {
 		args = append(args, actor.UserID)
 		pitchJoin = fmt.Sprintf("INNER JOIN pitches p ON p.id = b.pitch_id AND p.owner_id = $%d", len(args))
 	}

@@ -131,7 +131,7 @@ func TestSourceReaders_GetAllBookingsRelabelsBlock(t *testing.T) {
 	e := newReadersEnv(t)
 	blockID := e.seed("block", nil, time.Now().UTC().Add(72*time.Hour), time.Hour, "confirmed")
 
-	all, err := e.repo.GetAllBookings(context.Background(), auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner}, BookingFilter{})
+	all, err := e.repo.GetAllBookings(context.Background(), auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner}, nil, BookingFilter{})
 	if err != nil {
 		t.Fatalf("GetAllBookings: %v", err)
 	}

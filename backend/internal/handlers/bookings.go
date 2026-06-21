@@ -196,9 +196,12 @@ func (h *BookingHandler) GetAllBookings(c *gin.Context) {
 		return
 	}
 
-	// Admin → all bookings; owner → only bookings for pitches they own. Scoping
-	// is enforced in SQL by the repository via the Actor.
-	bookings, err := h.repo.GetAllBookings(c.Request.Context(), middleware.GetActor(c), filter)
+	// Admin → all bookings; owner → only bookings for pitches they own; staff →
+	// only bookings on their bound pitches. Scoping is enforced in SQL by the
+	// repository via the Actor + the resolved scope (mirrors ScheduleHandler).
+	actor := middleware.GetActor(c)
+	scope := middleware.GetScope(c)
+	bookings, err := h.repo.GetAllBookings(c.Request.Context(), actor, scope.BoundPitchIDs, filter)
 	if err != nil {
 		c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{

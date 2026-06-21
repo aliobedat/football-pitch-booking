@@ -87,7 +87,7 @@ func TestBookingScoping_GetAllBookings_OwnerVsAdmin(t *testing.T) {
 	repo := NewBookingRepository(pool)
 
 	// Owner A sees only bookings for pitch A.
-	aBookings, err := repo.GetAllBookings(ctx, auth.Actor{UserID: int(ownerA), Role: auth.RoleOwner}, BookingFilter{})
+	aBookings, err := repo.GetAllBookings(ctx, auth.Actor{UserID: int(ownerA), Role: auth.RoleOwner}, nil, BookingFilter{})
 	if err != nil {
 		t.Fatalf("GetAllBookings owner A: %v", err)
 	}
@@ -101,12 +101,35 @@ func TestBookingScoping_GetAllBookings_OwnerVsAdmin(t *testing.T) {
 	}
 
 	// Admin sees bookings for both pitches.
-	adminBookings, err := repo.GetAllBookings(ctx, auth.Actor{UserID: int(admin), Role: auth.RoleAdmin}, BookingFilter{})
+	adminBookings, err := repo.GetAllBookings(ctx, auth.Actor{UserID: int(admin), Role: auth.RoleAdmin}, nil, BookingFilter{})
 	if err != nil {
 		t.Fatalf("GetAllBookings admin: %v", err)
 	}
 	if !hasBookingForPitch(adminBookings, pitchA) || !hasBookingForPitch(adminBookings, pitchB) {
 		t.Fatalf("admin must see bookings for all pitches")
+	}
+
+	// Staff bound to pitch A sees ONLY pitch A's bookings — the scope predicate is
+	// b.pitch_id = ANY(boundPitchIDs), independent of pitch ownership. Owner B's
+	// pitch must never appear. (Unbound staff are 403'd by ResolveScope before the
+	// handler, so that case is covered by the middleware's own tests, not here.)
+	staff := mkUser("BS Staff", "78", auth.RoleStaff)
+	t.Cleanup(func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer ccancel()
+		_, _ = pool.Exec(cctx, `DELETE FROM users WHERE id = $1`, staff)
+	})
+	staffBookings, err := repo.GetAllBookings(ctx, auth.Actor{UserID: int(staff), Role: auth.RoleStaff}, []int{int(pitchA)}, BookingFilter{})
+	if err != nil {
+		t.Fatalf("GetAllBookings staff: %v", err)
+	}
+	for _, b := range staffBookings {
+		if b.PitchID == pitchB {
+			t.Fatalf("staff bound to pitch A must not see bookings for pitch B")
+		}
+	}
+	if !hasBookingForPitch(staffBookings, pitchA) {
+		t.Fatalf("staff bound to pitch A must see pitch A's booking")
 	}
 }
 
