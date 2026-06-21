@@ -11,9 +11,9 @@ import (
 	"github.com/ali/football-pitch-api/internal/repository"
 )
 
-// StaffHandler serves the owner-scoped staff provisioning surface. An owner
-// invites a guard by phone and binds them to a pitch they own. The strict
-// ownership invariant (owner must own the target pitch) is enforced in the
+// StaffHandler serves the owner-scoped staff provisioning surface. An owner invites
+// a guard by phone and binds them to ONE OR MORE pitches they own (1:N). The strict
+// ownership invariant (owner must own every target pitch) is enforced in the
 // repository's transaction; the handler maps its sentinel errors to HTTP codes.
 type StaffHandler struct {
 	repo repository.StaffRepository
@@ -25,22 +25,18 @@ func NewStaffHandler(repo repository.StaffRepository) *StaffHandler {
 }
 
 type inviteStaffRequest struct {
-	Phone string `json:"phone"`
+	Phone    string `json:"phone"`
+	PitchIDs []int  `json:"pitch_ids"`
 }
 
-// InviteStaff provisions a staff member for a pitch the owner owns.
-// POST /pitches/:id/staff  body: { "phone": "+9627XXXXXXXX" }
+// InviteStaff provisions a staff member across one or more owned pitches (1:N).
+// POST /owner/staff  body: { "phone": "+9627…", "pitch_ids": [12, 15] }
 //
 // Route is RequireRole("owner","admin"). The owner→pitch ownership check lives in
-// the repository (single transaction with the promotion+binding), so an owner can
-// only ever bind staff to a pitch_id they actually own.
+// the repository (single transaction with the promotion+bindings), so an owner can
+// only ever bind staff to pitch_ids they actually own. Re-inviting to add pitches
+// is idempotent.
 func (h *StaffHandler) InviteStaff(c *gin.Context) {
-	pitchID, err := strconv.Atoi(c.Param("id"))
-	if err != nil || pitchID <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_pitch_id", "message": "invalid pitch id"})
-		return
-	}
-
 	var req inviteStaffRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "bad_request", "message": "صيغة الطلب غير صحيحة"})
@@ -53,40 +49,80 @@ func (h *StaffHandler) InviteStaff(c *gin.Context) {
 		return
 	}
 
-	// The owner is the authenticated actor. An admin acting on a pitch they do not
+	// Validate the pitch set: at least one, all positive ids.
+	if len(req.PitchIDs) == 0 {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "no_pitches", "message": "اختر ملعباً واحداً على الأقل",
+		})
+		return
+	}
+	for _, pid := range req.PitchIDs {
+		if pid <= 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_pitch_id", "message": "معرّف ملعب غير صالح"})
+			return
+		}
+	}
+
+	// The owner is the authenticated actor. An admin acting on pitches they do not
 	// own would also be rejected by the ownership check — staff are owner-bound by
 	// design, so we always scope the binding to the acting owner's id.
 	ownerID := middleware.GetUserID(c)
 
-	binding, err := h.repo.CreateStaffBinding(c.Request.Context(), ownerID, pitchID, phone)
+	member, err := h.repo.CreateStaffBindings(c.Request.Context(), ownerID, req.PitchIDs, phone)
 	if err != nil {
 		switch {
 		case errors.Is(err, repository.ErrPitchNotOwned):
 			c.JSON(http.StatusForbidden, gin.H{
-				"error": "not_pitch_owner", "message": "you can only assign staff to a pitch you own",
+				"error": "not_pitch_owner", "message": "يمكنك تعيين موظف على ملاعبك فقط",
 			})
 		case errors.Is(err, repository.ErrStaffUserNotFound):
 			c.JSON(http.StatusNotFound, gin.H{
-				"error": "staff_user_not_found", "message": "this phone has not registered yet — ask them to log in once first",
-			})
-		case errors.Is(err, repository.ErrStaffAlreadyBound):
-			c.JSON(http.StatusConflict, gin.H{
-				"error": "staff_already_assigned", "message": "this user is already assigned to a pitch",
+				"error": "staff_user_not_found", "message": "هذا الرقم لم يسجّل بعد — اطلب من الموظف تسجيل الدخول مرة واحدة أولاً",
 			})
 		case errors.Is(err, repository.ErrCannotBindPrivileged):
 			c.JSON(http.StatusUnprocessableEntity, gin.H{
-				"error": "cannot_assign_user", "message": "this user cannot be assigned as staff",
+				"error": "cannot_assign_user", "message": "لا يمكن تعيين هذا المستخدم كموظف",
 			})
 		default:
 			c.Error(err)
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "internal_error", "message": "could not assign staff, please try again",
+				"error": "internal_error", "message": "تعذّر تعيين الموظف، حاول مرة أخرى",
 			})
 		}
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"data": binding})
+	c.JSON(http.StatusCreated, gin.H{"data": member})
+}
+
+// RevokeStaff removes a staff member the owner provisioned: the binding is deleted
+// and the user demoted back to `player`, atomically. Owner-scoped — an owner can
+// only revoke their OWN staff (the repository's owner_id predicate enforces it).
+// DELETE /owner/staff/:userId
+func (h *StaffHandler) RevokeStaff(c *gin.Context) {
+	staffUserID, err := strconv.Atoi(c.Param("userId"))
+	if err != nil || staffUserID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_user_id", "message": "معرّف المستخدم غير صالح"})
+		return
+	}
+
+	ownerID := middleware.GetUserID(c)
+	if err := h.repo.RevokeStaff(c.Request.Context(), ownerID, staffUserID); err != nil {
+		switch {
+		case errors.Is(err, repository.ErrStaffBindingNotFound):
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "staff_not_found", "message": "لا يوجد موظف بهذا المعرّف ضمن حسابك",
+			})
+		default:
+			c.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "internal_error", "message": "تعذّر تسريح الموظف، حاول مرة أخرى",
+			})
+		}
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "تم تسريح الموظف"})
 }
 
 // ListStaff returns the staff members the authenticated owner has provisioned.
@@ -100,7 +136,7 @@ func (h *StaffHandler) ListStaff(c *gin.Context) {
 		return
 	}
 	if staff == nil {
-		staff = []repository.StaffBinding{}
+		staff = []repository.StaffMember{}
 	}
 	c.JSON(http.StatusOK, gin.H{"data": staff})
 }

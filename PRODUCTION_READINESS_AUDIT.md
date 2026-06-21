@@ -187,6 +187,12 @@ Both reachable only via outbound HTTPS to Twilio/Cloudinary (server-side, not at
 
 ---
 
+## Pre-Launch Open Items (post-audit, tracked)
+
+- [ ] **WABA-250 quota guard — live verification (GATE 2 close-out).** The daily WhatsApp send-quota guard is built, migrated (`028_waba_daily_sends` live on Neon), concurrency-proven (20 concurrent `Reserve()` → count==20, all distinct), and wired into the `FallbackChannel` composition in `cmd/api/main.go`. **Blocked on:** WhatsApp Cloud API configured with real Meta credentials in a deployment where `NOTIFICATION_CHANNEL` routes to WhatsApp. **Two items cannot be confirmed until then:** (1) `WHATSAPP_WABA_ID` resolves to the correct WABA the Cloud API adapter sends through (currently unset; the config field exists); (2) one live booking-notification send increments `waba_daily_sends` by exactly 1 for the correct UTC day. GATE 2 is **not fully closed** until this clears. Related: Finding #4 (webhook HMAC) is the same "once WhatsApp is the live channel" gate.
+
+---
+
 ## Appendix — What PASSED (explicit)
 - Secrets never committed; `.env` gitignored; required secrets fail-closed at boot.
 - DB double-booking EXCLUDE constraint present (the designated BLOCKER) ✅.

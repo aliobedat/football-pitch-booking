@@ -13,7 +13,6 @@ import (
 	"errors"
 	"math"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -27,16 +26,13 @@ import (
 	"github.com/ali/football-pitch-api/internal/models"
 	"github.com/ali/football-pitch-api/internal/notification"
 	"github.com/ali/football-pitch-api/internal/otp"
+	"github.com/ali/football-pitch-api/internal/phone"
 	"github.com/ali/football-pitch-api/internal/repository"
 )
 
-// e164Regex mirrors the users_phone_e164_chk DB constraint: a leading '+', a
-// non-zero country-code digit, then up to 14 more digits (15 total max).
-var e164Regex = regexp.MustCompile(`^\+[1-9][0-9]{1,14}$`)
-
-// defaultCountryCode is prepended to local-format numbers that omit one. Malaeb
-// launches in Jordan (+962); see CLAUDE.md (app-layer normalisation).
-const defaultCountryCode = "962"
+// Phone normalisation lives in the shared internal/phone package (Cockpit WO1) so
+// the handler, staff binding, and CRM customer backfill apply the identical
+// E.164/+962 identity rule.
 
 // PhoneAuthStore is the persistence the phone-auth handler needs. It is the
 // consumer-side view of repository.AuthRepository, kept narrow so tests can
@@ -425,29 +421,8 @@ func setRetryAfter(c *gin.Context, err error) {
 //
 // The result is validated against the E.164 pattern; an unparseable number is
 // rejected so a bad value never reaches the OTP store or notification channel.
+// normalizePhone delegates to the shared phone.Normalize (Cockpit WO1 extraction)
+// so the handler, staff binding, and CRM backfill share one identity rule.
 func normalizePhone(raw string) (string, error) {
-	s := strings.TrimSpace(raw)
-	if s == "" {
-		return "", errors.New("phone number is required")
-	}
-
-	// Drop common separators.
-	replacer := strings.NewReplacer(" ", "", "-", "", "(", "", ")", "")
-	s = replacer.Replace(s)
-
-	switch {
-	case strings.HasPrefix(s, "+"):
-		// already international
-	case strings.HasPrefix(s, "00"):
-		s = "+" + strings.TrimPrefix(s, "00")
-	case strings.HasPrefix(s, "0"):
-		s = "+" + defaultCountryCode + strings.TrimPrefix(s, "0")
-	default:
-		s = "+" + defaultCountryCode + s
-	}
-
-	if !e164Regex.MatchString(s) {
-		return "", errors.New("phone number must be a valid E.164 number (e.g. +9627XXXXXXXX)")
-	}
-	return s, nil
+	return phone.Normalize(raw)
 }

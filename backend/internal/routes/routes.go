@@ -29,7 +29,18 @@ func Register(
 	healthHandler := handlers.NewHealthHandler(db)
 	authHandler := handlers.NewAuthHandler(db, jwtManager, cfg)
 	phoneAuthHandler := handlers.NewPhoneAuthHandler(otpSvc, authStore, jwtManager, cfg)
-	bookingHandler := handlers.NewBookingHandler(db, bookingSvc)
+	// Cockpit WO1: Regulars CRM. The booking create paths attach the customer
+	// go-forward via the same repository the CRM reads from.
+	customerRepo := repository.NewCustomerRepository(db)
+	customerHandler := handlers.NewCustomerHandler(customerRepo)
+	// Cockpit WO2: Visual Calendar Command Center (read).
+	calendarHandler := handlers.NewCalendarHandler(repository.NewCalendarRepository(db))
+	// Phase 2 / WO-F2: Expense Ledger + Net Profit (reuses the analytics collected leg).
+	analyticsRepo := repository.NewAnalyticsRepository(db)
+	expenseRepo := repository.NewExpenseRepository(db)
+	expenseHandler := handlers.NewExpenseHandler(expenseRepo)
+	financialsHandler := handlers.NewFinancialsHandler(analyticsRepo, expenseRepo)
+	bookingHandler := handlers.NewBookingHandler(db, bookingSvc).WithCustomers(customerRepo)
 	// The Cloudinary credentials are validated at config load (fail-fast), so the
 	// only error here would be a programming/SDK error — panic to fail fast,
 	// consistent with the other startup security assertions.
@@ -81,9 +92,13 @@ func Register(
 		authRoutes.POST("/request-otp", phoneAuthHandler.RequestOTP)
 		authRoutes.POST("/verify-otp", phoneAuthHandler.VerifyOTP)
 
-		// Refresh is cookie-authenticated and state-changing (token rotation), so
-		// it is CSRF-protected even though it lives outside the protected group.
-		authRoutes.POST("/refresh", middleware.RequireCSRF(), authHandler.Refresh)
+		// Refresh is cookie-authenticated and state-changing (token rotation). CSRF
+		// protection is intentionally NOT applied here: the interceptor's automatic
+		// refresh fires before a readable malaab_csrf cookie is reliably available
+		// (e.g. first load after sign-in), and a CSRF attacker gains nothing from a
+		// forced rotation — the rotated tokens are httpOnly and the response is
+		// CORS-blocked. (Defense-in-depth trade-off, accepted.)
+		authRoutes.POST("/refresh", authHandler.Refresh)
 	}
 
 	// ════════════════════════════════════════════════════════════════════════
@@ -192,17 +207,78 @@ func Register(
 			middleware.RequireRole("owner", "admin"),
 			analyticsHandler.GetRevenueSummary,
 		)
+		protected.GET("/owner/analytics/kpis",
+			middleware.RequireRole("owner", "admin"),
+			analyticsHandler.GetKPIs,
+		)
+		protected.GET("/owner/analytics/timeseries",
+			middleware.RequireRole("owner", "admin"),
+			analyticsHandler.GetTimeSeries,
+		)
+
+		// ── Regulars CRM (owner/admin ONLY — staff/players barred) ─────────────
+		// Owner-scoped customer directory + per-customer profile + private notes.
+		// Scope enforced in SQL via the repository's OwnerScopeFilter.
+		protected.GET("/owner/customers",
+			middleware.RequireRole("owner", "admin"),
+			customerHandler.GetCustomers,
+		)
+		protected.GET("/owner/customers/:id",
+			middleware.RequireRole("owner", "admin"),
+			customerHandler.GetCustomerProfile,
+		)
+		protected.PATCH("/owner/customers/:id/notes",
+			middleware.RequireRole("owner", "admin"),
+			customerHandler.PatchCustomerNotes,
+		)
+
+		// ── Visual Calendar (owner/admin ONLY) — per-day resource timeline ─────
+		protected.GET("/owner/calendar",
+			middleware.RequireRole("owner", "admin"),
+			calendarHandler.GetDayCalendar,
+		)
+
+		// ── Financials / Expense Ledger (owner/admin ONLY) ─────────────────────
+		// Net Profit = (WO-F1 collected) − expenses. CRUD mutations are CSRF-guarded
+		// by the protected group; reads/writes owner-scoped in SQL.
+		protected.GET("/owner/financials",
+			middleware.RequireRole("owner", "admin"),
+			financialsHandler.GetNetSummary,
+		)
+		protected.GET("/owner/expenses",
+			middleware.RequireRole("owner", "admin"),
+			expenseHandler.ListExpenses,
+		)
+		protected.POST("/owner/expenses",
+			middleware.RequireRole("owner", "admin"),
+			expenseHandler.CreateExpense,
+		)
+		protected.PATCH("/owner/expenses/:id",
+			middleware.RequireRole("owner", "admin"),
+			expenseHandler.UpdateExpense,
+		)
+		protected.DELETE("/owner/expenses/:id",
+			middleware.RequireRole("owner", "admin"),
+			expenseHandler.DeleteExpense,
+		)
 
 		// ── Staff provisioning (owner-scoped) ──────────────────────────────────
-		// Owner invites a guard by phone and binds them to a pitch they OWN. The
-		// ownership invariant is enforced in the repository transaction.
-		protected.POST("/pitches/:id/staff",
+		// Owner invites a guard by phone and binds them to ONE OR MORE pitches they
+		// OWN (1:N). pitch_ids travels in the body; the ownership invariant (owner
+		// owns every pitch) is enforced in the repository transaction.
+		protected.POST("/owner/staff",
 			middleware.RequireRole("owner", "admin"),
 			staffHandler.InviteStaff,
 		)
 		protected.GET("/owner/staff",
 			middleware.RequireRole("owner", "admin"),
 			staffHandler.ListStaff,
+		)
+		// Revoke: delete the binding + demote the user to player. Owner-scoped
+		// (an owner can only revoke staff they provisioned).
+		protected.DELETE("/owner/staff/:userId",
+			middleware.RequireRole("owner", "admin"),
+			staffHandler.RevokeStaff,
 		)
 
 		// ── Staff daily schedule + attendance (staff/owner/admin; players barred) ──
@@ -214,6 +290,11 @@ func Register(
 		protected.PATCH("/bookings/:id/attendance",
 			middleware.RequireRole("staff", "owner", "admin"),
 			scheduleHandler.PatchAttendance,
+		)
+		// Cash-Settlement Marker (WO-F1): unpaid | paid_cash on a non-cancelled booking.
+		protected.PATCH("/bookings/:id/payment",
+			middleware.RequireRole("staff", "owner", "admin"),
+			scheduleHandler.PatchPayment,
 		)
 
 		// Owner/admin BLOCKS: create held time (source='block'), or remove it.
@@ -236,6 +317,14 @@ func Register(
 			middleware.RequireRole("owner", "admin"),
 			bookingHandler.CreateManualBooking,
 		)
+		// Owner/admin ACADEMY generator: expand recurrence rules (days_of_week ×
+		// date-range at a fixed time window) into DISCRETE bookings (source='academy').
+		// All-or-nothing — any overlap rolls the series back and returns the conflicting
+		// dates. recurrence_group_id is the idempotency key + bulk-cancel handle.
+		protected.POST("/pitches/:id/bookings/bulk-academy",
+			middleware.RequireRole("owner", "admin"),
+			bookingHandler.CreateAcademyBookings,
+		)
 		// Bulk-cancel all FUTURE occurrences of a recurring walk-in group (past
 		// occurrences preserved). Owner/admin-scoped; idempotent (empty → 200, count 0).
 		protected.DELETE("/pitches/:id/bookings/group/:groupId",
@@ -243,9 +332,11 @@ func Register(
 			bookingHandler.CancelGroup,
 		)
 
-		// Owner/admin: list all bookings across all users and pitches
+		// Owner/admin: list all bookings across all users and pitches. Staff are
+		// also permitted but scoped in SQL to their bound pitch(es) (ResolveScope
+		// 403s unprovisioned staff before this handler).
 		protected.GET("/admin/bookings",
-			middleware.RequireRole("owner", "admin"),
+			middleware.RequireRole("staff", "owner", "admin"),
 			bookingHandler.GetAllBookings,
 		)
 

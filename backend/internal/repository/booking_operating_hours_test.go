@@ -27,12 +27,12 @@ import (
 )
 
 type ohGateEnv struct {
-	pool    *pgxpool.Pool
-	repo    BookingRepository
-	model   *data.PitchModel
-	ownerID int64
+	pool     *pgxpool.Pool
+	repo     BookingRepository
+	model    *data.PitchModel
+	ownerID  int64
 	playerID int64
-	pitchID int64
+	pitchID  int64
 }
 
 func newOHGateEnv(t *testing.T) *ohGateEnv {

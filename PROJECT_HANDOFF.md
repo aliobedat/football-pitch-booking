@@ -179,9 +179,11 @@ handlers   handlers   handlers
 
 ## 4. Database Schema
 
-**Current schema version: Migration 009** (run in order: 002 → 003 → 004 → 005 → 006 → 007 → 008 → 009)
+**Current schema version: Migration 022** (run in order: 002 → 003 → … → 022)
 
 > Audit 2026-06-06 added migrations **008** (pitch soft-delete `deleted_at` + `pitch_audit_log` table) and **009** (`pitches.image_public_id`), which the earlier "version 007" line predated.
+
+> Re-synced 2026-06-15 (PR 8.1): the live Neon schema is at **migration 022** — well ahead of the "009" this section previously claimed. The bookings table below is reconciled to the live schema + migration files. Bookings-relevant migrations past 009: **010** (`booking_idempotency_keys` table), **011** (`idx_bookings_player_id`, `idx_pitches_owner_id`), **012** (`booking_range` `tsrange` → **`tstzrange`**, EXCLUDE recreated), **016** (`source` discriminator + `player_id` nullable), **017** (manual/walk-in: `guest_name`/`guest_phone` + guest CHECK), **018→019** (academy series rolled forward to lean recurrence: `recurrence_group_id` UUID + partial index; `series_id`/`booking_series` dropped), **022** (`attendance`). Other §4 tables (users/pitches) were NOT re-audited in this pass — treat the live DB as ground truth and verify before trusting them.
 
 > Note: Migration 002 has no paired `.down.sql`. The base `pitches`/`bookings`/`users` tables predate migration 002 and are not reproduced in this repo's migration set — 002+ only alter them. Treat the live Neon schema (verified by the D.5 smoke test) as ground truth.
 
@@ -226,17 +228,30 @@ handlers   handlers   handlers
 > Related tables not previously listed: **`reviews`** (pre-002; LEFT-JOINed for rating/count) and **`pitch_audit_log`** (migration 008; records pitch activate/deactivate/delete with actor + role).
 
 ### `bookings`
+> Reconciled 2026-06-15 (PR 8.1) against live Neon introspection + migration files. Columns in physical order.
+
 | Column | Type | Notes |
 |--------|------|-------|
-| id | SERIAL PK | |
-| pitch_id | INT FK pitches | |
-| **player_id** | INT FK users | the booking owner (code/SQL use `player_id`, **not** `user_id`) |
-| booking_range | **tsrange** (timestamp; UTC by convention) | written via `tsrange($lo::timestamp,$hi::timestamp,'[)')`; GIST EXCLUDE: no overlap WHERE `status <> 'cancelled'` |
-| status | booking_status ENUM | `pending/confirmed/rejected/completed/cancelled/no_show` — only `confirmed`/`cancelled` exercised |
-| total_price | NUMERIC | computed from `price_per_hour × duration` |
-| payment_status | payment_status ENUM | `unpaid` ONLY — dormant seam |
-| reminder_sent | BOOL DEFAULT false | flipped true when 24h reminder enqueued |
-| created_at | TIMESTAMPTZ | |
+| id | SERIAL PK | `nextval('bookings_id_seq')` |
+| pitch_id | INT FK pitches NOT NULL | FK `ON DELETE RESTRICT` |
+| **player_id** | INT FK users **NULLABLE** | the booking owner (code/SQL use `player_id`, **not** `user_id`). **Nullable since migration 016** — block/manual rows carry NO player. FK `ON DELETE RESTRICT` |
+| booking_range | **`tstzrange`** NOT NULL | **migration 012 converted `tsrange` → `tstzrange`** (true instants, not UTC-by-convention naïve timestamps). Written via `tstzrange($lo::timestamptz,$hi::timestamptz,'[)')`. Governs the GIST EXCLUDE: no overlap WHERE `status <> 'cancelled'` (the ONLY double-booking guard) |
+| status | booking_status ENUM NOT NULL DEFAULT `pending` | `pending/confirmed/rejected/completed/cancelled/no_show` — only `confirmed`/`cancelled` exercised |
+| total_price | NUMERIC NOT NULL | computed from `price_per_hour × duration`; CHECK `total_price >= 0` |
+| notes | TEXT NULL | base-table column (pre-002); not surfaced in the app layer |
+| created_at | TIMESTAMPTZ NOT NULL DEFAULT now() | |
+| updated_at | TIMESTAMPTZ NOT NULL DEFAULT now() | base-table column |
+| payment_status | payment_status ENUM NOT NULL DEFAULT `unpaid` | `unpaid` ONLY — dormant reserved seam (migration 003) |
+| reminder_sent | BOOL NOT NULL DEFAULT false | flipped true when 24h reminder enqueued (migration 006) |
+| source | TEXT **NOT NULL, NO DEFAULT** | discriminator (migration 016, default dropped → every insert MUST state it). CHECK `source IN ('player','academy','block','manual')` (`'manual'` added 017; `'academy'` reserved/dormant). Every booking-seed fixture MUST set this |
+| guest_name | TEXT NULL | migration 017 — walk-in guest; CHECK `source<>'manual' OR guest_name IS NOT NULL` |
+| guest_phone | TEXT NULL | migration 017 — optional walk-in contact |
+| recurrence_group_id | UUID NULL | migration 019 — shared UUID across a recurring walk-in series (NULL for one-off); partial index `idx_bookings_recurrence_group` |
+| attendance | VARCHAR(16) NOT NULL DEFAULT `pending` | migration 022 — CHECK `attendance IN ('pending','checked_in','no_show')`; per-player no-show history derives from this |
+
+**Key constraints (live):** `bookings_pitch_id_booking_range_excl` (GIST EXCLUDE, the anti-double-booking guard); `bookings_source_chk` (source value-domain); `bookings_source_player_chk` (branchy bidirectional — `source IN ('player','academy') ⟺ player_id IS NOT NULL`, `source IN ('block','manual') ⟹ player_id IS NULL`); `bookings_manual_guest_chk`; `chk_min_duration` (`upper-lower >= 1h`); `chk_valid_range` (non-empty, bounds non-null); `bookings_total_price_check`; `uq_booking_triple` UNIQUE `(id, player_id, pitch_id)`.
+
+**Indexes (live):** `idx_bookings_pitch`, `idx_bookings_player`, `idx_bookings_player_id` (011), `idx_bookings_player_pitch`, `idx_bookings_range` (GIST), `idx_bookings_recurrence_group` (partial, 019), `idx_bookings_reminder_due` (partial on `lower(booking_range)`, 006).
 
 ### `status_transitions` (audit, append-only)
 | Column | Type | Notes |
@@ -417,3 +432,79 @@ CSRF: state-changing cookie-authenticated requests must send `X-CSRF-Token` equa
 2. ~~Keep legacy email/password auth?~~ **Resolved → removed; phone OTP only.**
 3. Is `+962` (Jordan) the permanent default country code, or will multi-country support be needed?
 4. Should `email` collection be surfaced anywhere in the UI now that it's optional/secondary, or stay backend-only?
+
+
+---
+
+# Appendix: Owner-Dashboard Migration Close-Out
+
+_Archived from `Malaeb_Daily_Report_2026-06-16.md` (June 16, 2026). Verbatim engineering report; appended for permanent record. Does not supersede any architectural constraint above._
+
+# Malaeb — Daily Engineering Report
+
+**Date:** June 16, 2026
+**Chapter:** Owner-Dashboard Migration — Close-Out
+
+---
+
+## Headline
+
+The owner dashboard is now a fully standalone application, decoupled from the player-facing B2C app at the auth, routing, and deployment-surface level. The legacy owner dashboard embedded in the B2C app — 1,507 lines — has been purged. The B2C app is now 100% player-facing. The full system was verified running locally across three independent services. The migration chapter is closed, pending the pre-launch carry-forward items below.
+
+---
+
+## Architecture: Before → After
+
+**Before** — a single Next.js B2C app served both audiences. Owners authenticated through the B2C login and were redirected into an embedded `/dashboard`. Auth, navigation, and edge routing were entangled across the player and owner surfaces — the root cause of two separate 404 risks caught today.
+
+**After** — three independent surfaces:
+
+| Surface | Responsibility | Local |
+|---|---|---|
+| Go API backend | Single source of truth — auth, scoping, booking engine | — |
+| B2C app | 100% player-facing: browse, availability, reviews, booking | `:3000` |
+| Admin Dashboard | Owner/admin operations, its own auth origin + route guard | `:3001` |
+
+---
+
+## What Shipped Today
+
+### Frontend integration & hardening (PR 7 → 8.5)
+
+- **PR 7** — Booking-ops UI ported byte-identical (BlocksModal, manual/walk-in bookings), tenant-isolation boundary confirmed.
+- **PR 8** — Cancellation UI wired to `PATCH /bookings/:id/cancel`: explicit confirm step, server-authoritative state, no optimistic mutation. Full parity audit produced as the purge gate — which caught the Operating-Hours gap before any deletion.
+- **PR 8.1** — IDOR / cross-tenant integration suite restored to a runnable state; `PROJECT_HANDOFF.md §4` re-synced to the live `tstzrange` schema after doc and test fixtures were found to have drifted.
+- **PR 8.5** — Operating-Hours editor ported (a live owner capability the purge would otherwise have stranded — and one that matters acutely in this market for Ramadan/seasonal hours); toggle rollback now surfaces a toast instead of failing silently; HTTP-level cross-tenant boundary added to the verification pass.
+
+### The decoupling trilogy (PR A → B → 9)
+
+- **Standalone Admin Auth (PR A)** — the Admin Dashboard received its own OTP login, an owner/admin role gate (player-only accounts rejected at the door), and its own route guard, on an isolated auth origin. Additive step: nothing legacy was removed.
+- **B2C Scrub (PR B)** — every owner surface and `/dashboard` reference stripped from the B2C app (login redirect, nav, edge guards). Owners in B2C are now treated as players with a passive link to the admin app — no cross-app redirect coupling introduced. Legacy dashboard left orphaned and grep-clean.
+- **Broad Purge (PR 9)** — the orphaned legacy dashboard and its dead routes deleted in a single isolated, revertable commit, gated on the grep-clean evidence from PR B.
+
+---
+
+## Engineering Decisions That Held the Line
+
+- **Destructive decoupled from constructive** — isolated commits and a human gate before every irreversible step. This failsafe fired twice today and prevented two separate 404 disasters.
+- **YAGNI on features, never on invariants** — tenant isolation, fail-closed config, and DB-level constraints were never re-litigated; only redundant re-verification was cut.
+- **Owner-treated-as-player over hard redirect** — avoided re-introducing the exact cross-app coupling the migration set out to remove.
+- **Origin-isolated auth as defense-in-depth** — a compromise on the public B2C surface can no longer hand over higher-privilege owner/admin sessions.
+
+---
+
+## Verification Status
+
+- Repository-layer IDOR / cross-tenant scoping — green against the live schema.
+- Cross-tenant cancellation — 404, zero side effects, zero audit rows.
+- Full decoupled system — confirmed running locally across the three services above.
+
+---
+
+## Carry-Forward (to close before launch)
+
+- Confirm the PR 8.1 doc + fixture changes and the PR 8.5 HTTP cross-tenant ping evidence are committed and captured.
+- Provision the Admin Dashboard production deployment: a dedicated Vercel origin/subdomain, with that production admin origin added to backend CORS + CSRF allow-lists and the cookie config.
+- Settle the production cookie-domain strategy — host-only recommended, to preserve the auth isolation achieved today.
+- CSP: move from Report-Only to enforced (pending Google Maps origin validation).
+- Standing roadmap: payments integration (architectural seam reserved), STOP-keyword webhook → `opt_out`, and legal-entity registration unlocking Meta Business verification (WhatsApp templates) and A2P SMS sender-ID registration.

@@ -1,0 +1,14 @@
+# Normalize line endings: treat all text files as text and check them out with
+# LF in the working tree, so commits never carry CRLF noise regardless of OS.
+* text=auto eol=lf
+
+# Binary assets git should never touch.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.woff binary
+*.woff2 binary

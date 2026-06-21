@@ -33,6 +33,18 @@ func (f *fakeAnalyticsRepo) OwnerRevenueSummary(_ context.Context, actor auth.Ac
 	return f.summary, nil
 }
 
+func (f *fakeAnalyticsRepo) OwnerKPIs(_ context.Context, actor auth.Actor) (repository.KPISummary, error) {
+	f.calls++
+	f.lastActor = actor
+	return repository.KPISummary{}, nil
+}
+
+func (f *fakeAnalyticsRepo) OwnerTimeSeries(_ context.Context, actor auth.Actor, _ repository.TimeSeriesParams) ([]repository.TimeBucket, error) {
+	f.calls++
+	f.lastActor = actor
+	return nil, nil
+}
+
 // newAnalyticsRouter mounts the finance route behind the SAME RequireRole guard
 // used in production, with an identity injector standing in for RequireAuth.
 func newAnalyticsRouter(h *AnalyticsHandler, userID int, role string) *gin.Engine {
@@ -43,6 +55,8 @@ func newAnalyticsRouter(h *AnalyticsHandler, userID int, role string) *gin.Engin
 		c.Next()
 	}
 	r.GET("/owner/analytics", inject, middleware.RequireRole("owner", "admin"), h.GetRevenueSummary)
+	r.GET("/owner/analytics/kpis", inject, middleware.RequireRole("owner", "admin"), h.GetKPIs)
+	r.GET("/owner/analytics/timeseries", inject, middleware.RequireRole("owner", "admin"), h.GetTimeSeries)
 	return r
 }
 
@@ -105,5 +119,69 @@ func TestAnalytics_AdminUnscoped(t *testing.T) {
 	// OwnerScopeFilter yields "TRUE" (all pitches).
 	if !repo.lastActor.IsAdmin() {
 		t.Fatalf("actor = %+v, want admin (unscoped)", repo.lastActor)
+	}
+}
+
+// ── New WO2 endpoints: same finance boundary + owner scoping ────────────────
+
+func TestKPIs_StaffForbidden(t *testing.T) {
+	repo := &fakeAnalyticsRepo{}
+	r := newAnalyticsRouter(NewAnalyticsHandler(repo), 9, "staff")
+	rec := doJSON(t, r, http.MethodGet, "/owner/analytics/kpis", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for staff hitting KPIs", rec.Code)
+	}
+	if repo.calls != 0 {
+		t.Fatalf("KPI query ran for staff (%d calls); must never run", repo.calls)
+	}
+}
+
+func TestKPIs_OwnerScopedToSelf(t *testing.T) {
+	repo := &fakeAnalyticsRepo{}
+	const ownerID = 42
+	r := newAnalyticsRouter(NewAnalyticsHandler(repo), ownerID, "owner")
+	rec := doJSON(t, r, http.MethodGet, "/owner/analytics/kpis", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if repo.lastActor.UserID != ownerID || repo.lastActor.Role != "owner" {
+		t.Fatalf("actor = %+v, want owner #%d", repo.lastActor, ownerID)
+	}
+}
+
+func TestTimeSeries_StaffForbidden(t *testing.T) {
+	repo := &fakeAnalyticsRepo{}
+	r := newAnalyticsRouter(NewAnalyticsHandler(repo), 9, "staff")
+	rec := doJSON(t, r, http.MethodGet, "/owner/analytics/timeseries", nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for staff hitting timeseries", rec.Code)
+	}
+	if repo.calls != 0 {
+		t.Fatalf("timeseries query ran for staff; must never run")
+	}
+}
+
+func TestTimeSeries_InvalidGranularity(t *testing.T) {
+	repo := &fakeAnalyticsRepo{}
+	r := newAnalyticsRouter(NewAnalyticsHandler(repo), 42, "owner")
+	rec := doJSON(t, r, http.MethodGet, "/owner/analytics/timeseries?granularity=hour", nil)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 for invalid granularity", rec.Code)
+	}
+	if repo.calls != 0 {
+		t.Fatalf("repo queried despite invalid granularity; must reject before querying")
+	}
+}
+
+func TestTimeSeries_OwnerScopedDefaultsToDay(t *testing.T) {
+	repo := &fakeAnalyticsRepo{}
+	const ownerID = 42
+	r := newAnalyticsRouter(NewAnalyticsHandler(repo), ownerID, "owner")
+	rec := doJSON(t, r, http.MethodGet, "/owner/analytics/timeseries", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if repo.lastActor.UserID != ownerID || repo.lastActor.Role != "owner" {
+		t.Fatalf("actor = %+v, want owner #%d (owner scoping)", repo.lastActor, ownerID)
 	}
 }

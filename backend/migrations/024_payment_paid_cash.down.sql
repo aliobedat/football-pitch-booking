@@ -1,0 +1,21 @@
+-- 024_payment_paid_cash.down.sql  (reverse of 024 — DELIBERATE NO-OP)
+--
+-- PostgreSQL cannot remove a value from an ENUM type. There is no
+-- `ALTER TYPE ... DROP VALUE`. Therefore this down-migration is an intentional
+-- no-op: re-applying the up is harmless (IF NOT EXISTS), and leaving 'paid_cash'
+-- in the enum is inert as long as no logic writes it.
+--
+-- If a TRUE rollback is ever required (it should not be), the only path is a full
+-- type recreate, which is destructive and MUST be done deliberately, off this file:
+--   1. Ensure NO booking row holds payment_status = 'paid_cash'
+--      (UPDATE bookings SET payment_status = 'unpaid' WHERE payment_status = 'paid_cash';).
+--   2. ALTER TABLE bookings ALTER COLUMN payment_status DROP DEFAULT;
+--   3. ALTER TYPE payment_status RENAME TO payment_status_old;
+--   4. CREATE TYPE payment_status AS ENUM ('unpaid');
+--   5. ALTER TABLE bookings ALTER COLUMN payment_status
+--        TYPE payment_status USING payment_status::text::payment_status;
+--   6. ALTER TABLE bookings ALTER COLUMN payment_status SET DEFAULT 'unpaid';
+--   7. DROP TYPE payment_status_old;
+-- (steps 3–7 cannot run inside a single transaction alongside the rename either).
+--
+-- No statements are executed here.

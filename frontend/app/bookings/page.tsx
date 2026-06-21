@@ -2,10 +2,8 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import Link from 'next/link';
-import { useRouter } from 'next/navigation';
 import api from '@/lib/api';
 import Navbar from '@/components/Navbar';
-import { useAuth } from '@/context/AuthContext';
 import { CalendarDays, Clock, CreditCard, MapPin } from 'lucide-react';
 import { formatDate as fmtDateAmman, formatTime as fmtTimeAmman } from '@/lib/format';
 
@@ -218,14 +216,8 @@ function BookingCard({
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function BookingsPage() {
-  const { user, isLoading: authLoading } = useAuth();
-  const router = useRouter();
-
-  useEffect(() => {
-    if (!authLoading && user?.role === 'owner') {
-      router.replace('/dashboard');
-    }
-  }, [user, authLoading, router]);
+  // B2C is player-facing only: no role-based routing. An owner-role account
+  // sees the normal player bookings experience (backend stays the referee).
 
   const [bookings, setBookings] = useState<Booking[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -251,7 +243,7 @@ export default function BookingsPage() {
     );
   }, []);
 
-  if (isLoading || authLoading || user?.role === 'owner') {
+  if (isLoading) {
     return (
       <div className="min-h-screen bg-[#0d0f0e] flex items-center justify-center">
         <div className="w-6 h-6 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />

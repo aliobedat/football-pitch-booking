@@ -18,10 +18,10 @@ interface VerifyResponse {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// destForRole sends owners/admins to their dashboard and players to the pitch list.
-function destForRole(role: User['role']): string {
-  return role === 'owner' || role === 'admin' ? '/dashboard' : '/pitches';
-}
+// The B2C app is player-facing only: EVERY successful login lands on the player
+// pitch list, regardless of role. Owners manage pitches in the separate admin app
+// (see the passive link in the Navbar) — the B2C app never routes to a dashboard.
+const PLAYER_HOME = '/pitches';
 
 // mapError turns a backend error envelope into an Arabic, user-facing message.
 function mapError(err: unknown): string {
@@ -83,7 +83,7 @@ export default function LoginPage() {
   // Redirect already-authenticated users away from this page.
   useEffect(() => {
     if (!authLoading && user) {
-      router.replace(destForRole(user.role));
+      router.replace(PLAYER_HOME);
     }
   }, [user, authLoading, router]);
 
@@ -144,7 +144,7 @@ export default function LoginPage() {
       // The backend has already set the httpOnly session cookies; we only adopt
       // the returned profile into context.
       login(data.data.user);
-      router.push(destForRole(data.data.user.role));
+      router.push(PLAYER_HOME);
     } catch (err) {
       setApiError(mapError(err));
     } finally {

@@ -15,8 +15,8 @@ import (
 // MemoryStore satisfies Store and RateLimiter.
 type MemoryStore struct {
 	mu       sync.Mutex
-	codes    map[string]Code     // phone -> active code
-	verified map[string]bool     // phone -> verified
+	codes    map[string]Code        // phone -> active code
+	verified map[string]bool        // phone -> verified
 	events   map[string][]time.Time // rate-limit key -> event timestamps
 }
 

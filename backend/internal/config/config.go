@@ -104,6 +104,14 @@ type CloudinaryConfig struct {
 type WhatsAppConfig struct {
 	Token      string // WHATSAPP_TOKEN — Meta Cloud API bearer token
 	PhoneID    string // WHATSAPP_PHONE_ID — sender phone-number id
+	// WABAID is the WhatsApp Business Account id the daily send-quota guard
+	// (GATE 2) keys its per-UTC-day counter on (WHATSAPP_WABA_ID). It is DISTINCT
+	// from PhoneID (the sender phone-number id used for outbound Cloud API calls):
+	// the unverified-tier messaging limit is enforced at the WABA level. Optional
+	// at load time like the other WhatsApp settings; an empty value means the
+	// quota guard buckets under an empty key — acceptable only for FAKE/SMS
+	// deployments that never route booking notifications through WhatsApp.
+	WABAID     string
 	APIBaseURL string // WHATSAPP_API_BASE_URL — Graph API base (default https://graph.facebook.com)
 	APIVersion string // WHATSAPP_API_VERSION — Graph API version (default v21.0)
 	// WebhookVerifyToken is the token Meta echoes during the status-webhook
@@ -313,6 +321,7 @@ func loadWhatsAppConfig() WhatsAppConfig {
 	return WhatsAppConfig{
 		Token:              getEnv("WHATSAPP_TOKEN", ""),
 		PhoneID:            getEnv("WHATSAPP_PHONE_ID", ""),
+		WABAID:             getEnv("WHATSAPP_WABA_ID", ""),
 		APIBaseURL:         getEnv("WHATSAPP_API_BASE_URL", "https://graph.facebook.com"),
 		APIVersion:         getEnv("WHATSAPP_API_VERSION", "v21.0"),
 		WebhookVerifyToken: getEnv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", ""),

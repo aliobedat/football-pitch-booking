@@ -17,16 +17,16 @@ import (
 )
 
 type fakeResolver struct {
-	pitchID int
-	ownerID int
-	found   bool
-	err     error
-	calls   int
+	pitchIDs []int
+	ownerID  int
+	found    bool
+	err      error
+	calls    int
 }
 
-func (f *fakeResolver) StaffBinding(_ context.Context, _ int) (int, int, bool, error) {
+func (f *fakeResolver) StaffBindings(_ context.Context, _ int) ([]int, int, bool, error) {
 	f.calls++
-	return f.pitchID, f.ownerID, f.found, f.err
+	return f.pitchIDs, f.ownerID, f.found, f.err
 }
 
 func runScope(role string, resolver StaffScopeResolver) (*httptest.ResponseRecorder, auth.Scope, bool) {
@@ -51,13 +51,13 @@ func runScope(role string, resolver StaffScopeResolver) (*httptest.ResponseRecor
 }
 
 func TestResolveScope_StaffWithBindingInjected(t *testing.T) {
-	resolver := &fakeResolver{pitchID: 7, ownerID: 42, found: true}
+	resolver := &fakeResolver{pitchIDs: []int{7, 9}, ownerID: 42, found: true}
 	rec, scope, reached := runScope(auth.RoleStaff, resolver)
 	if rec.Code != http.StatusOK || !reached {
 		t.Fatalf("status = %d reached=%v, want 200 and handler reached", rec.Code, reached)
 	}
-	if scope.BoundPitchID != 7 || scope.ProvisionedBy != 42 {
-		t.Fatalf("scope = %+v, want pitch 7 / owner 42 injected", scope)
+	if len(scope.BoundPitchIDs) != 2 || scope.BoundPitchIDs[0] != 7 || scope.BoundPitchIDs[1] != 9 || scope.ProvisionedBy != 42 {
+		t.Fatalf("scope = %+v, want pitches [7 9] / owner 42 injected", scope)
 	}
 }
 
@@ -74,7 +74,7 @@ func TestResolveScope_StaffWithoutBindingForbidden(t *testing.T) {
 
 func TestResolveScope_NonStaffPassThroughNoDBHit(t *testing.T) {
 	for _, role := range []string{auth.RoleOwner, auth.RoleAdmin, auth.RolePlayer} {
-		resolver := &fakeResolver{pitchID: 7, ownerID: 42, found: true}
+		resolver := &fakeResolver{pitchIDs: []int{7}, ownerID: 42, found: true}
 		rec, scope, reached := runScope(role, resolver)
 		if rec.Code != http.StatusOK || !reached {
 			t.Fatalf("role %s: status = %d reached=%v, want 200/reached", role, rec.Code, reached)

@@ -1,21 +1,19 @@
-import { NextRequest, NextResponse } from 'next/server';
+import { NextResponse, type NextRequest } from 'next/server';
 
-// Protect all routes under /dashboard — only 'owner' role may access them.
-// The malaab_role cookie is set on login (AuthContext) and cleared on logout.
-// This is a UI-layer guard; the backend enforces the real check via JWT role.
-export function proxy(request: NextRequest) {
-  const role = request.cookies.get('malaab_role')?.value;
-
-  if (role !== 'owner' && role !== 'admin') {
-    const destination = role
-      ? '/pitches'  // logged-in player → send to pitch list
-      : '/login';   // unauthenticated → send to login
-    return NextResponse.redirect(new URL(destination, request.url));
-  }
-
+// B2C edge proxy — intentionally INERT (PR B scrub).
+//
+// The B2C app is player-facing only and browsing is ROLE-AGNOSTIC: there is no
+// owner/admin routing and no protected page tier here. The single auth boundary
+// is the booking MUTATION (POST /bookings), which the Go backend enforces on the
+// API — not the edge. So this middleware does nothing but pass requests through.
+//
+// (The file is kept rather than removed so the change is a clean de-reference;
+// owners are pointed to the separate admin app via a passive Navbar link.)
+export function proxy(_request: NextRequest) {
   return NextResponse.next();
 }
 
 export const config = {
-  matcher: ['/dashboard/:path*'],
+  // Match nothing real — the proxy is a no-op. Kept present, exercises no routes.
+  matcher: ['/__b2c_proxy_disabled'],
 };

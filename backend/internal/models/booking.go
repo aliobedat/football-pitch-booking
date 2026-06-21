@@ -31,9 +31,9 @@ const (
 
 // الهيكل الأساسي للحجز. PlayerID يطابق عمود player_id في قاعدة البيانات.
 type Booking struct {
-	ID         int64         `json:"id"`
-	PitchID    int64         `json:"pitch_id"`
-	PitchName  string        `json:"pitch_name,omitempty"`
+	ID        int64  `json:"id"`
+	PitchID   int64  `json:"pitch_id"`
+	PitchName string `json:"pitch_name,omitempty"`
 	// PlayerID is a pointer because non-player rows (block, academy) have a NULL
 	// player_id (DB CHECK: source='player' ⟺ player_id IS NOT NULL). For player
 	// bookings it is always set.
@@ -106,6 +106,10 @@ type AdminBooking struct {
 	Source     BookingSource `json:"source"`
 	TotalPrice float64       `json:"total_price"`
 	CreatedAt  time.Time     `json:"created_at"`
+
+	// PaymentStatus is the cash-settlement marker (WO-F1): unpaid | paid_cash. The
+	// dashboard's "Collected" figures sum total_price over paid_cash rows.
+	PaymentStatus string `json:"payment_status"`
 
 	// Guest identity for manual (walk-in) rows — the dashboard shows guest_name in
 	// place of the (absent) player. nil for every non-manual source.

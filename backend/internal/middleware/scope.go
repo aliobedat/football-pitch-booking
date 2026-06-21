@@ -13,10 +13,10 @@ import (
 const ContextKeyScope = "malaab.scope"
 
 // StaffScopeResolver is the seam ResolveScope uses to look up a staff member's
-// binding. Backed by repository.StaffRepository in production; faked in tests.
+// bindings. Backed by repository.StaffRepository in production; faked in tests.
 // (gin.Context satisfies context.Context, so the handler passes `c` directly.)
 type StaffScopeResolver interface {
-	StaffBinding(ctx context.Context, userID int) (pitchID int, ownerID int, found bool, err error)
+	StaffBindings(ctx context.Context, userID int) (pitchIDs []int, ownerID int, found bool, err error)
 }
 
 // ResolveScope is the CENTRAL scope guard. Chained after RequireAuth inside the
@@ -42,14 +42,14 @@ func ResolveScope(resolver StaffScopeResolver) gin.HandlerFunc {
 		}
 
 		userID := GetUserID(c)
-		pitchID, ownerID, found, err := resolver.StaffBinding(c, userID)
+		pitchIDs, ownerID, found, err := resolver.StaffBindings(c, userID)
 		if err != nil {
 			c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{
 				"error": "scope_resolution_failed", "message": "could not resolve your access scope",
 			})
 			return
 		}
-		if !found {
+		if !found || len(pitchIDs) == 0 {
 			// Provisioned-but-unbound staff (or a stale promotion): deny entirely.
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
 				"error": "staff_unprovisioned", "message": "no pitch is assigned to your account",
@@ -57,7 +57,7 @@ func ResolveScope(resolver StaffScopeResolver) gin.HandlerFunc {
 			return
 		}
 
-		c.Set(ContextKeyScope, auth.Scope{BoundPitchID: pitchID, ProvisionedBy: ownerID})
+		c.Set(ContextKeyScope, auth.Scope{BoundPitchIDs: pitchIDs, ProvisionedBy: ownerID})
 		c.Next()
 	}
 }

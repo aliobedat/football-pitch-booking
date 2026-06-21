@@ -138,7 +138,9 @@ func main() {
 	} else {
 		channelOpts = append(channelOpts,
 			notification.WithChannel(notification.ChannelWhatsApp,
-				notification.NewFallbackChannel(wa, sms)))
+				notification.NewFallbackChannel(
+					notification.NewQuotaGuardedChannel(wa, outbox.NewQuotaStore(pool), cfg.WhatsApp.WABAID, slog.Default()),
+					sms)))
 	}
 
 	notifier := notification.NewService(activeChannel, channelOpts...)

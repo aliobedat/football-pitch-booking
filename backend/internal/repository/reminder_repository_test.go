@@ -102,8 +102,8 @@ func (e *reminderTestEnv) seedBooking(t *testing.T, startOffset time.Duration) i
 	end := start.Add(time.Hour)
 	var id int64
 	if err := e.pool.QueryRow(ctx, `
-		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status)
-		VALUES ($1, $2, tsrange($3::timestamp, $4::timestamp, '[)'), 30, 'confirmed')
+		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status, source)
+		VALUES ($1, $2, tstzrange($3::timestamptz, $4::timestamptz, '[)'), 30, 'confirmed', 'player')
 		RETURNING id
 	`, e.pitchID, e.playerID, start, end).Scan(&id); err != nil {
 		t.Fatalf("seed booking (offset %s): %v", startOffset, err)

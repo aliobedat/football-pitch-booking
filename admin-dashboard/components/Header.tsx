@@ -1,6 +1,6 @@
 'use client';
 
-import { LogOut } from 'lucide-react';
+import { LogOut, Menu } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 
 const ROLE_LABEL: Record<string, string> = {
@@ -10,7 +10,15 @@ const ROLE_LABEL: Record<string, string> = {
   super_admin: 'مشرف عام',
 };
 
-export default function Header() {
+interface HeaderProps {
+  // Mobile drawer controls — owned by the dashboard layout. The hamburger is
+  // hidden at md+ (the sidebar is persistent there).
+  isOpen: boolean;
+  onOpen: () => void;
+  onClose: () => void;
+}
+
+export default function Header({ isOpen, onOpen, onClose }: HeaderProps) {
   const { user, logout } = useAuth();
 
   return (
@@ -21,14 +29,27 @@ export default function Header() {
           {user ? ROLE_LABEL[user.role] ?? user.role : ''}
         </span>
       </div>
-      <button
-        type="button"
-        onClick={() => logout()}
-        className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold text-white/45 hover:text-white/80 transition-colors"
-      >
-        <LogOut size={14} aria-hidden />
-        تسجيل الخروج
-      </button>
+      <div className="flex items-center gap-4">
+        <button
+          type="button"
+          onClick={() => logout()}
+          className="inline-flex items-center gap-1.5 text-[12.5px] font-semibold text-white/45 hover:text-white/80 transition-colors"
+        >
+          <LogOut size={14} aria-hidden />
+          تسجيل الخروج
+        </button>
+        {/* Hamburger sits on the LEFT (RTL — opposite the right-hand drawer).
+            Mobile only; the sidebar is persistent at md+. */}
+        <button
+          type="button"
+          onClick={() => (isOpen ? onClose() : onOpen())}
+          aria-label={isOpen ? 'إغلاق القائمة' : 'فتح القائمة'}
+          aria-expanded={isOpen}
+          className="md:hidden flex items-center justify-center w-9 h-9 rounded-lg text-white/55 hover:text-white hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500"
+        >
+          <Menu size={20} aria-hidden />
+        </button>
+      </div>
     </header>
   );
 }

@@ -153,7 +153,8 @@ export function AvailabilitySearchBar({ s }: { s: UseAvailabilitySearch }) {
       </div>
 
       {/* Location control + permission-denied path */}
-      <div className="mt-3 flex items-center gap-2 flex-wrap">
+      {/* V1: location control hidden (UI only — s.requestLocation/useUserLocation intact, re-enable in V2). */}
+      <div className="mt-3 hidden items-center gap-2 flex-wrap">
         <button
           type="button"
           onClick={s.requestLocation}

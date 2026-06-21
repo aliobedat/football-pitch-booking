@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { canViewFinance, isDashboardRole } from '@malaab/shared/auth';
 import { useAuth } from '@/context/AuthContext';
@@ -19,6 +19,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const { user, isLoading } = useAuth();
   const pathname = usePathname();
   const router = useRouter();
+  // Mobile drawer open/closed. Desktop ignores it (sidebar is persistent at md+).
+  const [isOpen, setIsOpen] = useState(false);
+
+  // Close the drawer whenever the route changes (covers any nav not routed
+  // through the drawer's own onClick).
+  useEffect(() => { setIsOpen(false); }, [pathname]);
 
   useEffect(() => {
     if (isLoading) return;
@@ -28,7 +34,14 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       router.replace('/login');
       return;
     }
-    // Staff deep-linking finance/analytics → clean redirect to overview.
+    // Staff are confined to جدول اليوم (/schedule) + الحجوزات (/bookings) in V1.
+    // Any other route — the overview, pitches, or a finance deep-link — bounces
+    // here. Runs BEFORE the finance check so a staff user lands on /schedule.
+    if (user.role === 'staff' && pathname !== '/schedule' && pathname !== '/bookings') {
+      router.replace('/schedule');
+      return;
+    }
+    // Non-staff deep-linking finance/analytics they can't view → overview.
     if (isFinanceRoute(pathname) && !canViewFinance(user.role)) {
       router.replace('/');
     }
@@ -47,10 +60,10 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
 
   return (
     <div className="min-h-screen flex">
-      <Sidebar role={user.role} />
+      <Sidebar role={user.role} isOpen={isOpen} onClose={() => setIsOpen(false)} />
       <div className="flex-1 flex flex-col min-w-0">
-        <Header />
-        <main className="flex-1 p-6 overflow-auto">{children}</main>
+        <Header isOpen={isOpen} onOpen={() => setIsOpen(true)} onClose={() => setIsOpen(false)} />
+        <main className="flex-1 min-w-0 p-6 overflow-y-auto overflow-x-hidden">{children}</main>
       </div>
     </div>
   );
