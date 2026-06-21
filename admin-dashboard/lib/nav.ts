@@ -15,11 +15,13 @@ export interface NavItem {
 // staff. (super_admin's global platform sections land here later as admin-only
 // items in this same shell.)
 export const NAV_ITEMS: NavItem[] = [
-  { href: '/', label: 'نظرة عامة', icon: LayoutDashboard, visible: () => true },
+  // Staff are confined to جدول اليوم + الحجوزات (V1); overview/pitches are hidden
+  // for them in the sidebar and enforced by the layout confinement guard.
+  { href: '/', label: 'نظرة عامة', icon: LayoutDashboard, visible: (role) => role !== 'staff' },
   { href: '/schedule', label: 'جدول اليوم', icon: ClipboardList, visible: () => true },
   { href: '/bookings', label: 'الحجوزات', icon: CalendarCheck, visible: () => true },
   { href: '/calendar', label: 'التقويم', icon: CalendarRange, visible: (role) => canViewFinance(role) },
-  { href: '/pitches', label: 'الملاعب', icon: MapPin, visible: () => true },
+  { href: '/pitches', label: 'الملاعب', icon: MapPin, visible: (role) => role !== 'staff' },
   {
     href: '/customers',
     label: 'الزبائن',
