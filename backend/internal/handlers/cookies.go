@@ -66,23 +66,26 @@ func issueSessionCookies(c *gin.Context, cfg *config.Config, accessToken, rawRef
 	sameSite, secure := cookieSecurity(cfg)
 	accessMaxAge := int(cfg.JWT.AccessExpiry.Seconds())
 	refreshMaxAge := int(cfg.JWT.RefreshExpiry.Seconds())
+	// Empty in dev (host-only); ".malaebjo.com" in prod (cross-subdomain). All
+	// five cookies share this so the set is consistent across subdomains.
+	cookieDomain := cfg.CookieDomain
 
 	c.SetSameSite(sameSite)
 
 	// httpOnly cookies — the JWTs never touch JavaScript.
-	c.SetCookie(cookieAccess, accessToken, accessMaxAge, "/", "", secure, true)
-	c.SetCookie(cookieRefresh, rawRefresh, refreshMaxAge, refreshCookiePath, "", secure, true)
+	c.SetCookie(cookieAccess, accessToken, accessMaxAge, "/", cookieDomain, secure, true)
+	c.SetCookie(cookieRefresh, rawRefresh, refreshMaxAge, refreshCookiePath, cookieDomain, secure, true)
 
 	// Readable companions (httpOnly=false) — non-secret, UX + edge guard only.
-	c.SetCookie(cookieRole, role, refreshMaxAge, "/", "", secure, false)
+	c.SetCookie(cookieRole, role, refreshMaxAge, "/", cookieDomain, secure, false)
 	expiresAt := strconv.FormatInt(time.Now().Add(cfg.JWT.AccessExpiry).Unix(), 10)
-	c.SetCookie(cookieExpiry, expiresAt, accessMaxAge, "/", "", secure, false)
+	c.SetCookie(cookieExpiry, expiresAt, accessMaxAge, "/", cookieDomain, secure, false)
 
 	// Readable CSRF token for the double-submit pattern. httpOnly MUST be false:
 	// the SPA reads it and echoes it back in the X-CSRF-Token header, which
 	// middleware.RequireCSRF matches against this cookie. An attacker on another
 	// origin can neither read this cookie nor set the matching custom header.
-	c.SetCookie(cookieCSRF, csrfToken, refreshMaxAge, "/", "", secure, false)
+	c.SetCookie(cookieCSRF, csrfToken, refreshMaxAge, "/", cookieDomain, secure, false)
 }
 
 // newCSRFToken returns a high-entropy token for the double-submit CSRF cookie.
@@ -100,10 +103,13 @@ func newCSRFToken() (string, error) {
 // keeps the original cookie.
 func clearSessionCookies(c *gin.Context, cfg *config.Config) {
 	sameSite, secure := cookieSecurity(cfg)
+	// MUST match the Domain the cookies were SET with (issueSessionCookies), or
+	// the browser keeps a domain-scoped cookie when the clear targets host-only.
+	cookieDomain := cfg.CookieDomain
 	c.SetSameSite(sameSite)
-	c.SetCookie(cookieAccess, "", -1, "/", "", secure, true)
-	c.SetCookie(cookieRefresh, "", -1, refreshCookiePath, "", secure, true)
-	c.SetCookie(cookieRole, "", -1, "/", "", secure, false)
-	c.SetCookie(cookieExpiry, "", -1, "/", "", secure, false)
-	c.SetCookie(cookieCSRF, "", -1, "/", "", secure, false)
+	c.SetCookie(cookieAccess, "", -1, "/", cookieDomain, secure, true)
+	c.SetCookie(cookieRefresh, "", -1, refreshCookiePath, cookieDomain, secure, true)
+	c.SetCookie(cookieRole, "", -1, "/", cookieDomain, secure, false)
+	c.SetCookie(cookieExpiry, "", -1, "/", cookieDomain, secure, false)
+	c.SetCookie(cookieCSRF, "", -1, "/", cookieDomain, secure, false)
 }

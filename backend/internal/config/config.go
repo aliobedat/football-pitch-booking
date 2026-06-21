@@ -32,6 +32,7 @@ func (c *Config) IsDev() bool { return IsDevEnv(c.AppEnv) }
 
 type Config struct {
 	AppEnv       string
+	CookieDomain string
 	ServerPort   string
 	DB           DBConfig
 	JWT          JWTConfig      // ← NEW
@@ -246,8 +247,13 @@ func Load() *Config {
 		// FAIL-CLOSED: no dev default. An unset/empty APP_ENV is NOT a dev value
 		// (see IsDevEnv) and therefore inherits the secure production path. Local
 		// dev must set APP_ENV=development explicitly.
-		AppEnv:     getEnv("APP_ENV", ""),
-		ServerPort: getEnv("PORT", getEnv("SERVER_PORT", "8080")),
+		AppEnv: getEnv("APP_ENV", ""),
+		// Optional. Empty = host-only cookies (dev/localhost). In production set to
+		// the parent domain with a leading dot (e.g. ".malaebjo.com") so cookies set
+		// by the API host are readable across sibling subdomains (first-party,
+		// cross-subdomain). No panic — empty is a valid, safe default.
+		CookieDomain: getEnv("COOKIE_DOMAIN", ""),
+		ServerPort:   getEnv("PORT", getEnv("SERVER_PORT", "8080")),
 		BcryptCost: bcryptCost,
 		JWT: JWTConfig{
 			Secret:        jwtSecret,
