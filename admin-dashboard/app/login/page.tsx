@@ -100,7 +100,7 @@ export default function AdminLoginPage() {
       <main dir="rtl" className="min-h-screen flex items-center justify-center px-4">
         <div className="w-full max-w-sm">
           <div className="flex flex-col items-center gap-1 mb-8">
-            <span className="text-[20px] font-bold tracking-tight">ملاعب</span>
+            <span className="text-[20px] font-bold tracking-tight">مرمى</span>
             <span className="text-[11px] font-bold tracking-widest text-emerald-400 uppercase">
               Admin Dashboard
             </span>
@@ -127,7 +127,7 @@ export default function AdminLoginPage() {
     <main dir="rtl" className="min-h-screen flex items-center justify-center px-4">
       <div className="w-full max-w-sm">
         <div className="flex flex-col items-center gap-1 mb-8">
-          <span className="text-[20px] font-bold tracking-tight">ملاعب</span>
+          <span className="text-[20px] font-bold tracking-tight">مرمى</span>
           <span className="text-[11px] font-bold tracking-widest text-emerald-400 uppercase">
             Admin Dashboard
           </span>

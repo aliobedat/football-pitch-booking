@@ -196,7 +196,7 @@ func renderTwilioBody(msg OutboundMessage) (string, error) {
 	switch p := msg.Payload.(type) {
 	case OTPPayload:
 		mins := max(p.ExpiresInSeconds/60, 1)
-		return fmt.Sprintf("رمز التحقق في ملاعب: %s — صالح لمدة %s دقيقة. لا تشاركه مع أحد.",
+		return fmt.Sprintf("رمز التحقق في مرمى: %s — صالح لمدة %s دقيقة. لا تشاركه مع أحد.",
 			p.Code, strconv.Itoa(mins)), nil
 	case BookingConfirmedPayload:
 		return fmt.Sprintf("تم تأكيد حجزك في %s يوم %s.",

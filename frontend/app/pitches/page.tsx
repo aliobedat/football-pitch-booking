@@ -530,7 +530,7 @@ function PitchesContent() {
             ))}
           </div>
           <div className="flex items-center gap-2">
-            <span className="text-[11px] text-white/20">© 2026 ملاعب. جميع الحقوق محفوظة.</span>
+            <span className="text-[11px] text-white/20">© 2026 مرمى. جميع الحقوق محفوظة.</span>
             <div className="w-1.5 h-1.5 rounded-full bg-emerald-500/50" />
           </div>
         </div>

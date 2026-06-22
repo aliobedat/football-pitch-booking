@@ -6,7 +6,7 @@ import './globals.css';
 const cairo = Cairo({ subsets: ['arabic', 'latin'], display: 'swap' });
 
 export const metadata: Metadata = {
-  title: { default: 'لوحة التحكم | ملاعب', template: '%s | لوحة التحكم' },
+  title: { default: 'لوحة التحكم | مرمى', template: '%s | لوحة التحكم' },
   description: 'لوحة تحكم أصحاب الملاعب والمشرفين.',
 };
 

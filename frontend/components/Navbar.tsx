@@ -38,7 +38,7 @@ export default function Navbar() {
           className="flex items-center gap-2.5 group focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 rounded-md"
           onClick={closeMenu}
         >
-          <span className="text-[15px] font-bold text-[#f0efe8] tracking-tight">ملاعب</span>
+          <span className="text-[15px] font-bold text-[#f0efe8] tracking-tight">مرمى</span>
           <div className="w-2 h-2 rounded-full bg-emerald-500 group-hover:scale-110 transition-transform duration-200" />
         </Link>
 

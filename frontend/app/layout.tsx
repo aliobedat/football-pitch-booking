@@ -11,8 +11,8 @@ const cairo = Cairo({
 
 export const metadata: Metadata = {
   title: {
-    default: 'ملاعب — احجز ملعبك',
-    template: '%s | ملاعب',
+    default: 'مرمى — احجز ملعبك',
+    template: '%s | مرمى',
   },
   description:
     'اكتشف واحجز أفضل ملاعب كرة القدم في الأردن. سرعة، سهولة، وموثوقية.',

@@ -70,7 +70,7 @@ export default function Sidebar({ role, isOpen, onClose }: SidebarProps) {
       {/* ── Desktop: persistent right column (hidden on mobile) ── */}
       <aside className="hidden md:flex w-60 shrink-0 border-l border-white/[0.07] bg-[#141715] flex-col">
         <div className="h-16 flex items-center gap-2 px-5 border-b border-white/[0.07]">
-          <span className="text-[15px] font-bold tracking-tight">ملاعب</span>
+          <span className="text-[15px] font-bold tracking-tight">مرمى</span>
           <span className="text-[10px] font-bold tracking-widest text-emerald-400 uppercase">
             Admin
           </span>
@@ -99,7 +99,7 @@ export default function Sidebar({ role, isOpen, onClose }: SidebarProps) {
       >
         <div className="h-16 flex items-center justify-between gap-2 px-5 border-b border-white/[0.07]">
           <div className="flex items-center gap-2">
-            <span className="text-[15px] font-bold tracking-tight">ملاعب</span>
+            <span className="text-[15px] font-bold tracking-tight">مرمى</span>
             <span className="text-[10px] font-bold tracking-widest text-emerald-400 uppercase">
               Admin
             </span>
