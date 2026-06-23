@@ -6,8 +6,11 @@ package handlers
 // (category/amount/date) is rejected before any write. No Postgres required.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -22,11 +25,13 @@ import (
 type fakeExpenseRepo struct {
 	createCalls int
 	lastActor   auth.Actor
+	lastInput   repository.ExpenseInput
 }
 
 func (f *fakeExpenseRepo) Create(_ context.Context, a auth.Actor, in repository.ExpenseInput) (*models.Expense, error) {
 	f.createCalls++
 	f.lastActor = a
+	f.lastInput = in
 	return &models.Expense{ID: 1, Category: in.Category, Amount: in.Amount}, nil
 }
 func (f *fakeExpenseRepo) Update(_ context.Context, a auth.Actor, id int64, in repository.ExpenseInput) (*models.Expense, error) {
@@ -93,6 +98,44 @@ func TestExpenses_OwnerScopedCreate(t *testing.T) {
 	}
 	if repo.lastActor.UserID != ownerID {
 		t.Fatalf("create actor = %+v, want owner #%d", repo.lastActor, ownerID)
+	}
+}
+
+// Idempotency-Key header present → threaded into the repo input as a non-nil key.
+func TestExpenses_IdempotencyKeyThreaded(t *testing.T) {
+	repo := &fakeExpenseRepo{}
+	r := expenseRouter(NewExpenseHandler(repo), nil, 42, "owner")
+
+	var buf bytes.Buffer
+	_ = json.NewEncoder(&buf).Encode(map[string]any{"category": "Water", "amount": 10, "occurred_on": "2026-06-16"})
+	req := httptest.NewRequest(http.MethodPost, "/owner/expenses", &buf)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", "client-uuid-123")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (body: %s)", rec.Code, rec.Body.String())
+	}
+	if repo.lastInput.IdempotencyKey == nil {
+		t.Fatal("IdempotencyKey not threaded into repo input (got nil)")
+	}
+	if *repo.lastInput.IdempotencyKey != "client-uuid-123" {
+		t.Errorf("IdempotencyKey = %q, want client-uuid-123", *repo.lastInput.IdempotencyKey)
+	}
+}
+
+// No Idempotency-Key header → repo input key stays nil (legacy non-idempotent path).
+func TestExpenses_NoIdempotencyKey_NilInput(t *testing.T) {
+	repo := &fakeExpenseRepo{}
+	r := expenseRouter(NewExpenseHandler(repo), nil, 42, "owner")
+	rec := doJSON(t, r, http.MethodPost, "/owner/expenses",
+		map[string]any{"category": "Water", "amount": 10, "occurred_on": "2026-06-16"})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201", rec.Code)
+	}
+	if repo.lastInput.IdempotencyKey != nil {
+		t.Errorf("IdempotencyKey = %q, want nil (no header)", *repo.lastInput.IdempotencyKey)
 	}
 }
 

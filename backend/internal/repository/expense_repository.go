@@ -37,6 +37,9 @@ type ExpenseInput struct {
 	Amount     float64
 	OccurredAt time.Time
 	Note       string
+	// IdempotencyKey is the client's per-attempt token (from the Idempotency-Key
+	// header). nil = legacy non-idempotent insert. Consulted only by Create.
+	IdempotencyKey *string
 }
 
 type ExpenseRepository interface {
@@ -84,19 +87,74 @@ func (r *expenseRepo) assertPitchInScope(ctx context.Context, actor auth.Actor, 
 	return nil
 }
 
+// expenseInsertCols is the column projection shared by the create INSERT and the
+// replay SELECT so an idempotent retry returns an identical shape.
+const expenseInsertCols = `id, pitch_id, category, amount::float8, occurred_at, note, created_at, updated_at`
+
 func (r *expenseRepo) Create(ctx context.Context, actor auth.Actor, in ExpenseInput) (*models.Expense, error) {
 	if err := r.assertPitchInScope(ctx, actor, in.PitchID); err != nil {
 		return nil, err
 	}
+	if in.IdempotencyKey != nil {
+		return r.createIdempotent(ctx, actor, in, *in.IdempotencyKey)
+	}
+
+	// Legacy / keyless path — unchanged bare INSERT (NULL idempotency_key; the
+	// partial unique index permits unlimited NULLs).
 	var e models.Expense
 	err := r.db.QueryRow(ctx, `
 		INSERT INTO expenses (owner_id, pitch_id, category, amount, occurred_at, note)
 		VALUES ($1, $2, $3, $4, $5, NULLIF($6,''))
-		RETURNING id, pitch_id, category, amount::float8, occurred_at, note, created_at, updated_at
-	`, actor.UserID, in.PitchID, in.Category, round3(in.Amount), in.OccurredAt, in.Note).Scan(
+		RETURNING `+expenseInsertCols, actor.UserID, in.PitchID, in.Category, round3(in.Amount), in.OccurredAt, in.Note).Scan(
 		&e.ID, &e.PitchID, &e.Category, &e.Amount, &e.OccurredAt, &e.Note, &e.CreatedAt, &e.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("Create expense: %w", err)
+	}
+	return &e, nil
+}
+
+// createIdempotent inserts the expense under a client idempotency key. A double-
+// submit / retry collides on the partial unique index idx_expenses_owner_idem
+// (owner_id, idempotency_key): ON CONFLICT DO NOTHING inserts nothing, and the
+// SELECT in the same transaction returns the ORIGINAL row — so a retry yields the
+// first expense instead of a duplicate. The ON CONFLICT predicate matches the
+// index predicate so inference binds to the partial index.
+func (r *expenseRepo) createIdempotent(ctx context.Context, actor auth.Actor, in ExpenseInput, key string) (*models.Expense, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("Create expense (idempotent): begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	var e models.Expense
+	insertErr := tx.QueryRow(ctx, `
+		INSERT INTO expenses (owner_id, pitch_id, category, amount, occurred_at, note, idempotency_key)
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6,''), $7)
+		ON CONFLICT (owner_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO NOTHING
+		RETURNING `+expenseInsertCols,
+		actor.UserID, in.PitchID, in.Category, round3(in.Amount), in.OccurredAt, in.Note, key).Scan(
+		&e.ID, &e.PitchID, &e.Category, &e.Amount, &e.OccurredAt, &e.Note, &e.CreatedAt, &e.UpdatedAt)
+
+	switch {
+	case insertErr == nil:
+		// We inserted the row — this is the first attempt.
+	case errors.Is(insertErr, pgx.ErrNoRows):
+		// Conflict: a row with this (owner_id, key) already exists. Return it so the
+		// retry maps onto the original expense.
+		if err := tx.QueryRow(ctx, `
+			SELECT `+expenseInsertCols+`
+			FROM expenses
+			WHERE owner_id = $1 AND idempotency_key = $2
+		`, actor.UserID, key).Scan(
+			&e.ID, &e.PitchID, &e.Category, &e.Amount, &e.OccurredAt, &e.Note, &e.CreatedAt, &e.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("Create expense (idempotent): load existing: %w", err)
+		}
+	default:
+		return nil, fmt.Errorf("Create expense (idempotent): %w", insertErr)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("Create expense (idempotent): commit: %w", err)
 	}
 	return &e, nil
 }

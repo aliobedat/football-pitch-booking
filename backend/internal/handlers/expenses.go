@@ -137,6 +137,13 @@ func (h *ExpenseHandler) CreateExpense(c *gin.Context) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_expense", "message": msg})
 		return
 	}
+	// Idempotency: when the client supplies an Idempotency-Key, attach it so a
+	// double-tap / retry returns the original expense instead of inserting a second
+	// ledger row. Absent header → nil → legacy non-idempotent path (same idiom as
+	// POST /bookings). owner_id stays server-derived from the actor in the repo.
+	if key := strings.TrimSpace(c.GetHeader(idempotencyHeader)); key != "" {
+		in.IdempotencyKey = &key
+	}
 	e, err := h.repo.Create(c.Request.Context(), actor, in)
 	if err != nil {
 		h.writeRepoErr(c, err)

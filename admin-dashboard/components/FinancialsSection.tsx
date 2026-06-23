@@ -6,7 +6,7 @@
 // CRUD (add / edit / soft-delete) with per-category subtotals. RTL, Western
 // numerals, admin theme tokens. Collected is the WO-F1 figure (server-reused).
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Wallet, Receipt, Plus, Pencil, Trash2, Loader2, X } from 'lucide-react';
 import api from '@/lib/api';
 import { formatCurrency, formatNumber, formatDate } from '@/lib/format';
@@ -53,6 +53,11 @@ export default function FinancialsSection({ granularity }: { granularity: Granul
   const [form, setForm]     = useState<FormState>(emptyForm);
   const [saving, setSaving] = useState(false);
   const [formErr, setFormErr] = useState<string | null>(null);
+  // Idempotency key for the CREATE path, minted once per distinct submission and
+  // reused across retries of that same submission, so a double-tap / retry maps
+  // onto ONE expense row server-side (mirrors BookingForm's proven pattern). Reset
+  // to null only on confirmed success → the next distinct expense gets a fresh key.
+  const idemKeyRef = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -91,8 +96,23 @@ export default function FinancialsSection({ granularity }: { granularity: Granul
       note: form.note,
     };
     try {
-      if (form.id) await api.patch(`/owner/expenses/${form.id}`, body);
-      else await api.post('/owner/expenses', body);
+      if (form.id) {
+        await api.patch(`/owner/expenses/${form.id}`, body);
+      } else {
+        // Mint the idempotency key once per submission; reuse it across retries so
+        // a double-click / network retry collides server-side instead of inserting
+        // a duplicate row. Same UUID idiom (with fallback) as BookingForm.
+        if (!idemKeyRef.current) {
+          idemKeyRef.current =
+            (typeof crypto !== 'undefined' && 'randomUUID' in crypto)
+              ? crypto.randomUUID()
+              : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        }
+        await api.post('/owner/expenses', body, {
+          headers: { 'Idempotency-Key': idemKeyRef.current },
+        });
+        idemKeyRef.current = null; // confirmed success → next expense gets a fresh key
+      }
       setForm(emptyForm());
       await refresh();
     } catch (e: any) {
