@@ -3,7 +3,10 @@ package notification
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -75,11 +78,11 @@ func bookingMsg() OutboundMessage {
 
 // ── tests ────────────────────────────────────────────────────────────────────
 
-// OTP (and any non-booking kind) must bypass the guard completely: no Reserve, no
-// block, regardless of how full the bucket is.
-func TestQuota_OTPBypassesGuard(t *testing.T) {
-	guard := &fakeGuard{count: 9999} // way over cap — must be irrelevant for OTP
-	wa := &recordingChannel{result: DeliveryResult{Status: DeliverySent, ProviderMessageID: "wamid.1"}}
+// Gate 2 / PR-1: OTP is NO LONGER exempt. Under cap it reserves one slot then sends
+// (WhatsApp AUTHENTICATION templates count against the WABA limit).
+func TestQuota_OTPUnderCap_ReservesAndSends(t *testing.T) {
+	guard := &fakeGuard{count: 10}
+	wa := &recordingChannel{result: DeliveryResult{Status: DeliverySent, ProviderMessageID: "infobip:1"}}
 	q := NewQuotaGuardedChannel(wa, guard, "WABA1", slog.New(&capturingHandler{}))
 
 	otp := OutboundMessage{Recipient: "+962790000000", Kind: KindOTP, Payload: OTPPayload{Code: "123456"}}
@@ -87,11 +90,31 @@ func TestQuota_OTPBypassesGuard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OTP send errored: %v", err)
 	}
-	if guard.calls != 0 {
-		t.Fatalf("OTP must not touch the quota guard; Reserve called %d times", guard.calls)
+	if guard.calls != 1 {
+		t.Fatalf("OTP must now be quota-gated; Reserve called %d times (want 1)", guard.calls)
 	}
 	if wa.called != 1 || res.Status != DeliverySent {
-		t.Fatalf("OTP must pass straight through to WhatsApp (called=%d status=%s)", wa.called, res.Status)
+		t.Fatalf("OTP under cap must reserve then send (called=%d status=%s)", wa.called, res.Status)
+	}
+}
+
+// Gate 2 / PR-1: OTP at/over the cap is refused exactly like a booking kind, so the
+// real provider limit can't be silently exceeded.
+func TestQuota_OTPAtCap_Refused(t *testing.T) {
+	guard := &fakeGuard{count: quotaHardCap}
+	wa := &recordingChannel{result: DeliveryResult{Status: DeliverySent}}
+	q := NewQuotaGuardedChannel(wa, guard, "WABA1", slog.New(&capturingHandler{}))
+
+	otp := OutboundMessage{Recipient: "+962790000000", Kind: KindOTP, Payload: OTPPayload{Code: "123456"}}
+	res, err := q.Send(context.Background(), otp)
+	if guard.calls != 1 {
+		t.Fatalf("OTP must be quota-gated; Reserve called %d times (want 1)", guard.calls)
+	}
+	if wa.called != 0 {
+		t.Fatalf("OTP at cap must NOT reach WhatsApp; called=%d", wa.called)
+	}
+	if res.Status != DeliveryFailed || !errors.Is(err, ErrWhatsAppDailyCapReached) {
+		t.Fatalf("OTP at cap must fail with the cap error; status=%s err=%v", res.Status, err)
 	}
 }
 
@@ -151,6 +174,65 @@ func TestQuota_AtCap_RefusesWhatsApp(t *testing.T) {
 	}
 }
 
+// GATE 2.1 PROOF: the REAL Meta WhatsApp adapter, wrapped exactly as production
+// wires it — QuotaGuardedChannel(meta) inside FallbackChannel(_, sms) — must NOT
+// lock out OTP at the quota cap. At cap the guard refuses WhatsApp and the OTP is
+// delivered through the SMS fallback instead. This exercises the actual chain
+// (real adapter + real guard + real fallback), not a stand-in for the WhatsApp leg,
+// so it proves admission control is separated from accounting on the Meta path.
+func TestQuota_MetaOTP_AtCap_FallsBackToSMS(t *testing.T) {
+	// A real Meta adapter pointed at a server that records whether it is ever hit.
+	// At cap it must NOT be: the quota guard refuses before any HTTP call.
+	var whatsappHit bool
+	waSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		whatsappHit = true
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"messages":[{"id":"wamid.SHOULD_NOT_HAPPEN"}]}`)
+	}))
+	defer waSrv.Close()
+
+	meta, err := NewWhatsAppChannel(testWhatsAppConfig(waSrv.URL), WithHTTPClient(waSrv.Client()))
+	if err != nil {
+		t.Fatalf("NewWhatsAppChannel: %v", err)
+	}
+
+	guard := &fakeGuard{count: quotaHardCap} // pinned at the hard cap
+	sms := &recordingChannel{result: DeliveryResult{Status: DeliverySent, ProviderMessageID: "SM-OTP-1"}}
+
+	// Exactly the production composition for the Meta provider.
+	guarded := NewQuotaGuardedChannel(meta, guard, "WABA1", slog.New(&capturingHandler{}))
+	channel := NewFallbackChannel(guarded, sms)
+
+	otp := OutboundMessage{
+		Recipient: "+962790000000",
+		Kind:      KindOTP,
+		Payload:   OTPPayload{Code: "123456", ExpiresInSeconds: 300},
+	}
+	res, sendErr := channel.Send(context.Background(), otp)
+	if sendErr != nil {
+		t.Fatalf("chain returned an error; OTP must be delivered via SMS fallback: %v", sendErr)
+	}
+
+	// 1) OTP was counted against the WABA quota (accounting preserved).
+	if guard.calls != 1 {
+		t.Fatalf("OTP must be counted against the WhatsApp quota; Reserve called %d times (want 1)", guard.calls)
+	}
+	// 2) WhatsApp was REFUSED by the guard — the real adapter never made a call.
+	if whatsappHit {
+		t.Fatalf("at cap the quota guard must refuse before the Meta adapter sends; WhatsApp endpoint was hit")
+	}
+	// 3) The OTP was actually delivered through the SMS fallback (no lockout).
+	if sms.called != 1 {
+		t.Fatalf("OTP must fall through to SMS exactly once; sms.called=%d", sms.called)
+	}
+	if sms.last.Kind != KindOTP || sms.last.Recipient != otp.Recipient {
+		t.Fatalf("SMS fallback must carry the SAME OTP message; got kind=%s recipient=%s", sms.last.Kind, sms.last.Recipient)
+	}
+	if res.Status != DeliverySent || res.ProviderMessageID != "SM-OTP-1" {
+		t.Fatalf("result must be the successful SMS delivery; got status=%s id=%q", res.Status, res.ProviderMessageID)
+	}
+}
+
 // A guard (DB) error must fail OPEN: send proceeds through WhatsApp.
 func TestQuota_GuardError_FailsOpen(t *testing.T) {
 	guard := &fakeGuard{err: errors.New("db down")}
@@ -195,14 +277,14 @@ func TestQuota_AtCap_FallsBackToSMS(t *testing.T) {
 	}
 }
 
-// Guards the gated-kind set precisely: the three booking kinds are gated; OTP and
-// booking_rejected are not.
+// Guards the gated-kind set precisely: OTP and the three booking kinds are gated;
+// booking_rejected (unsupported by the WhatsApp adapters) is not.
 func TestQuota_GatedKindSet(t *testing.T) {
 	gated := map[MessageKind]bool{
 		KindBookingConfirmed: true,
 		KindBookingCancelled: true,
 		KindBookingReminder:  true,
-		KindOTP:              false,
+		KindOTP:              true,
 		KindBookingRejected:  false,
 	}
 	for k, want := range gated {

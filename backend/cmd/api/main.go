@@ -128,19 +128,45 @@ func main() {
 		log.Printf("[NOTIFY] Twilio not configured — twilio_sms adapter not registered")
 	}
 
-	if wa, waErr := notification.NewWhatsAppChannel(cfg.WhatsApp); waErr != nil {
+	// WhatsApp provider selection (Gate 2 / PR-1). Config-driven: meta (default,
+	// fallback-safe) or infobip. An unrecognised value fails boot loudly.
+	waProvider, waProviderErr := notification.ParseWhatsAppProvider(cfg.WhatsAppProvider)
+	if waProviderErr != nil {
+		log.Fatalf("[FATAL] %v", waProviderErr)
+	}
+
+	// Fail closed on the one combo that can lock out authentication: Infobip WhatsApp
+	// as the OTP route has no SMS fallback, so an OTP refused at the quota cap would
+	// be undeliverable. Refuse it at startup until a fallback/priority path exists.
+	if err := notification.ValidateOTPFallbackSafety(waProvider, notification.ChannelName(cfg.Notification.OTPRoute)); err != nil {
+		log.Fatalf("[FATAL] %v", err)
+	}
+
+	if wa, waErr := notification.NewWhatsAppChannelFor(waProvider, cfg.WhatsApp, cfg.Infobip); waErr != nil {
 		// Missing credentials are fatal only if WhatsApp is the active channel;
 		// otherwise we simply skip registration so FAKE/SMS deployments run clean.
 		if activeChannel == notification.ChannelWhatsApp {
-			log.Fatalf("[FATAL] NOTIFICATION_CHANNEL=WHATSAPP but WhatsApp is not configured: %v", waErr)
+			log.Fatalf("[FATAL] NOTIFICATION_CHANNEL=WHATSAPP but WhatsApp provider %q is not configured: %v", waProvider, waErr)
 		}
-		log.Printf("[NOTIFY] WhatsApp channel not configured (%v) — skipping registration", waErr)
+		log.Printf("[NOTIFY] WhatsApp provider %q not configured (%v) — skipping registration", waProvider, waErr)
 	} else {
+		// The daily WABA quota guard wraps BOTH providers identically (OTP is now
+		// gated too — Gate 2 / PR-1). The per-UTC-day bucket is keyed on the Meta WABA
+		// id, or — for Infobip, which has no Meta WABA id — the Infobip sender.
+		quotaBucket := cfg.WhatsApp.WABAID
+		if waProvider == notification.ProviderInfobip {
+			quotaBucket = cfg.Infobip.Sender
+		}
+		guarded := notification.NewQuotaGuardedChannel(wa, outbox.NewQuotaStore(pool), quotaBucket, slog.Default())
+
+		// Meta keeps its transparent SMS fallback (unchanged, fallback-safe default).
+		// Infobip SMS fallback is intentionally out of scope for this PR.
+		var whatsappChannel notification.NotificationChannel = guarded
+		if waProvider == notification.ProviderMeta {
+			whatsappChannel = notification.NewFallbackChannel(guarded, sms)
+		}
 		channelOpts = append(channelOpts,
-			notification.WithChannel(notification.ChannelWhatsApp,
-				notification.NewFallbackChannel(
-					notification.NewQuotaGuardedChannel(wa, outbox.NewQuotaStore(pool), cfg.WhatsApp.WABAID, slog.Default()),
-					sms)))
+			notification.WithChannel(notification.ChannelWhatsApp, whatsappChannel))
 	}
 
 	notifier := notification.NewService(activeChannel, channelOpts...)
