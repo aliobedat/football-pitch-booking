@@ -39,9 +39,13 @@ type Config struct {
 	BcryptCost   int            // ← NEW
 	OTP          OTPConfig      // ← NEW (PART 3B)
 	WhatsApp     WhatsAppConfig // ← NEW (PART 4)
-	Cloudinary   CloudinaryConfig
-	Twilio       TwilioConfig       // ← NEW (MVP auth channel)
-	Notification NotificationConfig // ← NEW (type-based routing)
+	// WhatsAppProvider selects the WhatsApp delivery provider: "meta" (default) or
+	// "infobip" (Gate 2 / PR-1). Empty/unset → meta, the fallback-safe provider.
+	WhatsAppProvider string
+	Infobip          InfobipConfig // ← NEW (Gate 2 / PR-1)
+	Cloudinary       CloudinaryConfig
+	Twilio           TwilioConfig       // ← NEW (MVP auth channel)
+	Notification     NotificationConfig // ← NEW (type-based routing)
 }
 
 // TwilioConfig holds the Twilio Programmable SMS credentials for the closed-beta
@@ -103,8 +107,8 @@ type CloudinaryConfig struct {
 //
 // Credentials come exclusively from the environment and are never hardcoded.
 type WhatsAppConfig struct {
-	Token      string // WHATSAPP_TOKEN — Meta Cloud API bearer token
-	PhoneID    string // WHATSAPP_PHONE_ID — sender phone-number id
+	Token   string // WHATSAPP_TOKEN — Meta Cloud API bearer token
+	PhoneID string // WHATSAPP_PHONE_ID — sender phone-number id
 	// WABAID is the WhatsApp Business Account id the daily send-quota guard
 	// (GATE 2) keys its per-UTC-day counter on (WHATSAPP_WABA_ID). It is DISTINCT
 	// from PhoneID (the sender phone-number id used for outbound Cloud API calls):
@@ -130,6 +134,38 @@ type WhatsAppTemplates struct {
 	BookingConfirmed string // WHATSAPP_BOOKING_CONFIRMED_TEMPLATE — UTILITY-category template
 	BookingCancelled string // WHATSAPP_BOOKING_CANCELLED_TEMPLATE — UTILITY-category template
 	BookingReminder  string // WHATSAPP_BOOKING_REMINDER_TEMPLATE — UTILITY-category template (PART 7)
+}
+
+// InfobipConfig holds the Infobip WhatsApp credentials and the names of the
+// pre-approved templates the Infobip adapter renders against (Gate 2 / PR-1). It is
+// DISTINCT from WhatsAppConfig (Meta): the two providers do not share credentials
+// or template ids.
+//
+// These values are OPTIONAL at load time (a meta/FAKE/SMS deployment needs none).
+// When WHATSAPP_PROVIDER=infobip is selected, the adapter validates the values it
+// needs at construction; a missing base url / api key / sender is a fail-closed
+// startup error. The APIKey is a SECRET: it comes only from the environment, is
+// never hardcoded, and is never logged.
+type InfobipConfig struct {
+	BaseURL   string // INFOBIP_BASE_URL — account base URL, e.g. https://xxxxx.api.infobip.com
+	APIKey    string // INFOBIP_API_KEY — SECRET, server-only ("App <key>" auth)
+	Sender    string // INFOBIP_WHATSAPP_SENDER — registered WhatsApp sender number/id
+	Templates InfobipTemplates
+}
+
+// Configured reports whether the three required Infobip values are all present.
+func (c InfobipConfig) Configured() bool {
+	return c.BaseURL != "" && c.APIKey != "" && c.Sender != ""
+}
+
+// InfobipTemplates names the approved Infobip templates, one per outbound message
+// kind (parity with the Meta adapter's supported kinds).
+type InfobipTemplates struct {
+	Language         string // INFOBIP_TEMPLATE_LANG — BCP-47 code (default en)
+	OTP              string // INFOBIP_OTP_TEMPLATE — AUTHENTICATION-category template
+	BookingConfirmed string // INFOBIP_BOOKING_CONFIRMED_TEMPLATE — UTILITY-category template
+	BookingCancelled string // INFOBIP_BOOKING_CANCELLED_TEMPLATE — UTILITY-category template
+	BookingReminder  string // INFOBIP_BOOKING_REMINDER_TEMPLATE — UTILITY-category template
 }
 
 // OTPConfig holds the configuration for the phone-first OTP flow.
@@ -254,7 +290,7 @@ func Load() *Config {
 		// cross-subdomain). No panic — empty is a valid, safe default.
 		CookieDomain: getEnv("COOKIE_DOMAIN", ""),
 		ServerPort:   getEnv("PORT", getEnv("SERVER_PORT", "8080")),
-		BcryptCost: bcryptCost,
+		BcryptCost:   bcryptCost,
 		JWT: JWTConfig{
 			Secret:        jwtSecret,
 			AccessExpiry:  accessExpiry,
@@ -264,11 +300,13 @@ func Load() *Config {
 			Pepper:         otpPepper,
 			GlobalDailyCap: otpGlobalDailyCap,
 		},
-		WhatsApp:     loadWhatsAppConfig(),
-		Cloudinary:   loadCloudinaryConfig(),
-		Twilio:       loadTwilioConfig(),
-		Notification: loadNotificationConfig(),
-		DB:           loadDBConfig(int32(maxConns), int32(minConns), IsDevEnv(getEnv("APP_ENV", ""))),
+		WhatsApp:         loadWhatsAppConfig(),
+		WhatsAppProvider: getEnv("WHATSAPP_PROVIDER", "meta"),
+		Infobip:          loadInfobipConfig(),
+		Cloudinary:       loadCloudinaryConfig(),
+		Twilio:           loadTwilioConfig(),
+		Notification:     loadNotificationConfig(),
+		DB:               loadDBConfig(int32(maxConns), int32(minConns), IsDevEnv(getEnv("APP_ENV", ""))),
 	}
 }
 
@@ -337,6 +375,26 @@ func loadWhatsAppConfig() WhatsAppConfig {
 			BookingConfirmed: getEnv("WHATSAPP_BOOKING_CONFIRMED_TEMPLATE", ""),
 			BookingCancelled: getEnv("WHATSAPP_BOOKING_CANCELLED_TEMPLATE", ""),
 			BookingReminder:  getEnv("WHATSAPP_BOOKING_REMINDER_TEMPLATE", ""),
+		},
+	}
+}
+
+// loadInfobipConfig reads the optional Infobip WhatsApp settings from the
+// environment. Nothing here is required at load time — absence is normal for a
+// meta/FAKE/SMS deployment — so credentials and template names default to empty.
+// The adapter validates what it needs at construction; main fails closed when
+// provider=infobip but the required values are missing.
+func loadInfobipConfig() InfobipConfig {
+	return InfobipConfig{
+		BaseURL: getEnv("INFOBIP_BASE_URL", ""),
+		APIKey:  getEnv("INFOBIP_API_KEY", ""),
+		Sender:  getEnv("INFOBIP_WHATSAPP_SENDER", ""),
+		Templates: InfobipTemplates{
+			Language:         getEnv("INFOBIP_TEMPLATE_LANG", "en"),
+			OTP:              getEnv("INFOBIP_OTP_TEMPLATE", ""),
+			BookingConfirmed: getEnv("INFOBIP_BOOKING_CONFIRMED_TEMPLATE", ""),
+			BookingCancelled: getEnv("INFOBIP_BOOKING_CANCELLED_TEMPLATE", ""),
+			BookingReminder:  getEnv("INFOBIP_BOOKING_REMINDER_TEMPLATE", ""),
 		},
 	}
 }

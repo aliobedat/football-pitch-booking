@@ -12,9 +12,12 @@ package notification
 // treats as a primary failure and transparently re-sends through SMS — no deferral,
 // no reschedule.
 //
-// SCOPE: only booking_confirmed / booking_cancelled / booking_reminder are counted
-// and gated. OTP (and anything else) BYPASSES the guard entirely — no Reserve call,
-// no increment, never blocked — so login is never throttled by booking volume.
+// SCOPE: OTP plus the three booking UTILITY kinds (booking_confirmed /
+// booking_cancelled / booking_reminder) are counted and gated. OTP is included
+// because WhatsApp AUTHENTICATION templates count against Meta/WABA's daily
+// unique-recipient limit just like UTILITY templates — exempting it would let the
+// real provider cap be silently exceeded (Gate 2 / PR-1 correction). The guard wraps
+// ONLY the WhatsApp channel, so OTP routed over SMS/Twilio is unaffected.
 
 import (
 	"context"
@@ -63,11 +66,11 @@ func NewQuotaGuardedChannel(wrapped NotificationChannel, guard SendQuotaGuard, w
 	return &QuotaGuardedChannel{wrapped: wrapped, guard: guard, wabaID: wabaID, logger: logger}
 }
 
-// Send counts and gates only booking notifications; everything else (OTP) passes
-// straight through untouched.
+// Send counts and gates OTP and booking notifications; any other (future) kind
+// passes straight through untouched.
 func (q *QuotaGuardedChannel) Send(ctx context.Context, msg OutboundMessage) (DeliveryResult, error) {
 	if !isQuotaGated(msg.Kind) {
-		return q.wrapped.Send(ctx, msg) // OTP & others: no count, no block
+		return q.wrapped.Send(ctx, msg) // ungated kinds: no count, no block
 	}
 
 	count, err := q.guard.Reserve(ctx, q.wabaID)
@@ -97,12 +100,13 @@ func (q *QuotaGuardedChannel) Send(ctx context.Context, msg OutboundMessage) (De
 	return q.wrapped.Send(ctx, msg)
 }
 
-// isQuotaGated reports whether a message kind is counted/capped by this guard.
-// EXACTLY the three business-initiated booking UTILITY templates — OTP and
-// everything else are exempt.
+// isQuotaGated reports whether a message kind is counted/capped by this guard:
+// OTP (AUTHENTICATION) plus the three booking UTILITY templates — all of which
+// count against Meta/WABA's daily limit. booking_rejected (unsupported by the
+// WhatsApp adapters) and any future kind are exempt.
 func isQuotaGated(k MessageKind) bool {
 	switch k {
-	case KindBookingConfirmed, KindBookingCancelled, KindBookingReminder:
+	case KindOTP, KindBookingConfirmed, KindBookingCancelled, KindBookingReminder:
 		return true
 	default:
 		return false
