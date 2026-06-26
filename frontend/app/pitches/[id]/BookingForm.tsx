@@ -9,6 +9,11 @@ import { useAuth, type User } from '@/context/AuthContext';
 import FullNameField, { isValidFullName, saveFullName } from '@/components/FullNameField';
 import OtpModal from './OtpModal';
 
+// MVP no-OTP booking flag (mirrors backend BOOKING_OTP_REQUIRED, fail-open):
+// only the exact string "true" requires OTP; unset / anything else → NOT required,
+// so the booking flow skips the OTP modal and books with name + JO phone only.
+const BOOKING_OTP_REQUIRED = process.env.NEXT_PUBLIC_BOOKING_OTP_REQUIRED === 'true';
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface BookedSlot {
@@ -199,8 +204,6 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
   const [guestPhone,        setGuestPhone]        = useState('');
   const [guestPhoneTouched, setGuestPhoneTouched] = useState(false);
   const [guestPhoneError,   setGuestPhoneError]   = useState<string | null>(null);
-  const [smsConsent,        setSmsConsent]        = useState(false);
-  const [consentAt,         setConsentAt]         = useState<string | null>(null);
   const [otpOpen,           setOtpOpen]           = useState(false);
 
   // ── Server time (Asia/Amman) — source of truth for all time logic ─────────
@@ -601,12 +604,39 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
       }
       setGuestPhoneError(null);
 
-      // Guest fields are valid. Open the OTP modal — the modal fires onVerified
-      // with the session-bearing User after /auth/verify-otp succeeds. The booking
-      // POST happens in handleOtpVerified once the caller confirms the chain.
-      setOtpOpen(true);
+      if (BOOKING_OTP_REQUIRED) {
+        // OTP flow: open the modal — it fires onVerified with the session-bearing
+        // User after /auth/verify-otp succeeds; the booking POST then happens in
+        // handleOtpVerified.
+        setOtpOpen(true);
+        setSubmitting(false);
+        inFlightRef.current = false;
+        return;
+      }
+
+      // MVP no-OTP flow: establish a session from name + JO phone (no code), then
+      // book. ValidateJOMobile still runs server-side on this endpoint.
+      try {
+        const { data } = await api.post('/auth/booking-session', {
+          phone: e164,
+          full_name: guestName.trim(),
+        }, { _silent: true });
+        login(data.data.user);
+      } catch (err) {
+        if (axios.isAxiosError(err) && err.response?.data?.error === 'invalid_phone') {
+          setGuestPhoneError('يرجى إدخال رقم هاتف أردني محمول صحيح');
+        } else {
+          setApiError('تعذّر بدء الحجز، حاول مجدداً');
+        }
+        setSubmitting(false);
+        inFlightRef.current = false;
+        return;
+      }
+      // Session is live — create the booking. createBooking owns inFlightRef, so
+      // release it here first (handleSubmit only read-guarded it).
       setSubmitting(false);
       inFlightRef.current = false;
+      await createBooking();
       return;
     }
 
@@ -1036,7 +1066,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
           </div>
         )}
 
-        {/* ── Guest fields — name / phone / SMS consent ── */}
+        {/* ── Guest fields — name / phone ── */}
         {/* Gate on !authLoading so the block never flashes during the /auth/me
             in-flight window: a returning user is null until the probe resolves. */}
         {!authLoading && isGuest && (
@@ -1121,37 +1151,6 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                 </span>
               )}
             </div>
-
-            {/* SMS consent */}
-            <label className="flex items-start gap-3 cursor-pointer select-none group">
-              <div className="relative mt-0.5 flex-shrink-0">
-                <input
-                  type="checkbox"
-                  checked={smsConsent}
-                  disabled={submitting}
-                  onChange={(e) => {
-                    setSmsConsent(e.target.checked);
-                    setConsentAt(e.target.checked ? new Date().toISOString() : null);
-                  }}
-                  className="sr-only"
-                />
-                <div className={[
-                  'w-4 h-4 rounded border transition-all duration-150',
-                  smsConsent
-                    ? 'bg-emerald-500 border-emerald-500'
-                    : 'bg-transparent border-white/25 group-hover:border-white/40',
-                ].join(' ')}>
-                  {smsConsent && (
-                    <svg viewBox="0 0 12 12" fill="none" className="w-full h-full p-0.5" aria-hidden>
-                      <path d="M2 6l3 3 5-5" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  )}
-                </div>
-              </div>
-              <span className="text-[11px] text-white/40 leading-relaxed group-hover:text-white/55 transition-colors duration-150">
-                أوافق على حفظ رقم جوالي وتقديمه لصاحب الملعب للتواصل معي بعد تأكيد الحجز
-              </span>
-            </label>
           </div>
         )}
 

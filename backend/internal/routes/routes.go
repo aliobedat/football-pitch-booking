@@ -91,6 +91,11 @@ func Register(
 		// removed (Step C).
 		authRoutes.POST("/request-otp", phoneAuthHandler.RequestOTP)
 		authRoutes.POST("/verify-otp", phoneAuthHandler.VerifyOTP)
+		// MVP no-OTP booking unblock: establish a player session from name + JO
+		// phone without a code. Active only while BOOKING_OTP_REQUIRED is false
+		// (the handler refuses otherwise). Unauthenticated, like the OTP endpoints;
+		// owner/staff login is unaffected.
+		authRoutes.POST("/booking-session", phoneAuthHandler.CreateBookingSession)
 
 		// Refresh is cookie-authenticated and state-changing (token rotation). CSRF
 		// protection is intentionally NOT applied here: the interceptor's automatic

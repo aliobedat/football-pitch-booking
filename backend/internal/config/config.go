@@ -34,6 +34,14 @@ type Config struct {
 	AppEnv       string
 	CookieDomain string
 	ServerPort   string
+	// BookingOTPRequired gates whether the PLAYER booking flow requires an OTP.
+	// MVP default: false (booking works with name + JO phone only, no code).
+	// FAIL-OPEN BY DESIGN — a deliberate, scoped inversion of this stack's usual
+	// fail-closed posture: the whole point is to UNBLOCK booking, so an
+	// absent/unparseable BOOKING_OTP_REQUIRED resolves to false (not required).
+	// Only the exact string "true" turns the OTP requirement back on. Owner/staff/
+	// admin login is unaffected — this flag gates the booking caller only.
+	BookingOTPRequired bool
 	DB           DBConfig
 	JWT          JWTConfig      // ← NEW
 	BcryptCost   int            // ← NEW
@@ -284,6 +292,10 @@ func Load() *Config {
 		// (see IsDevEnv) and therefore inherits the secure production path. Local
 		// dev must set APP_ENV=development explicitly.
 		AppEnv: getEnv("APP_ENV", ""),
+		// FAIL-OPEN (scoped): only an explicit "true" requires booking OTP; anything
+		// else — unset, "false", or a typo — leaves booking OTP NOT required so the
+		// player flow is never blocked by a misread flag.
+		BookingOTPRequired: getEnv("BOOKING_OTP_REQUIRED", "false") == "true",
 		// Optional. Empty = host-only cookies (dev/localhost). In production set to
 		// the parent domain with a leading dot (e.g. ".malaebjo.com") so cookies set
 		// by the API host are readable across sibling subdomains (first-party,

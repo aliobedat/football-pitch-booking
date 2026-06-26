@@ -88,6 +88,28 @@ func (f *fakeAuthStore) EnsureVerifiedUser(_ context.Context, phone string) (*mo
 	return u, nil
 }
 
+func (f *fakeAuthStore) EnsureBookingUser(_ context.Context, phone, fullName string) (*models.User, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if u, ok := f.users[phone]; ok {
+		if u.FullName == "" && fullName != "" {
+			u.FullName = fullName
+		}
+		return u, nil
+	}
+	f.nextID++
+	u := &models.User{
+		ID:        f.nextID,
+		FullName:  fullName,
+		Phone:     phone,
+		Role:      models.RolePlayer,
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	f.users[phone] = u
+	return u, nil
+}
+
 func (f *fakeAuthStore) StoreRefreshToken(_ context.Context, _ int, _ string, _ time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -165,6 +187,7 @@ func newHarness(t *testing.T) *harness {
 	r := gin.New()
 	r.POST("/auth/request-otp", h.RequestOTP)
 	r.POST("/auth/verify-otp", h.VerifyOTP)
+	r.POST("/auth/booking-session", h.CreateBookingSession)
 	// A representative protected route guarded by the same middleware the rest of
 	// the API uses.
 	r.GET("/me", middleware.RequireAuth(jwtManager), func(c *gin.Context) {
