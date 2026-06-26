@@ -1172,6 +1172,22 @@ func insertConfirmedBookingTx(ctx context.Context, tx pgx.Tx, req models.CreateB
 	durationHours := req.EndTime.Sub(req.StartTime).Hours()
 	totalPrice := math.Round(durationHours*pricePerHour*1000) / 1000
 
+	// Immutable contact snapshot (delta B): freeze the player's name + phone onto
+	// the booking row at creation so a later profile edit never re-points this
+	// booking's recipient/owner contact. Read under the same tx. An empty value is
+	// stored as NULL (not '') — the bookings_contact_phone_e164_chk CHECK rejects
+	// '' but tolerates NULL; GetBookingContact then falls back to the live users
+	// row for any unsnapshotted (pre-030 / phone-less) booking.
+	var contactName, contactPhone string
+	if err := tx.QueryRow(ctx, `
+		SELECT COALESCE(full_name, ''), COALESCE(phone, '')
+		FROM users WHERE id = $1
+	`, req.PlayerID).Scan(&contactName, &contactPhone); err != nil {
+		return nil, fmt.Errorf("CreateBooking: load player contact: %w", err)
+	}
+	contactNameArg := nilIfEmpty(contactName)
+	contactPhoneArg := nilIfEmpty(contactPhone)
+
 	var b models.Booking
 
 	// source = 'player' is set EXPLICITLY (the column has no default): this is the
@@ -1179,8 +1195,8 @@ func insertConfirmedBookingTx(ctx context.Context, tx pgx.Tx, req models.CreateB
 	// source rather than relying on a default that could silently mislabel a future
 	// non-player insert.
 	err = tx.QueryRow(ctx, `
-		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status, source)
-		VALUES ($1, $2, tstzrange($3::timestamptz, $4::timestamptz, '[)'), $5, 'confirmed', 'player')
+		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status, source, contact_name, contact_phone)
+		VALUES ($1, $2, tstzrange($3::timestamptz, $4::timestamptz, '[)'), $5, 'confirmed', 'player', $6, $7)
 		RETURNING
 			id,
 			pitch_id,
@@ -1195,6 +1211,7 @@ func insertConfirmedBookingTx(ctx context.Context, tx pgx.Tx, req models.CreateB
 		req.PitchID, req.PlayerID,
 		req.StartTime.UTC(), req.EndTime.UTC(),
 		totalPrice,
+		contactNameArg, contactPhoneArg,
 	).Scan(
 		&b.ID, &b.PitchID, &b.PlayerID,
 		&b.StartTime, &b.EndTime,
@@ -1222,7 +1239,29 @@ func insertConfirmedBookingTx(ctx context.Context, tx pgx.Tx, req models.CreateB
 		return nil, fmt.Errorf("CreateBooking: record transition: %w", err)
 	}
 
+	// Per-user booking stats (delta C): maintained in the same tx so a committed
+	// booking always carries a consistent count. full_name on users is NOT touched
+	// — the booking's contact_name snapshot is the per-booking source of truth.
+	if _, err = tx.Exec(ctx, `
+		UPDATE users
+		SET last_booking_at = NOW(),
+		    booking_count   = booking_count + 1
+		WHERE id = $1
+	`, req.PlayerID); err != nil {
+		return nil, fmt.Errorf("CreateBooking: update user stats: %w", err)
+	}
+
 	return &b, nil
+}
+
+// nilIfEmpty returns a *string that is nil for an empty input, so an absent
+// snapshot value is stored as SQL NULL rather than '' (the latter trips the
+// E.164 CHECK on contact_phone and muddies the snapshot semantics).
+func nilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 // idempotencyTTL is how long an idempotency key remains in force. A key is a
@@ -1801,11 +1840,15 @@ func (r *bookingRepo) GetBookingContact(
 ) (*BookingContact, error) {
 
 	var c BookingContact
+	// Prefer the immutable contact_phone snapshot frozen at creation (delta B);
+	// fall back to the live users phone for pre-030 rows that were never snapshotted
+	// (contact_phone IS NULL). The users join is LEFT so a snapshot-only row still
+	// resolves. contact_phone is stored as NULL (never '') so COALESCE is clean.
 	err := r.db.QueryRow(ctx, `
-		SELECT COALESCE(u.phone, ''), COALESCE(p.name, '')
+		SELECT COALESCE(b.contact_phone, u.phone, ''), COALESCE(p.name, '')
 		FROM bookings b
 		JOIN pitches p ON p.id = b.pitch_id
-		JOIN users   u ON u.id = b.player_id
+		LEFT JOIN users u ON u.id = b.player_id
 		WHERE b.id = $1
 	`, bookingID).Scan(&c.Phone, &c.PitchName)
 

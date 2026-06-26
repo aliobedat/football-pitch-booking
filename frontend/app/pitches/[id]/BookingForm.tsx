@@ -1149,7 +1149,7 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
                 </div>
               </div>
               <span className="text-[11px] text-white/40 leading-relaxed group-hover:text-white/55 transition-colors duration-150">
-                أوافق على تلقّي تأكيد الحجز والتذكيرات عبر الرسائل النصية
+                أوافق على حفظ رقم جوالي وتقديمه لصاحب الملعب للتواصل معي بعد تأكيد الحجز
               </span>
             </label>
           </div>

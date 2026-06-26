@@ -145,11 +145,12 @@ func (r *authRepo) HasOptedOut(ctx context.Context, phone string) (bool, error) 
 func (r *authRepo) EnsureVerifiedUser(ctx context.Context, phone string) (*models.User, error) {
 	var u models.User
 	err := r.db.QueryRow(ctx, `
-		INSERT INTO users (phone, role, phone_verified)
-		VALUES ($1, 'player', TRUE)
+		INSERT INTO users (phone, role, phone_verified, phone_verified_at)
+		VALUES ($1, 'player', TRUE, NOW())
 		ON CONFLICT (phone) DO UPDATE SET
-			phone_verified = TRUE,
-			updated_at     = NOW()
+			phone_verified    = TRUE,
+			phone_verified_at = COALESCE(users.phone_verified_at, NOW()),
+			updated_at        = NOW()
 		RETURNING id, COALESCE(full_name,''), COALESCE(email,''), COALESCE(phone,''),
 		          role, created_at, updated_at
 	`, phone).Scan(
