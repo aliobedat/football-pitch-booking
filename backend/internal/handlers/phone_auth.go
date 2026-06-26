@@ -40,6 +40,9 @@ import (
 type PhoneAuthStore interface {
 	SetOptIn(ctx context.Context, phone string, optIn bool) error
 	EnsureVerifiedUser(ctx context.Context, phone string) (*models.User, error)
+	// EnsureBookingUser materialises the booking user WITHOUT verifying the phone
+	// (no OTP). Backs CreateBookingSession when BOOKING_OTP_REQUIRED is false.
+	EnsureBookingUser(ctx context.Context, phone, fullName string) (*models.User, error)
 	StoreRefreshToken(ctx context.Context, userID int, tokenHash string, expiresAt time.Time) error
 	// FindByID loads the user behind the current session cookie, backing
 	// GET /auth/me so the client can rehydrate without ever reading a token.
@@ -218,6 +221,67 @@ func (h *PhoneAuthHandler) VerifyOTP(c *gin.Context) {
 		"message": "phone verified",
 		"data":    resp,
 	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// POST /api/v1/auth/booking-session   (MVP no-OTP booking unblock)
+// ─────────────────────────────────────────────────────────────────────────────
+
+type bookingSessionRequest struct {
+	Phone    string `json:"phone" binding:"required"`
+	FullName string `json:"full_name"`
+}
+
+// CreateBookingSession establishes a player session from name + JO phone WITHOUT
+// an OTP, for the MVP no-OTP booking flow. It is active ONLY while
+// cfg.BookingOTPRequired is false; when OTP is required this endpoint refuses
+// (booking must then go through request-otp/verify-otp). It does NOT verify the
+// phone — phone_verified stays false — and shares NOTHING with the owner/staff
+// login path. ValidateJOMobile still gates the number (booking rule), and the
+// session cookies are minted exactly like the OTP path (issueTokenPair).
+func (h *PhoneAuthHandler) CreateBookingSession(c *gin.Context) {
+	// Defence in depth: if OTP is required, this no-OTP shortcut is closed.
+	if h.cfg.BookingOTPRequired {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "otp_required", "message": "booking requires phone verification",
+		})
+		return
+	}
+
+	var req bookingSessionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": err.Error()})
+		return
+	}
+
+	phone, err := normalizePhone(req.Phone)
+	if err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_phone", "message": err.Error()})
+		return
+	}
+	// Strict JO-mobile rule still applies to the booking phone (delta D parity).
+	if err := phonepkg.ValidateJOMobile(phone); err != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "invalid_phone", "message": "يرجى إدخال رقم هاتف أردني محمول صحيح",
+		})
+		return
+	}
+
+	user, err := h.store.EnsureBookingUser(c.Request.Context(), phone, strings.TrimSpace(req.FullName))
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "internal_error", "message": "could not start your booking session, please try again",
+		})
+		return
+	}
+
+	resp, err := h.issueTokenPair(c, user)
+	if err != nil {
+		return // issueTokenPair already wrote the error response
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "booking session established", "data": resp})
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -48,6 +48,13 @@ type AuthRepository interface {
 	// Called after a successful OTP verification.
 	EnsureVerifiedUser(ctx context.Context, phone string) (*models.User, error)
 
+	// EnsureBookingUser returns the user for phone, creating one if absent, for the
+	// NO-OTP booking flow (BOOKING_OTP_REQUIRED=false). It MUST NOT verify the
+	// phone — phone_verified stays at its existing value (false for a new row),
+	// since no code was checked. fullName is captured JIT only when the user has no
+	// name yet (an existing verified user's name is never overwritten).
+	EnsureBookingUser(ctx context.Context, phone, fullName string) (*models.User, error)
+
 	// FindByID loads a user by primary key, surfacing nullable phone-first
 	// columns as empty strings. Returns ErrUserNotFound when no row matches.
 	// Backs GET /auth/me (cookie-session rehydration).
@@ -159,6 +166,31 @@ func (r *authRepo) EnsureVerifiedUser(ctx context.Context, phone string) (*model
 	)
 	if err != nil {
 		return nil, fmt.Errorf("EnsureVerifiedUser: %w", err)
+	}
+	return &u, nil
+}
+
+// EnsureBookingUser upserts the phone's user row for the NO-OTP booking flow and
+// returns it. Unlike EnsureVerifiedUser it NEVER sets phone_verified — no code was
+// checked, so a new row keeps the column default (false) and an existing row keeps
+// whatever it had (a returning OTP-verified user is not downgraded). full_name is
+// captured JIT only when currently empty, so an existing name is never overwritten.
+func (r *authRepo) EnsureBookingUser(ctx context.Context, phone, fullName string) (*models.User, error) {
+	var u models.User
+	err := r.db.QueryRow(ctx, `
+		INSERT INTO users (phone, role, full_name)
+		VALUES ($1, 'player', NULLIF($2, ''))
+		ON CONFLICT (phone) DO UPDATE SET
+			full_name  = COALESCE(NULLIF(users.full_name, ''), NULLIF($2, '')),
+			updated_at = NOW()
+		RETURNING id, COALESCE(full_name,''), COALESCE(email,''), COALESCE(phone,''),
+		          role, created_at, updated_at
+	`, phone, fullName).Scan(
+		&u.ID, &u.FullName, &u.Email, &u.Phone,
+		&u.Role, &u.CreatedAt, &u.UpdatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("EnsureBookingUser: %w", err)
 	}
 	return &u, nil
 }
