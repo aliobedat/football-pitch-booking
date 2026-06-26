@@ -106,7 +106,11 @@ func (p *PostgresStore) IncrementAttempts(ctx context.Context, phone string) (in
 // rows and is not an error — the HTTP layer ensures the verified user exists.
 func (p *PostgresStore) MarkPhoneVerified(ctx context.Context, phone string) error {
 	if _, err := p.db.Exec(ctx, `
-		UPDATE users SET phone_verified = TRUE, updated_at = NOW() WHERE phone = $1
+		UPDATE users
+		SET phone_verified    = TRUE,
+		    phone_verified_at  = COALESCE(phone_verified_at, NOW()),
+		    updated_at         = NOW()
+		WHERE phone = $1
 	`, phone); err != nil {
 		return fmt.Errorf("otp/postgres: mark phone verified: %w", err)
 	}

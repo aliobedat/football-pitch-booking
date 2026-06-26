@@ -75,7 +75,7 @@ export default function OtpModal({ phone, onVerified, onDismiss }: OtpModalProps
     if (hasSentRef.current) return;
     hasSentRef.current = true;
     api
-      .post('/auth/request-otp', { phone, opt_in: true })
+      .post('/auth/request-otp', { phone, opt_in: true, purpose: 'booking' })
       .then(() => {
         setInfo('تم إرسال رمز التحقق إلى هاتفك.');
         codeInputRef.current?.focus();
@@ -112,7 +112,7 @@ export default function OtpModal({ phone, onVerified, onDismiss }: OtpModalProps
     setApiError(null);
     setInfo(null);
     try {
-      await api.post('/auth/request-otp', { phone, opt_in: true });
+      await api.post('/auth/request-otp', { phone, opt_in: true, purpose: 'booking' });
       setInfo('تم إرسال رمز جديد.');
       startCooldown();
     } catch (err) {

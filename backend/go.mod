@@ -10,6 +10,7 @@ require (
 	github.com/google/uuid v1.5.0
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/joho/godotenv v1.5.1
+	github.com/nyaruka/phonenumbers v1.8.0
 )
 
 require (
@@ -47,5 +48,5 @@ require (
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.45.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
+	google.golang.org/protobuf v1.36.11 // indirect
 )

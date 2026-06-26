@@ -26,7 +26,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/models"
 	"github.com/ali/football-pitch-api/internal/notification"
 	"github.com/ali/football-pitch-api/internal/otp"
-	"github.com/ali/football-pitch-api/internal/phone"
+	phonepkg "github.com/ali/football-pitch-api/internal/phone"
 	"github.com/ali/football-pitch-api/internal/repository"
 )
 
@@ -83,7 +83,17 @@ type requestOTPRequest struct {
 	// explicit false. binding:"required" rejects only the missing case — an
 	// explicit false is allowed through and then refused by the opt-in gate.
 	OptIn *bool `json:"opt_in" binding:"required"`
+	// Purpose discriminates the caller's flow. The player BOOKING flow sends
+	// "booking", which opts THIS request into the strict Jordan-mobile rule
+	// (phone.ValidateJOMobile). Any other value — including the absent default
+	// used by the shared owner/staff login flow — keeps the looser Normalize-only
+	// rule, so login behaviour is unchanged. Never required.
+	Purpose string `json:"purpose"`
 }
+
+// purposeBooking is the requestOTPRequest.Purpose value the player booking flow
+// sends to opt into strict Jordan-mobile validation.
+const purposeBooking = "booking"
 
 type verifyOTPRequest struct {
 	Phone string `json:"phone" binding:"required"`
@@ -113,6 +123,19 @@ func (h *PhoneAuthHandler) RequestOTP(c *gin.Context) {
 			"error": "invalid_phone", "message": err.Error(),
 		})
 		return
+	}
+
+	// Strict Jordan-mobile gate — BOOKING flow ONLY (delta D). Scoped to
+	// purpose="booking" so the shared owner/staff login path keeps the looser
+	// Normalize-only rule; the rule is never applied without this explicit flag.
+	if req.Purpose == purposeBooking {
+		if err := phonepkg.ValidateJOMobile(phone); err != nil {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{
+				"error":   "invalid_phone",
+				"message": "يرجى إدخال رقم هاتف أردني محمول صحيح",
+			})
+			return
+		}
 	}
 
 	// Persist consent first so the opt-in gate inside the notification service
@@ -424,5 +447,5 @@ func setRetryAfter(c *gin.Context, err error) {
 // normalizePhone delegates to the shared phone.Normalize (Cockpit WO1 extraction)
 // so the handler, staff binding, and CRM backfill share one identity rule.
 func normalizePhone(raw string) (string, error) {
-	return phone.Normalize(raw)
+	return phonepkg.Normalize(raw)
 }
