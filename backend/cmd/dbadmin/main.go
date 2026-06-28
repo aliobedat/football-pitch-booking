@@ -20,12 +20,14 @@ import (
 	"log"
 	"math"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/phone"
@@ -47,6 +49,9 @@ func main() {
 	introspect := flag.String("introspect", "", "print column types of a table, then exit")
 	verifyRecon := flag.Bool("verify-recon", false, "reconciliation audit: Net == collected(F1) − Σexpenses to the fil (create+soft-delete round-trip)")
 	verifyExpTenant := flag.Bool("verify-exp-tenant", false, "cross-tenant: Owner A cannot read/edit/delete Owner B's expense")
+	setPassword := flag.Bool("set-password", false, "set a dashboard user's password by phone (owner/admin/staff/super_admin)")
+	pwPhone := flag.String("phone", "", "with -set-password: target user's phone (any accepted format; normalised)")
+	pwValue := flag.String("password", "", "with -set-password: the new password (or set env DBADMIN_PASSWORD to avoid the process list)")
 	flag.Parse()
 
 	_ = godotenv.Load()
@@ -96,6 +101,8 @@ func main() {
 		verifyReconciliation(ctx, pool)
 	case *verifyExpTenant:
 		verifyExpenseTenant(ctx, pool)
+	case *setPassword:
+		runSetPassword(ctx, pool, *pwPhone, *pwValue)
 	default:
 		flag.Usage()
 		os.Exit(2)
@@ -111,6 +118,62 @@ func runSQLFile(ctx context.Context, pool *pgxpool.Pool, path string) {
 		log.Fatalf("exec %s: %v", path, err)
 	}
 	fmt.Printf("✓ executed %s\n", path)
+}
+
+// runSetPassword provisions a dashboard user's phone+password login credential.
+// It bcrypt-hashes the password (cost from BCRYPT_COST, default 12) and writes
+// users.password_hash for the row, scoped to owner/admin/staff/super_admin —
+// player rows are never eligible. The plaintext is never logged or echoed. A
+// password may be passed via -password or the DBADMIN_PASSWORD env var (preferred:
+// keeps it out of the process list).
+//
+//	go run ./cmd/dbadmin -set-password -phone 0791234567 -password 'S3cret-pass'
+//	DBADMIN_PASSWORD='S3cret-pass' go run ./cmd/dbadmin -set-password -phone 0791234567
+func runSetPassword(ctx context.Context, pool *pgxpool.Pool, rawPhone, rawPassword string) {
+	if strings.TrimSpace(rawPhone) == "" {
+		log.Fatal("-phone is required with -set-password")
+	}
+	pw := rawPassword
+	if pw == "" {
+		pw = os.Getenv("DBADMIN_PASSWORD")
+	}
+	if pw == "" {
+		log.Fatal("provide the new password via -password or the DBADMIN_PASSWORD env var")
+	}
+	if len(pw) < 8 {
+		log.Fatal("password must be at least 8 characters")
+	}
+
+	normPhone, err := phone.Normalize(rawPhone)
+	if err != nil {
+		log.Fatalf("invalid phone: %v", err)
+	}
+
+	cost := 12
+	if v := os.Getenv("BCRYPT_COST"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 10 && n <= 31 {
+			cost = n
+		}
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(pw), cost)
+	if err != nil {
+		log.Fatalf("hash password: %v", err)
+	}
+
+	tag, err := pool.Exec(ctx, `
+		UPDATE users
+		SET    password_hash = $2, updated_at = NOW()
+		WHERE  phone = $1
+		  AND  role IN ('owner','admin','staff','super_admin')
+	`, normPhone, string(hash))
+	if err != nil {
+		log.Fatalf("set password: %v", err)
+	}
+	if tag.RowsAffected() == 0 {
+		log.Fatalf("no owner/admin/staff/super_admin user found for phone %s (player rows are not eligible)", normPhone)
+	}
+	fmt.Printf("✓ password set for %s (bcrypt cost %d)\n", normPhone, cost)
 }
 
 func runBackfill(ctx context.Context, pool *pgxpool.Pool, apply bool) {
