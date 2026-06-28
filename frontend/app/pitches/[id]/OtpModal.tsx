@@ -1,7 +1,7 @@
 'use client';
 
-// OTP verification modal for the guest booking flow.
-// Reuses the same endpoints and error-code → Arabic copy mapping as login/page.tsx.
+// OTP verification modal for the guest booking flow — the booking OTP contract:
+// request a code, verify it, and mint a session inline so the booking can proceed.
 // The caller (BookingForm) is responsible for calling login(user) and proceeding
 // with the booking POST after onVerified fires.
 
@@ -11,9 +11,8 @@ import api from '@/lib/api';
 import type { User } from '@/context/AuthContext';
 import Button from '@/components/ui/Button';
 
-// Mirrors mapError in login/page.tsx — same backend error codes, same Arabic copy.
-// Duplicated intentionally (no shared export exists yet); extract if a third
-// callsite appears.
+// Maps the booking OTP flow's backend error codes to Arabic copy. Duplicated
+// intentionally (no shared export exists yet); extract if a third callsite appears.
 function mapError(err: unknown): string {
   if (axios.isAxiosError(err)) {
     const code = err.response?.data?.error as string | undefined;

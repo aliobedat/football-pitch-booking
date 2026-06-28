@@ -9,6 +9,9 @@ import api from '@/lib/api';
 
 export type User = SharedUser;
 
-const { AuthProvider, useAuth } = createAuthContext(api, '/login');
+// No standalone player login UI for launch: player booking is JIT/OTP-free, so
+// logout lands on home ('/') rather than a dedicated login page. (The shared
+// default loginPath stays '/login' for the admin app — we override per-binding.)
+const { AuthProvider, useAuth } = createAuthContext(api, '/');
 
 export { AuthProvider, useAuth };

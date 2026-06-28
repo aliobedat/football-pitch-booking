@@ -50,12 +50,14 @@ const nextConfig: NextConfig = {
   // Permit cross-origin dev requests from a phone on the same LAN. Next.js
   // otherwise blocks the device's LAN-IP origin against the dev server.
   allowedDevOrigins: ['192.168.100.46:3000', '192.168.100.46'],
-  // The legacy email/password /register page was removed in the auth-hardening
-  // pass — phone OTP via /login is now the sole auth entry point. Permanently
-  // redirect any stale bookmarks/links so they land on login instead of a 404.
+  // No standalone player login UI for launch: booking is JIT/OTP-free. Permanently
+  // redirect the retired /login and /register pages to home so stale
+  // bookmarks/links land on '/' instead of a 404. Both point straight at '/' to
+  // avoid a /register -> /login -> / chain.
   async redirects() {
     return [
-      { source: '/register', destination: '/login', permanent: true },
+      { source: '/login',    destination: '/', permanent: true },
+      { source: '/register', destination: '/', permanent: true },
     ];
   },
   async headers() {

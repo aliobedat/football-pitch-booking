@@ -90,10 +90,10 @@ export default function Navbar() {
               </button>
             </div>
           ) : (
-            // Phone-first: a single OTP entry point. The first verification both
-            // signs in and creates the account, so there is no separate register.
+            // Booking is JIT/OTP-free for launch: there is no standalone login UI,
+            // so the CTA means "start booking" and routes straight to the pitch list.
             <Link
-              href="/login"
+              href="/pitches"
               onClick={closeMenu}
               className={[
                 'flex items-center gap-2 px-4 py-2 rounded-lg',
