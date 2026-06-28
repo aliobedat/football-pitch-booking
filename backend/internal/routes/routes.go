@@ -31,7 +31,7 @@ func Register(
 	healthHandler := handlers.NewHealthHandler(db)
 	authHandler := handlers.NewAuthHandler(db, jwtManager, cfg)
 	phoneAuthHandler := handlers.NewPhoneAuthHandler(otpSvc, authStore, jwtManager, cfg)
-	// Phone + password admin login (owner/admin/staff/super_admin). Separate from
+	// Phone + password admin login (owner/admin/staff). Separate from
 	// the OTP flow and from its own per-phone brute-force limiter (NOT the OTP
 	// limiter). A dedicated AuthRepository instance backs the password lookup.
 	passwordAuthHandler := handlers.NewPasswordAuthHandler(
@@ -101,8 +101,8 @@ func Register(
 		authRoutes.POST("/request-otp", phoneAuthHandler.RequestOTP)
 		authRoutes.POST("/verify-otp", phoneAuthHandler.VerifyOTP)
 
-		// Phone + password login for dashboard roles (owner/admin/staff/
-		// super_admin). No OTP/SMS dependency. Mints a roled session ONLY on a
+		// Phone + password login for dashboard roles (owner/admin/staff).
+		// No OTP/SMS dependency. Mints a roled session ONLY on a
 		// correct phone+password; every credential failure is a generic 401.
 		// The OTP endpoints above remain intact and unused by the admin UI.
 		authRoutes.POST("/password-login", passwordAuthHandler.PasswordLogin)
