@@ -1,7 +1,7 @@
 package handlers
 
-// Phone + password authentication for dashboard roles (owner/admin/staff/
-// super_admin). This is the admin login path: it does NOT use OTP/SMS and shares
+// Phone + password authentication for dashboard roles (owner/admin/staff).
+// This is the admin login path: it does NOT use OTP/SMS and shares
 // NOTHING with the player phone-first OTP flow (request-otp/verify-otp), which
 // stays intact for later re-enablement. A session is minted ONLY on a correct
 // phone + password; phone alone, a wrong/missing password, a NULL password_hash,
@@ -35,15 +35,17 @@ type PasswordLoginStore interface {
 	StoreRefreshToken(ctx context.Context, userID int, tokenHash string, expiresAt time.Time) error
 }
 
-// passwordLoginRoles is the allow-list for this endpoint: the dashboard cohort.
-// "guard" maps to the staff role in this codebase (owner-provisioned operator);
-// super_admin is included for parity with the frontend DASHBOARD_ROLES set. A
-// player is categorically barred — it can never obtain an admin session here.
+// passwordLoginRoles is the allow-list for this endpoint: the dashboard cohort
+// that the production user_role enum actually supports — {owner, admin, staff}.
+// "guard" maps to the staff role in this codebase (owner-provisioned operator).
+// A player is categorically barred — it can never obtain an admin session here.
+// NOTE: super_admin is intentionally NOT listed — it is not a value of the
+// production user_role enum (player|owner|admin|staff). Adding it would require a
+// separate, explicit enum migration first.
 var passwordLoginRoles = map[string]struct{}{
 	auth.RoleOwner: {},
 	auth.RoleAdmin: {},
 	auth.RoleStaff: {},
-	"super_admin":  {},
 }
 
 // PasswordAuthHandler serves POST /auth/password-login.

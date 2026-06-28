@@ -1,5 +1,5 @@
 -- Migration 031 (UP) — Re-add users.password_hash for the phone+password admin
--- login path (owner/admin/staff/super_admin sign in with phone + a password an
+-- login path (owner/admin/staff sign in with phone + a password an
 -- operator sets via the dbadmin CLI). It is NULLABLE: phone-first player rows and
 -- any roled user without a provisioned password keep NULL and authenticate via the
 -- existing OTP / booking-session paths. The value stored is always a bcrypt hash —
