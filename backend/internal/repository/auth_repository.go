@@ -32,6 +32,14 @@ type AuthRepository interface {
 	// the notification.OptInChecker. An unknown phone reports false (not an error).
 	HasOptedIn(ctx context.Context, phone string) (bool, error)
 
+	// FindLoginByPhone loads the user behind a phone for the phone+password login
+	// path, returning the row plus its bcrypt password_hash (empty string when the
+	// column is NULL — i.e. no password provisioned). Returns ErrUserNotFound when
+	// no row matches. The caller (PasswordAuthHandler) decides role eligibility and
+	// verifies the password; this method makes NO authorization decision and never
+	// returns plaintext.
+	FindLoginByPhone(ctx context.Context, phone string) (*models.User, string, error)
+
 	// SetOptOut records (or clears) an explicit consent WITHDRAWAL for a user by
 	// id. Opting out also clears opt_in in the same write, so a withdrawal fully
 	// revokes AUTHENTICATION consent rather than leaving a stale grant behind.
@@ -109,6 +117,32 @@ func (r *authRepo) HasOptedIn(ctx context.Context, phone string) (bool, error) {
 		return false, fmt.Errorf("HasOptedIn: %w", err)
 	}
 	return optIn, nil
+}
+
+// FindLoginByPhone loads the user + bcrypt password_hash for phone. A NULL
+// password_hash surfaces as an empty string (no password provisioned); the
+// handler maps that to a generic 401. Returns ErrUserNotFound on no match.
+func (r *authRepo) FindLoginByPhone(ctx context.Context, phone string) (*models.User, string, error) {
+	var (
+		u    models.User
+		hash string
+	)
+	err := r.db.QueryRow(ctx, `
+		SELECT id, COALESCE(full_name,''), COALESCE(email,''), COALESCE(phone,''),
+		       role, created_at, updated_at, COALESCE(password_hash,'')
+		FROM   users
+		WHERE  phone = $1
+	`, phone).Scan(
+		&u.ID, &u.FullName, &u.Email, &u.Phone,
+		&u.Role, &u.CreatedAt, &u.UpdatedAt, &hash,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, "", ErrUserNotFound
+		}
+		return nil, "", fmt.Errorf("FindLoginByPhone: %w", err)
+	}
+	return &u, hash, nil
 }
 
 // SetOptOut sets users.opt_out for the given user id. Opting out also clears

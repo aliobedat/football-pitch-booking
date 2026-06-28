@@ -1,6 +1,8 @@
 package routes
 
 import (
+	"time"
+
 	"github.com/gin-gonic/gin"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -29,6 +31,13 @@ func Register(
 	healthHandler := handlers.NewHealthHandler(db)
 	authHandler := handlers.NewAuthHandler(db, jwtManager, cfg)
 	phoneAuthHandler := handlers.NewPhoneAuthHandler(otpSvc, authStore, jwtManager, cfg)
+	// Phone + password admin login (owner/admin/staff/super_admin). Separate from
+	// the OTP flow and from its own per-phone brute-force limiter (NOT the OTP
+	// limiter). A dedicated AuthRepository instance backs the password lookup.
+	passwordAuthHandler := handlers.NewPasswordAuthHandler(
+		repository.NewAuthRepository(db), jwtManager, cfg,
+		handlers.NewMemoryLoginLimiter(5, 15*time.Minute),
+	)
 	// Cockpit WO1: Regulars CRM. The booking create paths attach the customer
 	// go-forward via the same repository the CRM reads from.
 	customerRepo := repository.NewCustomerRepository(db)
@@ -91,6 +100,12 @@ func Register(
 		// removed (Step C).
 		authRoutes.POST("/request-otp", phoneAuthHandler.RequestOTP)
 		authRoutes.POST("/verify-otp", phoneAuthHandler.VerifyOTP)
+
+		// Phone + password login for dashboard roles (owner/admin/staff/
+		// super_admin). No OTP/SMS dependency. Mints a roled session ONLY on a
+		// correct phone+password; every credential failure is a generic 401.
+		// The OTP endpoints above remain intact and unused by the admin UI.
+		authRoutes.POST("/password-login", passwordAuthHandler.PasswordLogin)
 		// MVP no-OTP booking unblock: establish a player session from name + JO
 		// phone without a code. Active only while BOOKING_OTP_REQUIRED is false
 		// (the handler refuses otherwise). Unauthenticated, like the OTP endpoints;

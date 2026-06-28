@@ -7,28 +7,27 @@ import { isDashboardRole, type User } from '@malaab/shared/auth';
 import { useAuth } from '@/context/AuthContext';
 import api from '@/lib/api';
 
-// Admin standalone login (PR A) — reuses the existing phone-OTP endpoints
-// (request-otp → verify-otp), inventing no new auth logic. Dashboard roles
-// (staff/owner/admin/super_admin) are admitted; a PLAYER-only actor is REJECTED
-// at the admin door with a clear message + a link to the local B2C app — never
-// granted admin access (the route guard + edge proxy enforce this independently).
+// Admin standalone login: phone + password (no OTP/SMS dependency). It calls the
+// backend POST /auth/password-login, which mints a roled session ONLY for a
+// dashboard role (owner/admin/staff/super_admin) on a correct phone+password; a
+// player or any credential failure returns a generic 401. The OTP endpoints
+// (request-otp/verify-otp) still exist server-side but are intentionally NOT used
+// here. The route guard + edge proxy enforce role access independently.
 const B2C_URL = process.env.NEXT_PUBLIC_B2C_URL || 'http://localhost:3000';
 
-type Phase = 'phone' | 'code';
-
-interface VerifyResponse {
+interface LoginResponse {
   data: { expires_in_seconds: number; user: User };
 }
 
+// mapError maps the backend envelope to Arabic copy. Every credential failure is a
+// single generic message (no oracle revealing which field was wrong).
 function mapError(err: unknown): string {
   if (axios.isAxiosError(err)) {
     const code = err.response?.data?.error as string | undefined;
     switch (code) {
-      case 'rate_limited': return 'عدد كبير من الطلبات. حاول لاحقاً.';
-      case 'invalid_phone': return 'رقم الهاتف غير صالح.';
-      case 'invalid_code': return 'الرمز غير صحيح أو منتهي.';
-      case 'too_many_attempts': return 'محاولات كثيرة. اطلب رمزاً جديداً.';
-      default: return err.response?.data?.message ?? 'حدث خطأ ما.';
+      case 'too_many_attempts': return 'محاولات كثيرة. حاول لاحقاً.';
+      case 'invalid_credentials': return 'رقم الهاتف أو كلمة المرور غير صحيحة.';
+      default: return 'رقم الهاتف أو كلمة المرور غير صحيحة.';
     }
   }
   return 'خطأ في الشبكة.';
@@ -38,9 +37,8 @@ export default function AdminLoginPage() {
   const router = useRouter();
   const { user, isLoading, login } = useAuth();
 
-  const [phase, setPhase] = useState<Phase>('phone');
   const [phone, setPhone] = useState('');
-  const [code, setCode] = useState('');
+  const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   // A player who authenticated successfully but is NOT a dashboard role: rejected
@@ -55,28 +53,14 @@ export default function AdminLoginPage() {
     else setRejected(true);
   }, [user, isLoading, router]);
 
-  async function requestOtp(e: FormEvent) {
+  async function submit(e: FormEvent) {
     e.preventDefault();
     setSubmitting(true);
     setError(null);
     try {
-      await api.post('/auth/request-otp', { phone: phone.trim(), opt_in: true });
-      setPhase('code');
-    } catch (err) {
-      setError(mapError(err));
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  async function verify(e: FormEvent) {
-    e.preventDefault();
-    setSubmitting(true);
-    setError(null);
-    try {
-      const { data } = await api.post<VerifyResponse>('/auth/verify-otp', {
+      const { data } = await api.post<LoginResponse>('/auth/password-login', {
         phone: phone.trim(),
-        code: code.trim(),
+        password,
       });
       const u = data.data.user;
       // Role gate: admit dashboard roles; reject a player WITHOUT adopting the
@@ -134,28 +118,25 @@ export default function AdminLoginPage() {
         </div>
 
         <div className="bg-[#1a1c1b] border border-white/[0.07] rounded-2xl p-8">
-          <form onSubmit={phase === 'phone' ? requestOtp : verify} className="flex flex-col gap-5">
-            {phase === 'phone' ? (
-              <input
-                type="tel"
-                dir="ltr"
-                placeholder="07X XXX XXXX"
-                value={phone}
-                onChange={(e) => setPhone(e.target.value)}
-                className="w-full rounded-lg bg-[#111312] border border-white/10 px-4 py-3 text-sm text-center"
-              />
-            ) : (
-              <input
-                type="text"
-                inputMode="numeric"
-                dir="ltr"
-                maxLength={6}
-                placeholder="● ● ● ● ● ●"
-                value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, ''))}
-                className="w-full rounded-lg bg-[#111312] border border-white/10 px-4 py-3 text-sm text-center tracking-[0.5em]"
-              />
-            )}
+          <form onSubmit={submit} className="flex flex-col gap-5">
+            <input
+              type="tel"
+              dir="ltr"
+              autoComplete="username"
+              placeholder="07X XXX XXXX"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+              className="w-full rounded-lg bg-[#111312] border border-white/10 px-4 py-3 text-sm text-center"
+            />
+            <input
+              type="password"
+              dir="ltr"
+              autoComplete="current-password"
+              placeholder="كلمة المرور"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              className="w-full rounded-lg bg-[#111312] border border-white/10 px-4 py-3 text-sm text-center"
+            />
 
             {error && (
               <div role="alert" className="rounded-lg px-4 py-3 text-sm text-red-400 bg-red-500/[0.08] border border-red-500/[0.18]">
@@ -168,7 +149,7 @@ export default function AdminLoginPage() {
               disabled={submitting}
               className="rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 px-4 py-3 text-sm font-bold transition-colors"
             >
-              {phase === 'phone' ? 'إرسال رمز التحقق' : 'دخول'}
+              دخول
             </button>
           </form>
         </div>
