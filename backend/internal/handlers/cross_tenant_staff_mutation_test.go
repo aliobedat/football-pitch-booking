@@ -40,9 +40,9 @@ import (
 // ── Test environment ──────────────────────────────────────────────────────────
 
 type xtEnv struct {
-	pool       *pgxpool.Pool
-	jwt        *auth.JWTManager
-	router     *gin.Engine
+	pool   *pgxpool.Pool
+	jwt    *auth.JWTManager
+	router *gin.Engine
 
 	ownerA, ownerB int // user ids
 	staffA         int // bound to pitchA1 ONLY
@@ -131,7 +131,7 @@ func newXTEnv(t *testing.T) *xtEnv {
 	// Bind staffA to pitchA1 ONLY (promotes them to role=staff). pitchA2 is owned
 	// by the SAME owner A but deliberately left unbound — that is case 3.
 	staffRepo := repository.NewStaffRepository(pool)
-	if _, err := staffRepo.CreateStaffBindings(ctx, e.ownerA, []int{int(e.pitchA1)}, phones[e.staffA]); err != nil {
+	if _, err := staffRepo.CreateStaffBindings(ctx, auth.Actor{UserID: e.ownerA, Role: auth.RoleOwner}, []int{int(e.pitchA1)}, phones[e.staffA]); err != nil {
 		t.Fatalf("bind staffA to pitchA1: %v", err)
 	}
 
