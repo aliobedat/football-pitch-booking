@@ -295,7 +295,7 @@ export default function PitchesPage() {
                 </div>
                 <p className="text-[11.5px] text-white/45">{p.neighborhood} · {SURFACE_LABEL[p.surface] ?? p.surface} · {p.format}</p>
                 <p className="text-[12px] text-emerald-300/90 font-bold">{p.pricePerHour} د.أ / ساعة</p>
-                <div className="mt-auto pt-2 flex items-center gap-2">
+                <div className="mt-auto pt-2 flex flex-wrap items-center gap-2">
                   <button type="button" onClick={() => { setShowAdd(false); setEditTarget(p); }} className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] font-semibold text-white/60 hover:text-white/90 transition-colors">
                     <Pencil size={12} aria-hidden /> تعديل
                   </button>

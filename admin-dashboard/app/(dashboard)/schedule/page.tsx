@@ -125,7 +125,7 @@ export default function SchedulePage() {
           {rows.map((r) => {
             const isBlock = r.source === 'block';
             return (
-              <div key={r.id} className="flex items-center gap-4 rounded-xl bg-[#141715] border border-white/[0.08] px-4 py-3">
+              <div key={r.id} className="flex flex-wrap items-center gap-4 rounded-xl bg-[#141715] border border-white/[0.08] px-4 py-3">
                 <div className="flex items-center gap-1.5 text-white/55 min-w-[120px]">
                   <Clock size={13} aria-hidden />
                   <span className="text-[12.5px] font-mono">{fmtTime(r.start_time)} – {fmtTime(r.end_time)}</span>
