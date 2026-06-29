@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/middleware"
 	"github.com/ali/football-pitch-api/internal/repository"
 )
@@ -20,7 +21,7 @@ type fakeStaffRepo struct {
 	createErr      error
 	created        *repository.StaffMember
 	createCalls    int
-	lastOwnerID    int
+	lastActor      auth.Actor
 	lastPitchIDs   []int
 	lastPhone      string
 	bindingPitches []int
@@ -30,7 +31,7 @@ type fakeStaffRepo struct {
 
 	revokeErr       error
 	revokeCalls     int
-	lastRevokeOwner int
+	lastRevokeActor auth.Actor
 	lastRevokeUser  int
 }
 
@@ -38,9 +39,9 @@ func (f *fakeStaffRepo) StaffBindings(_ context.Context, _ int) ([]int, int, boo
 	return f.bindingPitches, f.bindingOwner, f.bindingFound, f.bindingErr
 }
 
-func (f *fakeStaffRepo) CreateStaffBindings(_ context.Context, ownerID int, pitchIDs []int, phone string) (*repository.StaffMember, error) {
+func (f *fakeStaffRepo) CreateStaffBindings(_ context.Context, actor auth.Actor, pitchIDs []int, phone string) (*repository.StaffMember, error) {
 	f.createCalls++
-	f.lastOwnerID, f.lastPitchIDs, f.lastPhone = ownerID, pitchIDs, phone
+	f.lastActor, f.lastPitchIDs, f.lastPhone = actor, pitchIDs, phone
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -51,16 +52,16 @@ func (f *fakeStaffRepo) CreateStaffBindings(_ context.Context, ownerID int, pitc
 	for _, pid := range pitchIDs {
 		pitches = append(pitches, repository.StaffPitch{PitchID: pid})
 	}
-	return &repository.StaffMember{UserID: 99, OwnerID: ownerID, Phone: phone, Pitches: pitches}, nil
+	return &repository.StaffMember{UserID: 99, OwnerID: actor.UserID, Phone: phone, Pitches: pitches}, nil
 }
 
-func (f *fakeStaffRepo) ListStaffForOwner(_ context.Context, _ int) ([]repository.StaffMember, error) {
+func (f *fakeStaffRepo) ListStaff(_ context.Context, _ auth.Actor) ([]repository.StaffMember, error) {
 	return nil, nil
 }
 
-func (f *fakeStaffRepo) RevokeStaff(_ context.Context, ownerID, staffUserID int) error {
+func (f *fakeStaffRepo) RevokeStaff(_ context.Context, actor auth.Actor, staffUserID int) error {
 	f.revokeCalls++
-	f.lastRevokeOwner, f.lastRevokeUser = ownerID, staffUserID
+	f.lastRevokeActor, f.lastRevokeUser = actor, staffUserID
 	return f.revokeErr
 }
 
@@ -111,9 +112,9 @@ func TestInviteStaff_Success(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201 (body: %s)", rec.Code, rec.Body.String())
 	}
-	// The owner id MUST come from the session, and the phone normalised to E.164.
-	if repo.lastOwnerID != ownerID {
-		t.Fatalf("ownerID = %d, want %d (binding must be scoped to the acting owner)", repo.lastOwnerID, ownerID)
+	// The actor MUST come from the session (id + role), and the phone normalised.
+	if repo.lastActor.UserID != ownerID || repo.lastActor.Role != "owner" {
+		t.Fatalf("actor = %+v, want {UserID:%d Role:owner} (binding scoped to the acting owner)", repo.lastActor, ownerID)
 	}
 	// The full multi-pitch set is passed through (1:N).
 	if len(repo.lastPitchIDs) != 2 || repo.lastPitchIDs[0] != 7 || repo.lastPitchIDs[1] != 9 {
@@ -132,9 +133,9 @@ func TestRevokeStaff_Success(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
 	}
-	// Owner id MUST come from the session, not the request — the isolation guard.
-	if repo.lastRevokeOwner != ownerID || repo.lastRevokeUser != 99 {
-		t.Fatalf("revoke args = (owner %d, user %d), want (%d, 99)", repo.lastRevokeOwner, repo.lastRevokeUser, ownerID)
+	// Actor MUST come from the session, not the request — the isolation guard.
+	if repo.lastRevokeActor.UserID != ownerID || repo.lastRevokeUser != 99 {
+		t.Fatalf("revoke args = (actor %+v, user %d), want (owner %d, 99)", repo.lastRevokeActor, repo.lastRevokeUser, ownerID)
 	}
 }
 

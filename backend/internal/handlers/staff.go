@@ -63,12 +63,13 @@ func (h *StaffHandler) InviteStaff(c *gin.Context) {
 		}
 	}
 
-	// The owner is the authenticated actor. An admin acting on pitches they do not
-	// own would also be rejected by the ownership check — staff are owner-bound by
-	// design, so we always scope the binding to the acting owner's id.
-	ownerID := middleware.GetUserID(c)
+	// Authorization is resolved in the repository from the actor: an owner is scoped
+	// to pitches they own; an admin may bind to any live pitch (the binding's
+	// owner_id is resolved to the pitch's real owner). The route guard already bars
+	// staff/player.
+	actor := middleware.GetActor(c)
 
-	member, err := h.repo.CreateStaffBindings(c.Request.Context(), ownerID, req.PitchIDs, phone)
+	member, err := h.repo.CreateStaffBindings(c.Request.Context(), actor, req.PitchIDs, phone)
 	if err != nil {
 		switch {
 		case errors.Is(err, repository.ErrPitchNotOwned):
@@ -106,8 +107,8 @@ func (h *StaffHandler) RevokeStaff(c *gin.Context) {
 		return
 	}
 
-	ownerID := middleware.GetUserID(c)
-	if err := h.repo.RevokeStaff(c.Request.Context(), ownerID, staffUserID); err != nil {
+	actor := middleware.GetActor(c)
+	if err := h.repo.RevokeStaff(c.Request.Context(), actor, staffUserID); err != nil {
 		switch {
 		case errors.Is(err, repository.ErrStaffBindingNotFound):
 			c.JSON(http.StatusNotFound, gin.H{
@@ -125,11 +126,12 @@ func (h *StaffHandler) RevokeStaff(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "تم تسريح الموظف"})
 }
 
-// ListStaff returns the staff members the authenticated owner has provisioned.
+// ListStaff returns provisioned staff: an owner's own, or — for an admin — every
+// owner's staff. Scope is resolved in the repository from the actor.
 // GET /owner/staff
 func (h *StaffHandler) ListStaff(c *gin.Context) {
-	ownerID := middleware.GetUserID(c)
-	staff, err := h.repo.ListStaffForOwner(c.Request.Context(), ownerID)
+	actor := middleware.GetActor(c)
+	staff, err := h.repo.ListStaff(c.Request.Context(), actor)
 	if err != nil {
 		c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "could not load staff"})

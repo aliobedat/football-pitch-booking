@@ -57,23 +57,29 @@ type StaffRepository interface {
 	StaffBindings(ctx context.Context, userID int) (pitchIDs []int, ownerID int, found bool, err error)
 
 	// CreateStaffBindings provisions a staff member across one or more pitches
-	// atomically: it verifies the owner owns EVERY pitchID, finds the target user by
-	// E.164 phone, promotes them to the `staff` role, and inserts a binding per
-	// pitch (idempotent — ON CONFLICT DO NOTHING, so re-inviting to add pitches is
-	// safe). Ownership check + promotion + inserts run in one transaction so a
-	// partial provision is impossible. Returns the user's full binding set.
-	CreateStaffBindings(ctx context.Context, ownerID int, pitchIDs []int, phoneE164 string) (*StaffMember, error)
+	// atomically: it validates the pitch set against the ACTOR's authority, finds
+	// the target user by E.164 phone, promotes them to the `staff` role, and inserts
+	// a binding per pitch (idempotent — ON CONFLICT DO NOTHING). Authority:
+	//   - owner: must own EVERY pitch in the set; the binding is scoped to the owner.
+	//   - admin: may bind to ANY live pitch, but the binding still carries a single
+	//     owner_id (single-owner invariant), so all selected pitches must be live and
+	//     share ONE owner — that owner becomes the binding's owner_id (NOT the admin).
+	// A foreign/deleted/mixed-owner set yields ErrPitchNotOwned. All steps run in one
+	// transaction so a partial provision is impossible. Returns the full binding set.
+	CreateStaffBindings(ctx context.Context, actor auth.Actor, pitchIDs []int, phoneE164 string) (*StaffMember, error)
 
-	// ListStaffForOwner returns every staff member the owner has provisioned, each
-	// grouped with all of their bound pitches.
-	ListStaffForOwner(ctx context.Context, ownerID int) ([]StaffMember, error)
+	// ListStaff returns provisioned staff grouped with their bound pitches, scoped to
+	// the actor: an owner sees only their own bindings; an admin sees ALL bindings
+	// across every owner (admin-bypass via Actor.OwnerScopeFilter).
+	ListStaff(ctx context.Context, actor auth.Actor) ([]StaffMember, error)
 
-	// RevokeStaff removes a staff member the owner provisioned: it deletes ALL of
-	// their bindings under this owner and demotes the user back to `player` (only if
-	// no bindings remain anywhere), in one transaction. Strictly owner-scoped — an
-	// owner can only revoke staff bound to THEM (staff.owner_id = ownerID); a foreign
-	// or non-existent binding yields ErrStaffBindingNotFound (→404) and writes nothing.
-	RevokeStaff(ctx context.Context, ownerID, staffUserID int) error
+	// RevokeStaff removes a staff member's bindings and demotes them back to `player`
+	// (only if no bindings remain anywhere), in one transaction. Scoped to the actor:
+	//   - owner: may revoke ONLY staff bound to THEM (staff.owner_id = owner.id).
+	//   - admin: may revoke ANY staff binding (admin-bypass via OwnerScopeFilter).
+	// A foreign/non-existent binding (for an owner) yields ErrStaffBindingNotFound
+	// (→404) and writes nothing.
+	RevokeStaff(ctx context.Context, actor auth.Actor, staffUserID int) error
 }
 
 type staffRepo struct {
@@ -112,26 +118,21 @@ func (r *staffRepo) StaffBindings(ctx context.Context, userID int) ([]int, int, 
 	return pitchIDs, ownerID, true, nil
 }
 
-func (r *staffRepo) CreateStaffBindings(ctx context.Context, ownerID int, pitchIDs []int, phoneE164 string) (*StaffMember, error) {
+func (r *staffRepo) CreateStaffBindings(ctx context.Context, actor auth.Actor, pitchIDs []int, phoneE164 string) (*StaffMember, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("CreateStaffBindings: begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	// 1. STRICT OWNERSHIP GUARD: the owner must own EVERY live pitch in the set.
-	//    Counting distinct owned pitches against the distinct requested set rejects
-	//    the whole request if even one pitch is foreign/deleted (all-or-nothing).
-	var ownedCount int
-	if err := tx.QueryRow(ctx,
-		`SELECT count(DISTINCT id) FROM pitches
-		 WHERE id = ANY($1) AND owner_id = $2 AND deleted_at IS NULL`,
-		pitchIDs, ownerID,
-	).Scan(&ownedCount); err != nil {
-		return nil, fmt.Errorf("CreateStaffBindings: ownership check: %w", err)
-	}
-	if ownedCount != distinctCount(pitchIDs) {
-		return nil, ErrPitchNotOwned
+	// 1. AUTHORITY + OWNER RESOLUTION. An owner must own every live pitch; an admin
+	//    may bind to any live pitch but the binding still carries one real owner (the
+	//    pitches' shared owner — never the admin). Either path rejects a foreign/
+	//    deleted/mixed-owner set with ErrPitchNotOwned. The resolved ownerID is the
+	//    binding's owner_id everywhere below, preserving the single-owner invariant.
+	ownerID, err := resolveBindingOwnerTx(ctx, tx, actor, pitchIDs)
+	if err != nil {
+		return nil, err
 	}
 
 	// 2. Resolve the target user by phone. They must already exist.
@@ -200,6 +201,71 @@ func (r *staffRepo) CreateStaffBindings(ctx context.Context, ownerID int, pitchI
 	return member, nil
 }
 
+// resolveBindingOwnerTx validates pitchIDs against the actor's authority and
+// returns the owner_id the resulting staff binding must carry:
+//   - owner: must own EVERY live pitch in the set; returns the owner's id.
+//   - admin: may bind to any live pitch, but a staff binding still carries ONE
+//     owner (single-owner invariant), so all selected pitches must be live and
+//     share a single owner; returns THAT owner's id (never the admin's).
+//
+// A foreign, soft-deleted, non-existent, or mixed-owner set yields ErrPitchNotOwned.
+// This is the staff-path application of the canonical admin-bypass convention
+// (Actor.IsAdmin); owner isolation is unchanged.
+func resolveBindingOwnerTx(ctx context.Context, tx pgx.Tx, actor auth.Actor, pitchIDs []int) (int, error) {
+	if actor.IsAdmin() {
+		// Distinct owners across the requested LIVE pitches.
+		rows, err := tx.Query(ctx,
+			`SELECT DISTINCT owner_id FROM pitches
+			 WHERE id = ANY($1) AND deleted_at IS NULL`, pitchIDs)
+		if err != nil {
+			return 0, fmt.Errorf("resolveBindingOwner: owners: %w", err)
+		}
+		defer rows.Close()
+		var owners []int
+		for rows.Next() {
+			var oid int
+			if err := rows.Scan(&oid); err != nil {
+				return 0, fmt.Errorf("resolveBindingOwner: scan: %w", err)
+			}
+			owners = append(owners, oid)
+		}
+		if err := rows.Err(); err != nil {
+			return 0, fmt.Errorf("resolveBindingOwner: rows: %w", err)
+		}
+		// Must resolve to exactly one owner (rejects mixed-owner and all-missing sets)
+		// AND every requested pitch must be live (rejects a set with any deleted/
+		// non-existent id, matching the owner path's all-or-nothing semantics).
+		if len(owners) != 1 {
+			return 0, ErrPitchNotOwned
+		}
+		var liveCount int
+		if err := tx.QueryRow(ctx,
+			`SELECT count(DISTINCT id) FROM pitches
+			 WHERE id = ANY($1) AND deleted_at IS NULL`, pitchIDs,
+		).Scan(&liveCount); err != nil {
+			return 0, fmt.Errorf("resolveBindingOwner: live count: %w", err)
+		}
+		if liveCount != distinctCount(pitchIDs) {
+			return 0, ErrPitchNotOwned
+		}
+		return owners[0], nil
+	}
+
+	// Owner path: STRICT — must own every live pitch in the set (all-or-nothing).
+	var ownedCount int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(DISTINCT id) FROM pitches
+		 WHERE id = ANY($1) AND owner_id = $2 AND deleted_at IS NULL`,
+		pitchIDs, actor.UserID,
+	).Scan(&ownedCount); err != nil {
+		return 0, fmt.Errorf("resolveBindingOwner: ownership check: %w", err)
+	}
+	if ownedCount != distinctCount(pitchIDs) {
+		return 0, ErrPitchNotOwned
+	}
+	return actor.UserID, nil
+}
+
 // distinctCount returns the number of distinct ids in xs.
 func distinctCount(xs []int) int {
 	seen := make(map[int]struct{}, len(xs))
@@ -235,18 +301,21 @@ func loadStaffMemberTx(ctx context.Context, tx pgx.Tx, ownerID, userID int) (*St
 	return m, rows.Err()
 }
 
-func (r *staffRepo) RevokeStaff(ctx context.Context, ownerID, staffUserID int) error {
+func (r *staffRepo) RevokeStaff(ctx context.Context, actor auth.Actor, staffUserID int) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("RevokeStaff: begin: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
-	// 1. Delete the binding ONLY when it belongs to this owner. The owner_id
-	//    predicate is the isolation guard: an owner can never revoke another owner's
-	//    staff. No row deleted (foreign/absent binding) → ErrStaffBindingNotFound.
+	// 1. Delete the binding under the actor's scope. OwnerScopeFilter yields the
+	//    owner-isolation predicate (owner_id = owner.id) for an owner — an owner can
+	//    never revoke another owner's staff — and "TRUE" for an admin (revoke ANY
+	//    binding). No row deleted (foreign/absent for an owner) → ErrStaffBindingNotFound.
+	clause, sargs := actor.OwnerScopeFilter("owner_id", 2)
+	args := append([]any{staffUserID}, sargs...)
 	ct, err := tx.Exec(ctx,
-		`DELETE FROM staff WHERE user_id = $1 AND owner_id = $2`, staffUserID, ownerID)
+		`DELETE FROM staff WHERE user_id = $1 AND `+clause, args...)
 	if err != nil {
 		return fmt.Errorf("RevokeStaff: delete binding: %w", err)
 	}
@@ -271,31 +340,34 @@ func (r *staffRepo) RevokeStaff(ctx context.Context, ownerID, staffUserID int) e
 	return nil
 }
 
-func (r *staffRepo) ListStaffForOwner(ctx context.Context, ownerID int) ([]StaffMember, error) {
+func (r *staffRepo) ListStaff(ctx context.Context, actor auth.Actor) ([]StaffMember, error) {
 	// One row per (user, pitch); grouped into StaffMember in Go. Ordered so each
 	// user's rows are contiguous (newest member first by their latest binding),
-	// pitches within a member by name.
+	// pitches within a member by name. OwnerScopeFilter scopes to the owner's own
+	// bindings, or "TRUE" for an admin (every owner's staff). owner_id is selected
+	// per row so admin results carry each binding's real owner.
+	clause, args := actor.OwnerScopeFilter("s.owner_id", 1)
 	rows, err := r.db.Query(ctx, `
-		SELECT s.user_id, COALESCE(u.phone,''), COALESCE(u.full_name,''), s.pitch_id, p.name,
+		SELECT s.user_id, s.owner_id, COALESCE(u.phone,''), COALESCE(u.full_name,''), s.pitch_id, p.name,
 		       max(s.created_at) OVER (PARTITION BY s.user_id) AS member_recency
 		FROM staff s
 		JOIN users u   ON u.id = s.user_id
 		JOIN pitches p ON p.id = s.pitch_id
-		WHERE s.owner_id = $1
-		ORDER BY member_recency DESC, s.user_id, p.name`, ownerID)
+		WHERE `+clause+`
+		ORDER BY member_recency DESC, s.user_id, p.name`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("ListStaffForOwner: %w", err)
+		return nil, fmt.Errorf("ListStaff: %w", err)
 	}
 	defer rows.Close()
 
 	out := []StaffMember{}
 	idx := map[int]int{} // user_id → position in out
 	for rows.Next() {
-		var userID, pitchID int
+		var userID, ownerID, pitchID int
 		var phone, fullName, pitchName string
 		var recency time.Time
-		if err := rows.Scan(&userID, &phone, &fullName, &pitchID, &pitchName, &recency); err != nil {
-			return nil, fmt.Errorf("ListStaffForOwner: scan: %w", err)
+		if err := rows.Scan(&userID, &ownerID, &phone, &fullName, &pitchID, &pitchName, &recency); err != nil {
+			return nil, fmt.Errorf("ListStaff: scan: %w", err)
 		}
 		i, ok := idx[userID]
 		if !ok {
