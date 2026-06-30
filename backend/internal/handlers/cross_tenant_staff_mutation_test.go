@@ -37,6 +37,11 @@ import (
 	"github.com/ali/football-pitch-api/internal/repository"
 )
 
+// staffTestHashH is a placeholder password_hash for the cross-tenant binding
+// fixture (which does not exercise login). The column is TEXT; a non-empty value
+// satisfies the onboarding "password provided" requirement.
+const staffTestHashH = "$2a$10$placeholderhashvaluefortestsonlyxxxxxxxxxxxxxxxxxxxx"
+
 // ── Test environment ──────────────────────────────────────────────────────────
 
 type xtEnv struct {
@@ -131,7 +136,7 @@ func newXTEnv(t *testing.T) *xtEnv {
 	// Bind staffA to pitchA1 ONLY (promotes them to role=staff). pitchA2 is owned
 	// by the SAME owner A but deliberately left unbound — that is case 3.
 	staffRepo := repository.NewStaffRepository(pool)
-	if _, err := staffRepo.CreateStaffBindings(ctx, auth.Actor{UserID: e.ownerA, Role: auth.RoleOwner}, []int{int(e.pitchA1)}, phones[e.staffA]); err != nil {
+	if _, err := staffRepo.CreateStaffBindings(ctx, auth.Actor{UserID: e.ownerA, Role: auth.RoleOwner}, []int{int(e.pitchA1)}, phones[e.staffA], repository.StaffProvision{PasswordHash: staffTestHashH}); err != nil {
 		t.Fatalf("bind staffA to pitchA1: %v", err)
 	}
 

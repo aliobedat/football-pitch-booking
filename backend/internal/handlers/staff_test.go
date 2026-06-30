@@ -24,6 +24,7 @@ type fakeStaffRepo struct {
 	lastActor      auth.Actor
 	lastPitchIDs   []int
 	lastPhone      string
+	lastProv       repository.StaffProvision
 	bindingPitches []int
 	bindingOwner   int
 	bindingFound   bool
@@ -39,9 +40,9 @@ func (f *fakeStaffRepo) StaffBindings(_ context.Context, _ int) ([]int, int, boo
 	return f.bindingPitches, f.bindingOwner, f.bindingFound, f.bindingErr
 }
 
-func (f *fakeStaffRepo) CreateStaffBindings(_ context.Context, actor auth.Actor, pitchIDs []int, phone string) (*repository.StaffMember, error) {
+func (f *fakeStaffRepo) CreateStaffBindings(_ context.Context, actor auth.Actor, pitchIDs []int, phone string, prov repository.StaffProvision) (*repository.StaffMember, error) {
 	f.createCalls++
-	f.lastActor, f.lastPitchIDs, f.lastPhone = actor, pitchIDs, phone
+	f.lastActor, f.lastPitchIDs, f.lastPhone, f.lastProv = actor, pitchIDs, phone, prov
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -85,7 +86,7 @@ func inviteBody(phone string, pitchIDs ...int) map[string]any {
 // The KEY isolation guarantee: binding to a pitch the owner does not own → 403.
 func TestInviteStaff_NotOwnedPitchForbidden(t *testing.T) {
 	repo := &fakeStaffRepo{createErr: repository.ErrPitchNotOwned}
-	r := newStaffRouter(NewStaffHandler(repo), 42, "owner")
+	r := newStaffRouter(NewStaffHandler(repo, 10), 42, "owner")
 	rec := doJSON(t, r, http.MethodPost, "/owner/staff", inviteBody("0791234567", 7))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 binding staff to an unowned pitch (body: %s)", rec.Code, rec.Body.String())
@@ -94,7 +95,7 @@ func TestInviteStaff_NotOwnedPitchForbidden(t *testing.T) {
 
 func TestInviteStaff_StaffCannotInvite(t *testing.T) {
 	repo := &fakeStaffRepo{}
-	r := newStaffRouter(NewStaffHandler(repo), 9, "staff")
+	r := newStaffRouter(NewStaffHandler(repo, 10), 9, "staff")
 	rec := doJSON(t, r, http.MethodPost, "/owner/staff", inviteBody("0791234567", 7))
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 for staff inviting staff", rec.Code)
@@ -107,7 +108,7 @@ func TestInviteStaff_StaffCannotInvite(t *testing.T) {
 func TestInviteStaff_Success(t *testing.T) {
 	repo := &fakeStaffRepo{}
 	const ownerID = 42
-	r := newStaffRouter(NewStaffHandler(repo), ownerID, "owner")
+	r := newStaffRouter(NewStaffHandler(repo, 10), ownerID, "owner")
 	rec := doJSON(t, r, http.MethodPost, "/owner/staff", inviteBody("0791234567", 7, 9))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201 (body: %s)", rec.Code, rec.Body.String())
@@ -128,7 +129,7 @@ func TestInviteStaff_Success(t *testing.T) {
 func TestRevokeStaff_Success(t *testing.T) {
 	repo := &fakeStaffRepo{}
 	const ownerID = 42
-	r := newStaffRouter(NewStaffHandler(repo), ownerID, "owner")
+	r := newStaffRouter(NewStaffHandler(repo, 10), ownerID, "owner")
 	rec := doJSON(t, r, http.MethodDelete, "/owner/staff/99", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body: %s)", rec.Code, rec.Body.String())
@@ -142,7 +143,7 @@ func TestRevokeStaff_Success(t *testing.T) {
 func TestRevokeStaff_ForeignBindingNotFound(t *testing.T) {
 	// The repo reports no binding under this owner (e.g. another owner's staff) → 404.
 	repo := &fakeStaffRepo{revokeErr: repository.ErrStaffBindingNotFound}
-	r := newStaffRouter(NewStaffHandler(repo), 42, "owner")
+	r := newStaffRouter(NewStaffHandler(repo, 10), 42, "owner")
 	rec := doJSON(t, r, http.MethodDelete, "/owner/staff/99", nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 for a binding outside the owner's scope", rec.Code)
@@ -151,7 +152,7 @@ func TestRevokeStaff_ForeignBindingNotFound(t *testing.T) {
 
 func TestRevokeStaff_StaffCannotRevoke(t *testing.T) {
 	repo := &fakeStaffRepo{}
-	r := newStaffRouter(NewStaffHandler(repo), 9, "staff")
+	r := newStaffRouter(NewStaffHandler(repo, 10), 9, "staff")
 	rec := doJSON(t, r, http.MethodDelete, "/owner/staff/99", nil)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 for a staff caller", rec.Code)
@@ -167,13 +168,15 @@ func TestInviteStaff_ErrorMapping(t *testing.T) {
 		err  error
 		want int
 	}{
-		{"user not found", repository.ErrStaffUserNotFound, http.StatusNotFound},
-		{"privileged target", repository.ErrCannotBindPrivileged, http.StatusUnprocessableEntity},
+		{"privileged target (owner/admin)", repository.ErrCannotBindPrivileged, http.StatusUnprocessableEntity},
+		{"password required", repository.ErrPasswordRequired, http.StatusUnprocessableEntity},
+		{"foreign-owner staff", repository.ErrStaffForeignOwner, http.StatusForbidden},
+		{"pitch not owned", repository.ErrPitchNotOwned, http.StatusForbidden},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			repo := &fakeStaffRepo{createErr: tc.err}
-			r := newStaffRouter(NewStaffHandler(repo), 42, "owner")
+			r := newStaffRouter(NewStaffHandler(repo, 10), 42, "owner")
 			rec := doJSON(t, r, http.MethodPost, "/owner/staff", inviteBody("0791234567", 7))
 			if rec.Code != tc.want {
 				t.Fatalf("status = %d, want %d for %s (body: %s)", rec.Code, tc.want, tc.name, rec.Body.String())

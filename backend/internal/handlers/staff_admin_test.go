@@ -67,7 +67,7 @@ func (m *modelStaffRepo) resolveOwner(actor auth.Actor, pitchIDs []int) (int, er
 	return actor.UserID, nil
 }
 
-func (m *modelStaffRepo) CreateStaffBindings(_ context.Context, actor auth.Actor, pitchIDs []int, phone string) (*repository.StaffMember, error) {
+func (m *modelStaffRepo) CreateStaffBindings(_ context.Context, actor auth.Actor, pitchIDs []int, phone string, _ repository.StaffProvision) (*repository.StaffMember, error) {
 	ownerID, err := m.resolveOwner(actor, pitchIDs)
 	if err != nil {
 		return nil, err
@@ -103,7 +103,7 @@ func (m *modelStaffRepo) RevokeStaff(_ context.Context, actor auth.Actor, staffU
 // modelRouter wires invite/list/revoke with the SAME middleware the API uses,
 // injecting the given session identity.
 func modelRouter(repo repository.StaffRepository, userID int, role string) *gin.Engine {
-	h := NewStaffHandler(repo)
+	h := NewStaffHandler(repo, 10)
 	r := gin.New()
 	inject := func(c *gin.Context) {
 		c.Set(middleware.ContextKeyUserID, userID)

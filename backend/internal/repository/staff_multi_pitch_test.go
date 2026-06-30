@@ -64,7 +64,7 @@ func TestStaff_MultiPitchBindResolveRevoke(t *testing.T) {
 	pitch2 := e.makeSecondPitch(t, e.ownerID)
 
 	member, err := repo.CreateStaffBindings(context.Background(),
-		auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner}, []int{int(e.pitchID), int(pitch2)}, e.userPhone(t, e.playerID))
+		auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner}, []int{int(e.pitchID), int(pitch2)}, e.userPhone(t, e.playerID), StaffProvision{PasswordHash: staffTestHash})
 	if err != nil {
 		t.Fatalf("CreateStaffBindings: %v", err)
 	}
@@ -86,7 +86,7 @@ func TestStaff_MultiPitchBindResolveRevoke(t *testing.T) {
 
 	// Idempotent re-invite (add the same pitches again) is a no-op, not an error.
 	if _, err := repo.CreateStaffBindings(context.Background(),
-		auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner}, []int{int(e.pitchID)}, e.userPhone(t, e.playerID)); err != nil {
+		auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner}, []int{int(e.pitchID)}, e.userPhone(t, e.playerID), StaffProvision{PasswordHash: staffTestHash}); err != nil {
 		t.Fatalf("idempotent re-invite: %v", err)
 	}
 	if ids, _, _, _ := repo.StaffBindings(context.Background(), int(e.playerID)); len(ids) != 2 {
@@ -128,7 +128,7 @@ func TestStaff_MultiPitchRejectsForeignPitchAtomically(t *testing.T) {
 
 	// Set mixes an owned pitch with the foreign one → ErrPitchNotOwned, zero writes.
 	_, err = repo.CreateStaffBindings(context.Background(),
-		auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner}, []int{int(e.pitchID), int(foreignID)}, e.userPhone(t, e.playerID))
+		auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner}, []int{int(e.pitchID), int(foreignID)}, e.userPhone(t, e.playerID), StaffProvision{PasswordHash: staffTestHash})
 	if !errors.Is(err, ErrPitchNotOwned) {
 		t.Fatalf("err = %v, want ErrPitchNotOwned", err)
 	}

@@ -21,12 +21,17 @@ interface StaffMember {
 
 // Map an InviteStaff error code to an Arabic message for the owner.
 const INVITE_ERRORS: Record<string, string> = {
-  staff_user_not_found: 'هذا الرقم لم يسجّل في التطبيق بعد — اطلب من الموظف تسجيل الدخول مرة واحدة أولاً.',
+  password_required: 'كلمة المرور مطلوبة لإضافة هذا الموظف.',
+  weak_password: 'كلمة المرور يجب أن تكون 8 أحرف على الأقل.',
+  staff_foreign_owner: 'هذا الموظف مُسجَّل لدى مالك آخر ولا يمكن إعادة تعيينه.',
   not_pitch_owner: 'لا يمكنك تعيين موظف إلا على ملاعبك.',
-  cannot_assign_user: 'لا يمكن تعيين هذا المستخدم كموظف.',
+  cannot_assign_user: 'لا يمكن إضافة هذا الرقم كموظف.',
   invalid_phone: 'رقم الهاتف غير صالح.',
   no_pitches: 'اختر ملعباً واحداً على الأقل.',
 };
+
+// Client-side minimum mirrors the backend (minStaffPasswordLen).
+const MIN_PASSWORD_LEN = 8;
 
 export default function StaffPage() {
   const [pitches, setPitches] = useState<OwnerPitch[]>([]);
@@ -36,6 +41,8 @@ export default function StaffPage() {
 
   // Invite form state — multi-pitch (1:N).
   const [phone, setPhone]   = useState('');
+  const [fullName, setFullName] = useState('');
+  const [password, setPassword] = useState('');
   const [selectedPitches, setSelectedPitches] = useState<number[]>([]);
   const [inviting, setInviting] = useState(false);
   const [inviteError, setInviteError] = useState<string | null>(null);
@@ -66,10 +73,23 @@ export default function StaffPage() {
     setInviteOK(null);
     if (!phone.trim()) { setInviteError('رقم الهاتف مطلوب.'); return; }
     if (selectedPitches.length === 0) { setInviteError('اختر ملعباً واحداً على الأقل.'); return; }
+    // A password is required for a brand-new staff member; the backend is the
+    // authority (it knows the phone's current state) and returns password_required
+    // when one is actually needed. We only block an obviously-too-short password.
+    if (password && password.length < MIN_PASSWORD_LEN) {
+      setInviteError(INVITE_ERRORS.weak_password); return;
+    }
     setInviting(true);
     try {
-      await api.post('/owner/staff', { phone: phone.trim(), pitch_ids: selectedPitches });
+      await api.post('/owner/staff', {
+        phone: phone.trim(),
+        full_name: fullName.trim(),
+        password,
+        pitch_ids: selectedPitches,
+      });
       setPhone('');
+      setFullName('');
+      setPassword('');
       setSelectedPitches([]);
       setInviteOK('تم تعيين الموظف.');
       load();
@@ -106,12 +126,23 @@ export default function StaffPage() {
       {/* Invite form */}
       <form onSubmit={invite} className="rounded-2xl border border-white/[0.07] bg-[#141715] p-5 flex flex-col gap-3.5">
         <p className="text-[12px] text-white/45 leading-relaxed">
-          عيّن موظفاً (حارس ملعب) عبر رقم هاتفه. يجب أن يكون قد سجّل دخوله للتطبيق مرة واحدة على الأقل. سيُمنح صلاحية الوصول إلى جداول الملاعب المحدّدة فقط — دون الوصول للتحليلات أو المالية.
+          أضِف موظفاً (حارس ملعب) عبر رقم هاتفه واسمه وكلمة مرور. سيسجّل الدخول بنفس صفحة الدخول عبر رقمه وكلمة المرور — دون الحاجة لتسجيل مسبق. سيُمنح صلاحية الوصول إلى جداول الملاعب المحدّدة فقط — دون الوصول للتحليلات أو المالية.
         </p>
         <label className="flex flex-col gap-1.5">
           <span className="text-[12px] text-white/45">رقم الهاتف *</span>
           <input value={phone} onChange={e => setPhone(e.target.value)} dir="ltr"
             className="staff-input font-mono max-w-xs" placeholder="+9627…" />
+        </label>
+        <label className="flex flex-col gap-1.5">
+          <span className="text-[12px] text-white/45">اسم الموظف</span>
+          <input value={fullName} onChange={e => setFullName(e.target.value)}
+            className="staff-input max-w-xs" placeholder="مثال: أحمد محمد" />
+        </label>
+        <label className="flex flex-col gap-1.5">
+          <span className="text-[12px] text-white/45">كلمة المرور <span className="text-white/30">(مطلوبة لموظف جديد، 8 أحرف على الأقل)</span></span>
+          <input value={password} onChange={e => setPassword(e.target.value)} type="password" dir="ltr"
+            autoComplete="new-password"
+            className="staff-input max-w-xs" placeholder="••••••••" />
         </label>
         <div className="flex flex-col gap-1.5">
           <span className="text-[12px] text-white/45">الملاعب * <span className="text-white/30">(يمكن اختيار أكثر من ملعب)</span></span>

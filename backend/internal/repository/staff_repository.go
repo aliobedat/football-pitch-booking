@@ -21,16 +21,33 @@ var (
 	// ErrPitchNotOwned — the owner does not own one of the target pitches (or it is
 	// soft-deleted). The core ownership guard; maps to 403.
 	ErrPitchNotOwned = errors.New("staff: owner does not own the target pitch")
-	// ErrStaffUserNotFound — no user exists for the supplied phone. Staff must
-	// have registered (logged in once) before they can be provisioned. Maps to 404.
+	// ErrStaffUserNotFound — no user exists for the supplied phone. Retained for
+	// API compatibility; the onboarding flow now CREATES the user instead of
+	// rejecting an unregistered phone, so this is no longer returned by the create
+	// path. Maps to 404 where still referenced.
 	ErrStaffUserNotFound = errors.New("staff: no registered user for that phone")
 	// ErrCannotBindPrivileged — the target is an owner/admin (or the inviting
 	// owner themselves); they cannot be demoted into a staff binding. Maps to 422.
 	ErrCannotBindPrivileged = errors.New("staff: target user cannot be assigned as staff")
+	// ErrStaffForeignOwner — the target is already staff provisioned by a DIFFERENT
+	// owner and the caller is not allowed to re-home them. Maps to 403.
+	ErrStaffForeignOwner = errors.New("staff: target is staff under another owner")
+	// ErrPasswordRequired — a password is mandatory for this onboarding case (a
+	// brand-new user, or promoting a player who has no password yet) but none was
+	// supplied. Maps to 422.
+	ErrPasswordRequired = errors.New("staff: a password is required to provision this user")
 	// ErrStaffBindingNotFound — no staff binding for that user under this owner
 	// (never bound, already revoked, or belongs to a different owner). Maps to 404.
 	ErrStaffBindingNotFound = errors.New("staff: no binding for that user under this owner")
 )
+
+// StaffProvision carries the optional onboarding inputs for CreateStaffBindings.
+// The handler computes PasswordHash (bcrypt) before calling — the repository never
+// sees plaintext. Empty strings mean "not provided" (leave existing value).
+type StaffProvision struct {
+	FullName     string // optional; saved/updated when non-empty
+	PasswordHash string // optional bcrypt hash; set/reset when non-empty
+}
 
 // StaffPitch is one pitch a staff member is bound to (with its display name).
 type StaffPitch struct {
@@ -66,7 +83,17 @@ type StaffRepository interface {
 	//     share ONE owner — that owner becomes the binding's owner_id (NOT the admin).
 	// A foreign/deleted/mixed-owner set yields ErrPitchNotOwned. All steps run in one
 	// transaction so a partial provision is impossible. Returns the full binding set.
-	CreateStaffBindings(ctx context.Context, actor auth.Actor, pitchIDs []int, phoneE164 string) (*StaffMember, error)
+	//
+	// Onboarding (role-aware ensure, all in-tx, target row locked FOR UPDATE before
+	// any write):
+	//   - phone not in users     → CREATE the user as staff (prov.PasswordHash required)
+	//   - existing player        → promote to staff (password required iff they have
+	//                              none yet); set/reset password + full_name if provided
+	//   - existing staff         → re-bind (password optional; reset if provided)
+	//   - existing owner/admin    → ErrCannotBindPrivileged (no role/password/bind writes)
+	//   - staff under another owner (caller not admin) → ErrStaffForeignOwner
+	//   - missing required password → ErrPasswordRequired
+	CreateStaffBindings(ctx context.Context, actor auth.Actor, pitchIDs []int, phoneE164 string, prov StaffProvision) (*StaffMember, error)
 
 	// ListStaff returns provisioned staff grouped with their bound pitches, scoped to
 	// the actor: an owner sees only their own bindings; an admin sees ALL bindings
@@ -118,7 +145,7 @@ func (r *staffRepo) StaffBindings(ctx context.Context, userID int) ([]int, int, 
 	return pitchIDs, ownerID, true, nil
 }
 
-func (r *staffRepo) CreateStaffBindings(ctx context.Context, actor auth.Actor, pitchIDs []int, phoneE164 string) (*StaffMember, error) {
+func (r *staffRepo) CreateStaffBindings(ctx context.Context, actor auth.Actor, pitchIDs []int, phoneE164 string, prov StaffProvision) (*StaffMember, error) {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("CreateStaffBindings: begin: %w", err)
@@ -135,44 +162,89 @@ func (r *staffRepo) CreateStaffBindings(ctx context.Context, actor auth.Actor, p
 		return nil, err
 	}
 
-	// 2. Resolve the target user by phone. They must already exist.
-	var targetID int
-	var role string
+	// 2. Lock + read the target by phone (role-aware ensure). FOR UPDATE serialises
+	//    against a concurrent role/password change so the decision below cannot race
+	//    a write. A missing row means a brand-new user to create.
+	var (
+		targetID    int
+		role        string
+		hasPassword bool
+		exists      bool
+	)
 	err = tx.QueryRow(ctx,
-		`SELECT id, role::text FROM users WHERE phone = $1`, phoneE164,
-	).Scan(&targetID, &role)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, ErrStaffUserNotFound
-	}
-	if err != nil {
+		`SELECT id, role::text, password_hash IS NOT NULL FROM users WHERE phone = $1 FOR UPDATE`,
+		phoneE164,
+	).Scan(&targetID, &role, &hasPassword)
+	switch {
+	case err == nil:
+		exists = true
+	case errors.Is(err, pgx.ErrNoRows):
+		exists = false
+	default:
 		return nil, fmt.Errorf("CreateStaffBindings: lookup user: %w", err)
 	}
 
-	// 3. Eligible targets: a PLAYER (fresh promotion) OR a user already staff UNDER
-	//    THIS OWNER (incremental pitch add). Reject self, owner/admin, and staff
-	//    provisioned by a DIFFERENT owner — never silently re-home or demote.
-	if targetID == ownerID {
-		return nil, ErrCannotBindPrivileged
-	}
-	switch role {
-	case auth.RolePlayer:
-		// ok — will be promoted below.
-	case auth.RoleStaff:
-		var foreign bool
-		if err := tx.QueryRow(ctx,
-			`SELECT EXISTS(SELECT 1 FROM staff WHERE user_id = $1 AND owner_id <> $2)`,
-			targetID, ownerID,
-		).Scan(&foreign); err != nil {
-			return nil, fmt.Errorf("CreateStaffBindings: foreign-owner check: %w", err)
+	// 3. Decide eligibility + password requirement BEFORE any write (fail closed).
+	if exists {
+		if targetID == ownerID {
+			return nil, ErrCannotBindPrivileged // an owner cannot enroll themselves
 		}
-		if foreign {
+		switch role {
+		case auth.RolePlayer:
+			// Promotion: a password is mandatory unless they already have one.
+			if !hasPassword && prov.PasswordHash == "" {
+				return nil, ErrPasswordRequired
+			}
+		case auth.RoleStaff:
+			// Already staff: re-bind. Refuse if provisioned by a DIFFERENT owner
+			// (never silently re-home). Password optional.
+			var foreign bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS(SELECT 1 FROM staff WHERE user_id = $1 AND owner_id <> $2)`,
+				targetID, ownerID,
+			).Scan(&foreign); err != nil {
+				return nil, fmt.Errorf("CreateStaffBindings: foreign-owner check: %w", err)
+			}
+			if foreign {
+				return nil, ErrStaffForeignOwner
+			}
+		default: // owner / admin (or any unknown role) → refuse, touch nothing.
 			return nil, ErrCannotBindPrivileged
 		}
-	default: // owner / admin
-		return nil, ErrCannotBindPrivileged
+	} else {
+		// Brand-new user: a password is always required (they must be able to log in).
+		if prov.PasswordHash == "" {
+			return nil, ErrPasswordRequired
+		}
 	}
 
-	// 4. Insert one binding per pitch, idempotently (composite UNIQUE(user_id,
+	// 4. Ensure the user row: create a fresh staff user, or update the existing
+	//    player/staff. full_name + password_hash are written only when provided
+	//    (NULLIF coalesces empty → keep current). role lands on 'staff' either way.
+	if exists {
+		if _, err := tx.Exec(ctx, `
+			UPDATE users SET
+				role          = 'staff',
+				full_name     = COALESCE(NULLIF($2,''), full_name),
+				password_hash = COALESCE(NULLIF($3,''), password_hash),
+				updated_at    = NOW()
+			WHERE id = $1
+		`, targetID, prov.FullName, prov.PasswordHash); err != nil {
+			return nil, fmt.Errorf("CreateStaffBindings: update user: %w", err)
+		}
+	} else {
+		// Race-safe insert: a concurrent create of the same phone trips users.phone
+		// UNIQUE → the tx fails and rolls back (no orphan), which is fail-closed.
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO users (phone, role, full_name, password_hash, opt_in)
+			VALUES ($1, 'staff', NULLIF($2,''), $3, FALSE)
+			RETURNING id
+		`, phoneE164, prov.FullName, prov.PasswordHash).Scan(&targetID); err != nil {
+			return nil, fmt.Errorf("CreateStaffBindings: create user: %w", err)
+		}
+	}
+
+	// 5. Insert one binding per pitch, idempotently (composite UNIQUE(user_id,
 	//    pitch_id) backs ON CONFLICT DO NOTHING) so re-inviting to add pitches never
 	//    errors on an existing one.
 	for _, pid := range pitchIDs {
@@ -183,11 +255,6 @@ func (r *staffRepo) CreateStaffBindings(ctx context.Context, actor auth.Actor, p
 		); err != nil {
 			return nil, fmt.Errorf("CreateStaffBindings: insert pitch %d: %w", pid, err)
 		}
-	}
-
-	// 5. Promote to staff (idempotent if already staff).
-	if _, err := tx.Exec(ctx, `UPDATE users SET role = 'staff' WHERE id = $1`, targetID); err != nil {
-		return nil, fmt.Errorf("CreateStaffBindings: promote: %w", err)
 	}
 
 	member, err := loadStaffMemberTx(ctx, tx, ownerID, targetID)
