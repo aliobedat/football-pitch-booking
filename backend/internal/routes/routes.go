@@ -63,7 +63,7 @@ func Register(
 	reviewHandler := handlers.NewReviewHandler(repository.NewReviewRepository(db))
 	// Dashboard PR 2 (RBAC): staff provisioning + finance analytics.
 	staffRepo := repository.NewStaffRepository(db)
-	staffHandler := handlers.NewStaffHandler(staffRepo)
+	staffHandler := handlers.NewStaffHandler(staffRepo, cfg.BcryptCost)
 	analyticsHandler := handlers.NewAnalyticsHandler(repository.NewAnalyticsRepository(db))
 	// Dashboard PR 4: staff daily schedule + attendance.
 	scheduleHandler := handlers.NewScheduleHandler(repository.NewScheduleRepository(db))

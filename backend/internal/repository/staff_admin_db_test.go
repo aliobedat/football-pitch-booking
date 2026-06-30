@@ -58,6 +58,11 @@ func ownerActorOf(id int64) auth.Actor {
 	return auth.Actor{UserID: int(id), Role: auth.RoleOwner}
 }
 
+// staffTestHash is a placeholder password_hash for binding/scoping tests that do
+// NOT exercise login. The column is TEXT (no format check); a non-empty value is
+// all the onboarding flow needs to satisfy "password provided".
+const staffTestHash = "$2a$10$placeholderhashvaluefortestsonlyxxxxxxxxxxxxxxxxxxxx"
+
 // TestStaffAdmin_BindForeignPitch: an admin (who owns nothing) can bind staff to a
 // pitch owned by someone else; the binding carries the PITCH's real owner_id (not
 // the admin's), and the target is promoted to staff.
@@ -69,7 +74,7 @@ func TestStaffAdmin_BindForeignPitch(t *testing.T) {
 	ctx := context.Background()
 
 	member, err := repo.CreateStaffBindings(ctx, adminActor(admin),
-		[]int{int(e.pitchID)}, e.userPhone(t, e.playerID))
+		[]int{int(e.pitchID)}, e.userPhone(t, e.playerID), StaffProvision{PasswordHash: staffTestHash})
 	if err != nil {
 		t.Fatalf("admin bind to foreign pitch: %v", err)
 	}
@@ -99,10 +104,10 @@ func TestStaffAdmin_ListSeesAllOwners(t *testing.T) {
 	ctx := context.Background()
 
 	// One staff under ownerA (own pitch), one under ownerB (own pitch).
-	if _, err := repo.CreateStaffBindings(ctx, ownerActorOf(e.ownerID), []int{int(e.pitchID)}, e.userPhone(t, e.playerID)); err != nil {
+	if _, err := repo.CreateStaffBindings(ctx, ownerActorOf(e.ownerID), []int{int(e.pitchID)}, e.userPhone(t, e.playerID), StaffProvision{PasswordHash: staffTestHash}); err != nil {
 		t.Fatalf("bind under ownerA: %v", err)
 	}
-	if _, err := repo.CreateStaffBindings(ctx, ownerActorOf(e.otherID), []int{int(pitchB)}, e.userPhone(t, player2)); err != nil {
+	if _, err := repo.CreateStaffBindings(ctx, ownerActorOf(e.otherID), []int{int(pitchB)}, e.userPhone(t, player2), StaffProvision{PasswordHash: staffTestHash}); err != nil {
 		t.Fatalf("bind under ownerB: %v", err)
 	}
 
@@ -132,7 +137,7 @@ func TestStaffAdmin_RevokeForeignBinding(t *testing.T) {
 	e.cleanupStaffOn(t, e.pitchID)
 	ctx := context.Background()
 
-	if _, err := repo.CreateStaffBindings(ctx, ownerActorOf(e.ownerID), []int{int(e.pitchID)}, e.userPhone(t, e.playerID)); err != nil {
+	if _, err := repo.CreateStaffBindings(ctx, ownerActorOf(e.ownerID), []int{int(e.pitchID)}, e.userPhone(t, e.playerID), StaffProvision{PasswordHash: staffTestHash}); err != nil {
 		t.Fatalf("seed binding under ownerA: %v", err)
 	}
 	if err := repo.RevokeStaff(ctx, adminActor(admin), int(e.playerID)); err != nil {
@@ -155,12 +160,12 @@ func TestStaffAdmin_OwnerCrossTenantIsolation(t *testing.T) {
 	ctx := context.Background()
 
 	// Owner B tries to bind to owner A's pitch → ErrPitchNotOwned.
-	if _, err := repo.CreateStaffBindings(ctx, ownerActorOf(e.otherID), []int{int(e.pitchID)}, e.userPhone(t, e.playerID)); !errors.Is(err, ErrPitchNotOwned) {
+	if _, err := repo.CreateStaffBindings(ctx, ownerActorOf(e.otherID), []int{int(e.pitchID)}, e.userPhone(t, e.playerID), StaffProvision{PasswordHash: staffTestHash}); !errors.Is(err, ErrPitchNotOwned) {
 		t.Fatalf("ownerB bind to ownerA pitch err = %v, want ErrPitchNotOwned", err)
 	}
 
 	// Seed a real binding under owner A, then owner B tries to revoke it → not found.
-	if _, err := repo.CreateStaffBindings(ctx, ownerActorOf(e.ownerID), []int{int(e.pitchID)}, e.userPhone(t, e.playerID)); err != nil {
+	if _, err := repo.CreateStaffBindings(ctx, ownerActorOf(e.ownerID), []int{int(e.pitchID)}, e.userPhone(t, e.playerID), StaffProvision{PasswordHash: staffTestHash}); err != nil {
 		t.Fatalf("seed binding under ownerA: %v", err)
 	}
 	if err := repo.RevokeStaff(ctx, ownerActorOf(e.otherID), int(e.playerID)); !errors.Is(err, ErrStaffBindingNotFound) {
