@@ -159,7 +159,18 @@ export default function BlocksModal({
     setLoading(true);
     setLoadError(null);
     try {
-      const res = await api.get('/admin/bookings');
+      // Server-side date scoping: fetch only the viewed Amman day (plus the prior
+      // day, so a cross-midnight booking that overlaps this day's early hours is
+      // still returned — the server filters on booking START, lower(booking_range)).
+      // pitch_id is NOT a supported server filter, so pitch scoping stays client-side.
+      const from = addDays(viewDate, -1);
+      const to   = viewDate;
+      const res = await api.get('/admin/bookings', {
+        params: {
+          from: `${from.y}-${pad(from.m)}-${pad(from.d)}`,
+          to:   `${to.y}-${pad(to.m)}-${pad(to.d)}`,
+        },
+      });
       const all = (res.data.data ?? []) as DayBooking[];
       setRows(all.filter(b => b.pitch_id === pitchId && b.status !== 'cancelled'));
     } catch {
@@ -167,7 +178,7 @@ export default function BlocksModal({
     } finally {
       setLoading(false);
     }
-  }, [pitchId]);
+  }, [pitchId, viewDate]);
 
   useEffect(() => { reload(); }, [reload]);
 
