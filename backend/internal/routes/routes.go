@@ -44,6 +44,8 @@ func Register(
 	customerHandler := handlers.NewCustomerHandler(customerRepo)
 	// Cockpit WO2: Visual Calendar Command Center (read).
 	calendarHandler := handlers.NewCalendarHandler(repository.NewCalendarRepository(db))
+	// Day View (PR-1): single-pitch, single-day 30-minute occupancy timeline.
+	dayViewHandler := handlers.NewDayViewHandler(repository.NewDayViewRepository(db))
 	// Phase 2 / WO-F2: Expense Ledger + Net Profit (reuses the analytics collected leg).
 	analyticsRepo := repository.NewAnalyticsRepository(db)
 	expenseRepo := repository.NewExpenseRepository(db)
@@ -256,6 +258,13 @@ func Register(
 		protected.GET("/owner/calendar",
 			middleware.RequireRole("owner", "admin"),
 			calendarHandler.GetDayCalendar,
+		)
+
+		// ── Day View (owner/admin ONLY) — single pitch, single day, 30-min grid ─
+		// Staff are excluded from PR-1 (see docs/followups/staff-day-view.md).
+		protected.GET("/owner/day-view",
+			middleware.RequireRole("owner", "admin"),
+			dayViewHandler.GetDayView,
 		)
 
 		// ── Financials / Expense Ledger (owner/admin ONLY) ─────────────────────
