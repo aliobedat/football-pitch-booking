@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import api from '@/lib/api';
 import { formatCurrency, formatDate, formatTime } from '@/lib/format';
+import { PAYMENT_PILL_BASE, paymentPillColor, paymentPillLabel } from '@/components/PaymentStatusPill';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -175,20 +176,22 @@ function BookingRow({
         ) : (() => {
           const paid = booking.payment_status === 'paid_cash';
           const busy = payingId === booking.id;
+          // Same pill colours + words as the read-only Day View pill (shared source),
+          // wrapped here in a button that adds gap/hover/disabled for interaction.
           return (
             <button
               type="button"
               onClick={() => onTogglePay(booking)}
               disabled={busy}
               className={[
-                'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[10px] font-bold border transition-all disabled:opacity-50',
-                paid
-                  ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20'
-                  : 'bg-amber-500/[0.08] border-amber-500/25 text-amber-300/80 hover:bg-amber-500/15',
+                PAYMENT_PILL_BASE,
+                paymentPillColor(booking.payment_status),
+                'gap-1.5 transition-all disabled:opacity-50',
+                paid ? 'hover:bg-emerald-500/20' : 'hover:bg-amber-500/15',
               ].join(' ')}
               aria-label={paid ? 'إلغاء التحصيل النقدي' : 'تحصيل نقدي'}
             >
-              {busy ? '…' : paid ? 'مدفوع نقداً' : 'غير مدفوع'}
+              {busy ? '…' : paymentPillLabel(booking.payment_status)}
             </button>
           );
         })()}

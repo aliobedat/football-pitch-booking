@@ -4,6 +4,9 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Ban, ChevronRight, ChevronLeft, X, AlertTriangle, Info, CalendarDays, Loader2, Sparkles, UserPlus, Clock, Repeat, Trash2 } from 'lucide-react';
 import api from '@/lib/api';
 import { formatDate, formatTime } from '@/lib/format';
+import {
+  type CivilDate, pad, ammanCivilDate, ammanHour, ammanInstant, sameCivilDate, addDays,
+} from '@/lib/amman';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Blocks tool — owner/admin "held time" (صيانة/مغلق) manager, one pitch, one day.
@@ -25,7 +28,6 @@ import { formatDate, formatTime } from '@/lib/format';
 // the Amman civil day against, with no offset drift.
 // ─────────────────────────────────────────────────────────────────────────────
 
-const AMMAN_OFFSET = '+03:00';
 const HOURS = Array.from({ length: 24 }, (_, h) => h); // 00:00 … 23:00
 
 type BookingSource = 'player' | 'academy' | 'block' | 'manual';
@@ -51,46 +53,6 @@ interface BlockConflict {
   start:       string;
   end:         string;
   player_name: string | null;
-}
-
-// ── Amman civil-date helpers (Latin-digit, fixed +03:00) ─────────────────────
-
-interface CivilDate { y: number; m: number; d: number } // m: 1-12
-
-// The Amman civil Y/M/D of an absolute instant.
-function ammanCivilDate(at: Date): CivilDate {
-  // en-CA → "YYYY-MM-DD"; pinned to Amman so the day boundary is civil, not UTC.
-  const s = new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Amman', year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(at);
-  const [y, m, d] = s.split('-').map(Number);
-  return { y, m, d };
-}
-
-// The Amman civil hour (0-23) of an absolute instant.
-function ammanHour(at: Date): number {
-  return Number(new Intl.DateTimeFormat('en-GB', {
-    timeZone: 'Asia/Amman', hour: '2-digit', hour12: false,
-  }).format(at)) % 24;
-}
-
-const pad = (n: number) => String(n).padStart(2, '0');
-
-// Build the absolute instant for an Amman wall-clock hour on a civil date.
-// hour may be 24 → midnight starting the next day (the day's exclusive end).
-function ammanInstant(date: CivilDate, hour: number): Date {
-  return new Date(`${date.y}-${pad(date.m)}-${pad(date.d)}T${pad(hour)}:00:00${AMMAN_OFFSET}`);
-}
-
-function sameCivilDate(a: CivilDate, b: CivilDate): boolean {
-  return a.y === b.y && a.m === b.m && a.d === b.d;
-}
-
-function addDays(date: CivilDate, delta: number): CivilDate {
-  // Anchor at Amman noon to stay clear of any boundary, then re-read the civil date.
-  const at = new Date(`${date.y}-${pad(date.m)}-${pad(date.d)}T12:00:00${AMMAN_OFFSET}`);
-  at.setUTCDate(at.getUTCDate() + delta);
-  return ammanCivilDate(at);
 }
 
 // Per-hour occupancy cell for the grid.
