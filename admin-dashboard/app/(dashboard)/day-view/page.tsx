@@ -9,10 +9,10 @@
 // library, no new Date() local-tz math. Selection (?pitch=&date=) lives in the URL
 // so the view is shareable and refresh-proof — no localStorage.
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
-  CalendarClock, ChevronRight, ChevronLeft, Loader2, AlertTriangle, RotateCcw, Ban,
+  CalendarClock, ChevronRight, ChevronLeft, RotateCcw, Ban, Plus,
 } from 'lucide-react';
 import api from '@/lib/api';
 import { formatDate, formatTime, formatNumber, formatCurrency } from '@/lib/format';
@@ -20,6 +20,8 @@ import {
   type CivilDate, ammanCivilDate, ammanInstant, sameCivilDate, addDays, ymd, parseYmd,
 } from '@/lib/amman';
 import PaymentStatusPill from '@/components/PaymentStatusPill';
+import DayViewDatePicker from '@/components/DayViewDatePicker';
+import DayViewManualSheet from '@/components/DayViewManualSheet';
 
 // ── Payload types (mirror the PR-1 DayView JSON) ─────────────────────────────
 type SlotStatus = 'available' | 'booked' | 'blocked' | 'closed';
@@ -101,6 +103,12 @@ function DayViewInner() {
 
   const [filter, setFilter] = useState<Filter>('all');
 
+  // Date picker + manual booking sheet.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const dateBtnRef = useRef<HTMLButtonElement>(null);
+  const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
+  const [manual, setManual] = useState<{ prefill: string | null } | null>(null);
+
   const dateStr = useMemo(() => ymd(date), [date]);
   const isToday = sameCivilDate(date, today);
 
@@ -174,12 +182,18 @@ function DayViewInner() {
     return out;
   }, [data, filter]);
 
+  // Ordered available cells of the loaded day — the manual sheet's start-time set.
+  const availableSlots = useMemo(
+    () => (data?.slots ?? []).filter(s => s.status === 'available').map(s => ({ start: s.start, end: s.end })),
+    [data],
+  );
+
   const dateLabel = (isToday ? 'اليوم، ' : '')
     + formatDate(ammanInstant(date, 12).toISOString(), { weekday: 'long', day: 'numeric', month: 'long' });
 
-  const onPickDate = (v: string) => {
-    const cd = parseYmd(v);
-    if (cd) setDate(cd);
+  const openPicker = () => {
+    setAnchorRect(dateBtnRef.current?.getBoundingClientRect() ?? null);
+    setPickerOpen(true);
   };
 
   return (
@@ -239,19 +253,18 @@ function DayViewInner() {
           </button>
 
           <div className="flex items-center gap-2 flex-1 justify-center">
-            {/* The label is a native date input overlaid transparently, so a tap opens
-                the OS date picker while the Arabic label shows above it. */}
-            <label className="relative inline-flex items-center justify-center px-3 h-11 rounded-xl border border-white/[0.08] bg-white/[0.03] cursor-pointer hover:border-white/[0.16] transition-all">
+            {/* Tapping the label opens the hand-rolled RTL month grid (no native
+                date input — its LTR chrome fights the Arabic page). */}
+            <button
+              ref={dateBtnRef}
+              type="button"
+              onClick={openPicker}
+              className="inline-flex items-center justify-center px-3 h-11 rounded-xl border border-white/[0.08] bg-white/[0.03] hover:border-white/[0.16] transition-all"
+              aria-haspopup="dialog"
+              aria-expanded={pickerOpen}
+            >
               <span className="text-[13px] font-bold text-[#f0efe8]">{dateLabel}</span>
-              <input
-                type="date"
-                value={dateStr}
-                onChange={e => onPickDate(e.target.value)}
-                className="absolute inset-0 opacity-0 cursor-pointer"
-                dir="ltr"
-                aria-label="اختر التاريخ"
-              />
-            </label>
+            </button>
             {!isToday && (
               <button
                 type="button"
@@ -337,11 +350,46 @@ function DayViewInner() {
             <div className="flex flex-col gap-1.5">
               {rows.map((row, i) => row.kind === 'closed'
                 ? <ClosedRow key={`c-${i}`} start={row.start} end={row.end} />
-                : <SlotRow key={row.slot.start} slot={row.slot} />)}
+                : <SlotRow key={row.slot.start} slot={row.slot} onPick={iso => setManual({ prefill: iso })} />)}
             </div>
           )}
         </>
       ) : null}
+
+      {/* FAB — add a manual booking. Bottom-left (RTL), above the thumb zone,
+          hidden while any sheet is open. */}
+      {data && pitchId != null && !manual && !pickerOpen && (
+        <button
+          type="button"
+          onClick={() => setManual({ prefill: null })}
+          className="fixed bottom-6 left-4 z-40 inline-flex items-center gap-2 h-12 px-4 rounded-2xl bg-emerald-500 text-[#08130d] font-bold text-[13px] shadow-lg shadow-emerald-500/25 hover:bg-emerald-400 active:scale-[0.97] transition-all"
+          aria-label="إضافة حجز يدوي"
+        >
+          <Plus size={18} aria-hidden />
+          إضافة حجز
+        </button>
+      )}
+
+      {pickerOpen && (
+        <DayViewDatePicker
+          value={date}
+          anchorRect={anchorRect}
+          onSelect={setDate}
+          onClose={() => setPickerOpen(false)}
+        />
+      )}
+
+      {manual && data && pitchId != null && (
+        <DayViewManualSheet
+          pitchId={pitchId}
+          pitchName={data.pitch_name}
+          availableSlots={availableSlots}
+          prefillStart={manual.prefill}
+          onClose={() => setManual(null)}
+          onBooked={() => { setManual(null); fetchDay(); }}
+          onRefetch={fetchDay}
+        />
+      )}
 
       <style jsx>{`
         .chip-scroll { scrollbar-width: none; }
@@ -353,7 +401,7 @@ function DayViewInner() {
 
 // ── Row renderers ────────────────────────────────────────────────────────────
 
-function SlotRow({ slot }: { slot: DVSlot }) {
+function SlotRow({ slot, onPick }: { slot: DVSlot; onPick?: (startIso: string) => void }) {
   const range = (
     <span className="font-mono text-[11px] tabular-nums text-white/45 shrink-0" dir="ltr">
       {hm(slot.start)}<span className="mx-1 text-white/20">–</span>{hm(slot.end)}
@@ -363,11 +411,20 @@ function SlotRow({ slot }: { slot: DVSlot }) {
   const partialEdge = slot.partial ? 'relative before:absolute before:inset-y-0 before:start-0 before:w-[3px] before:rounded-s-xl before:bg-white/40' : '';
 
   if (slot.status === 'available') {
+    // Tap an available cell → open the manual sheet pre-filled to this start.
     return (
-      <div className={`flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-emerald-500/15 bg-emerald-500/[0.04] ${partialEdge}`}>
+      <button
+        type="button"
+        onClick={() => onPick?.(slot.start)}
+        className={`w-full min-h-[44px] flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-emerald-500/15 bg-emerald-500/[0.04] hover:bg-emerald-500/[0.09] hover:border-emerald-500/30 transition-all active:scale-[0.99] text-start ${partialEdge}`}
+        aria-label={`متاح ${hm(slot.start)} — اضغط لإضافة حجز`}
+      >
         {range}
-        <span className="text-[12px] font-semibold text-emerald-300/70">متاح</span>
-      </div>
+        <span className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-emerald-300/70">
+          <Plus size={12} aria-hidden />
+          متاح
+        </span>
+      </button>
     );
   }
 

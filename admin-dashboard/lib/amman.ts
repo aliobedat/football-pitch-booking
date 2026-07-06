@@ -65,3 +65,17 @@ export function parseYmd(s: string): CivilDate | null {
   if (!m) return null;
   return { y: Number(m[1]), m: Number(m[2]), d: Number(m[3]) };
 }
+
+// Number of days in a civil month (m: 1-12). Day 0 of the next month = last day of m.
+export function daysInMonth(y: number, m: number): number {
+  return new Date(Date.UTC(y, m, 0)).getUTCDate();
+}
+
+// Amman civil weekday of a date: 0 = Sunday … 6 = Saturday (matches the backend's
+// PG DOW). Anchored at Amman noon and read back in Amman, so it never drifts.
+export function ammanWeekday(date: CivilDate): number {
+  const wd = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Amman', weekday: 'short',
+  }).format(ammanInstant(date, 12));
+  return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].indexOf(wd);
+}
