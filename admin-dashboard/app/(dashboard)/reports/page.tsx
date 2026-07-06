@@ -1,9 +1,13 @@
 'use client';
 
-// التقارير — Financial report (WO-REPORTS-R2). Aggregates only: summary cards,
-// daily breakdown chart, per-pitch table, and a month-over-month comparison
-// strip. NO line items, NO transactions table (R1's bookings statement gets its
-// own tab later; printing is R4).
+// التقارير — two tabs (WO-REPORTS-R3): المالي (default — the R2 financial
+// report: summary cards, daily breakdown chart, per-pitch table, MoM strip) and
+// الحجوزات (the R1 bookings statement, components/BookingsReportTab.tsx). Tab
+// state lives in ?tab= (day-view's URL pattern); the period selector + pitch
+// filter sit ABOVE the tabs — one shared selection drives both, so switching
+// tabs never resets it. ComparisonStrip is financial-only: it lives inside the
+// financial conditional, structurally absent on the bookings tab in every mode.
+// Printing is R4.
 //
 // Period selector: month mode (default — always a full calendar month, enables
 // the comparison via a SECOND parallel fetch of the immediately preceding
@@ -14,7 +18,8 @@
 // here, never swallowed. Date math via lib/amman; rendering via lib/format
 // (Arabic words, Latin digits); money strict 3-dp JOD (amendment C1).
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
 } from 'recharts';
@@ -27,6 +32,8 @@ import {
 import DayViewDatePicker from '@/components/DayViewDatePicker';
 import MonthPicker, { type CivilMonth } from '@/components/MonthPicker';
 import ComparisonStrip, { type ReportSummary } from '@/components/ComparisonStrip';
+import ReportSummaryCard from '@/components/ReportSummaryCard';
+import BookingsReportTab from '@/components/BookingsReportTab';
 
 // ── Payload types (mirror the ratified R1 financial contract) ────────────────
 interface ReportDay {
@@ -54,6 +61,7 @@ interface FinancialReport {
 interface OwnerPitch { id: number; name: string }
 
 type Mode = 'month' | 'range';
+type Tab = 'financial' | 'bookings';
 
 // Local strict-3dp JOD wrapper (amendment C1) — lib/format untouched.
 const jod3 = (v: number) => formatCurrency(v, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -109,26 +117,18 @@ function ChartCard({
   );
 }
 
-function SummaryCard({ label, value, unit, tone }: {
-  label: string; value: string; unit?: string; tone?: 'green' | 'amber' | 'red';
-}) {
-  const valueColor =
-    tone === 'green' ? 'text-emerald-300' :
-    tone === 'amber' ? 'text-amber-300' :
-    tone === 'red'   ? 'text-red-300'   : 'text-[#f0efe8]';
-  return (
-    <div className="rounded-2xl bg-[#141715] border border-white/[0.08] p-4">
-      <p className="text-[11px] font-semibold text-white/40">{label}</p>
-      <p className={`mt-1.5 text-[18px] font-bold tabular-nums ${valueColor}`}>
-        {value}
-        {unit && <span className="text-[10.5px] text-emerald-500/70 ms-1 font-semibold">{unit}</span>}
-      </p>
-    </div>
-  );
-}
-
-export default function ReportsPage() {
+function ReportsInner() {
   const todayAmman = useMemo(() => ammanCivilDate(new Date()), []);
+
+  // ── Tab state — initialised from ?tab= (deep-link) and mirrored back to the
+  //    URL (day-view's pattern). Period/pitch state below is tab-independent.
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const [tab, setTab] = useState<Tab>(() => (searchParams.get('tab') === 'bookings' ? 'bookings' : 'financial'));
+
+  useEffect(() => {
+    router.replace(tab === 'bookings' ? '/reports?tab=bookings' : '/reports', { scroll: false });
+  }, [tab, router]);
 
   const [mode, setMode] = useState<Mode>('month');
   const [month, setMonth] = useState<CivilMonth>({ y: todayAmman.y, m: todayAmman.m });
@@ -233,7 +233,7 @@ export default function ReportsPage() {
         </div>
         <div>
           <h1 className="text-[20px] font-bold tracking-tight">التقارير</h1>
-          <p className="text-[12px] text-white/35">الملخّص المالي — {periodLabel}</p>
+          <p className="text-[12px] text-white/35">{tab === 'bookings' ? 'سجل الحجوزات' : 'الملخّص المالي'} — {periodLabel}</p>
         </div>
       </div>
 
@@ -304,20 +304,53 @@ export default function ReportsPage() {
         </select>
       </div>
 
-      {(rangeIssue || error) && (
+      {/* ── Tabs — sit BELOW the shared selector, so switching never resets it ── */}
+      <div className="flex items-center gap-1 border-b border-white/[0.07]" role="tablist">
+        {([['financial', 'المالي'], ['bookings', 'الحجوزات']] as [Tab, string][]).map(([t, label]) => (
+          <button
+            key={t}
+            type="button"
+            role="tab"
+            aria-selected={tab === t}
+            onClick={() => setTab(t)}
+            className={[
+              'px-4 py-2.5 -mb-px text-[13px] font-semibold border-b-2 transition-all',
+              tab === t
+                ? 'text-emerald-400 border-emerald-500'
+                : 'text-white/45 border-transparent hover:text-white/70',
+            ].join(' ')}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* rangeIssue is shared pre-validation; `error` belongs to the financial
+          fetch, so it only shows on that tab (the bookings tab owns its own). */}
+      {(rangeIssue || (tab === 'financial' && error)) && (
         <div className="rounded-xl border border-red-500/15 bg-red-500/[0.06] px-4 py-3 text-[12.5px] text-red-400">
           {rangeIssue ?? error}
         </div>
       )}
 
+      {tab === 'bookings' && (
+        <BookingsReportTab
+          from={window_.from}
+          to={window_.to}
+          pitchId={pitchId}
+          rangeIssue={rangeIssue}
+        />
+      )}
+
+      {tab === 'financial' && (<>
       {/* ── Summary cards ── */}
       {data && !rangeIssue && (
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-          <SummaryCard label="إجمالي الإيرادات" value={jod3(data.summary.gross_revenue)} unit="د.أ" />
-          <SummaryCard label="المحصّل" value={jod3(data.summary.collected)} unit="د.أ" tone="green" />
-          <SummaryCard label="غير المحصّل" value={jod3(data.summary.outstanding)} unit="د.أ" tone="amber" />
-          <SummaryCard label="الحجوزات" value={formatNumber(data.summary.booking_count)} />
-          <SummaryCard label="الملغاة" value={formatNumber(data.summary.cancelled_count)} tone={data.summary.cancelled_count > 0 ? 'red' : undefined} />
+          <ReportSummaryCard label="إجمالي الإيرادات" value={jod3(data.summary.gross_revenue)} unit="د.أ" />
+          <ReportSummaryCard label="المحصّل" value={jod3(data.summary.collected)} unit="د.أ" tone="green" />
+          <ReportSummaryCard label="غير المحصّل" value={jod3(data.summary.outstanding)} unit="د.أ" tone="amber" />
+          <ReportSummaryCard label="الحجوزات" value={formatNumber(data.summary.booking_count)} />
+          <ReportSummaryCard label="الملغاة" value={formatNumber(data.summary.cancelled_count)} tone={data.summary.cancelled_count > 0 ? 'red' : undefined} />
         </div>
       )}
 
@@ -388,6 +421,7 @@ export default function ReportsPage() {
       <p className="text-[13px] text-white/35">
         أرقام مباشرة ضمن نطاق ملاعبك فقط، بتوقيت عمّان. الإيراد يشمل الحجوزات المؤكدة، وتُستثنى أوقات الصيانة من العدد.
       </p>
+      </>)}
 
       {/* ── Pickers ── */}
       {openPicker === 'month' && (
@@ -415,5 +449,20 @@ export default function ReportsPage() {
         />
       )}
     </div>
+  );
+}
+
+// useSearchParams requires a Suspense boundary at build (day-view precedent).
+export default function ReportsPage() {
+  return (
+    <Suspense
+      fallback={
+        <div className="flex items-center justify-center py-24">
+          <Loader2 size={24} className="text-emerald-500 animate-spin" aria-hidden />
+        </div>
+      }
+    >
+      <ReportsInner />
+    </Suspense>
   );
 }
