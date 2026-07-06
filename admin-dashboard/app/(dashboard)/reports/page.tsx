@@ -165,9 +165,13 @@ function ReportsInner() {
 
   // ── Pitch list (once) — the optional filter's options. ────────────────────
   useEffect(() => {
+    // Stale-response guard (the BookingsReportTab pattern): don't write state
+    // after unmount.
+    let stale = false;
     api.get('/owner/pitches')
-      .then(res => setPitches((res.data.data ?? []) as OwnerPitch[]))
+      .then(res => { if (!stale) setPitches((res.data.data ?? []) as OwnerPitch[]); })
       .catch(() => { /* filter stays "all pitches"; the report itself still loads */ });
+    return () => { stale = true; };
   }, []);
 
   // ── Report fetch: one request for the period; a SECOND PARALLEL request for
@@ -175,6 +179,10 @@ function ReportsInner() {
   //    "no comparison" — never blocks the report. ─────────────────────────────
   useEffect(() => {
     if (rangeIssue) return;
+    // Stale-response guard (the BookingsReportTab pattern): a slow response for
+    // a superseded selection must not overwrite the current one — covers both
+    // the period fetch and the parallel prior-month fetch below.
+    let stale = false;
     setLoading(true);
     setError(null);
     setPrior(null);
@@ -183,8 +191,9 @@ function ReportsInner() {
     if (pitchId !== '') params.pitch_id = pitchId;
 
     api.get('/owner/reports/financial', { params })
-      .then(res => setData(res.data.data as FinancialReport))
+      .then(res => { if (!stale) setData(res.data.data as FinancialReport); })
       .catch(err => {
+        if (stale) return;
         setData(null);
         const status = err?.response?.status;
         const serverMsg = err?.response?.data?.message;
@@ -195,7 +204,7 @@ function ReportsInner() {
             ? (serverMsg ?? 'طلب غير صالح')
             : 'تعذّر تحميل التقرير. تأكد من صلاحيات الحساب.');
       })
-      .finally(() => setLoading(false));
+      .finally(() => { if (!stale) setLoading(false); });
 
     if (window_.fullMonth) {
       const pm = prevMonth(month);
@@ -203,9 +212,11 @@ function ReportsInner() {
       const pParams: Record<string, string | number> = { from: pw.from, to: pw.to };
       if (pitchId !== '') pParams.pitch_id = pitchId;
       api.get('/owner/reports/financial', { params: pParams })
-        .then(res => setPrior(res.data.data as FinancialReport))
-        .catch(() => setPrior(null)); // comparison silently absent; report unaffected
+        .then(res => { if (!stale) setPrior(res.data.data as FinancialReport); })
+        .catch(() => { if (!stale) setPrior(null); }); // comparison silently absent; report unaffected
     }
+
+    return () => { stale = true; };
     // month is only read when fullMonth (derived from it) — safe.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [window_.from, window_.to, window_.fullMonth, pitchId, rangeIssue]);
