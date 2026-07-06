@@ -1,6 +1,6 @@
 import type { Role } from '@malaab/shared/auth';
 import { canViewFinance } from '@malaab/shared/auth';
-import { LayoutDashboard, CalendarCheck, CalendarRange, CalendarClock, MapPin, BarChart3, ClipboardList, Users, UserCog, type LucideIcon } from 'lucide-react';
+import { LayoutDashboard, CalendarCheck, CalendarRange, CalendarClock, MapPin, BarChart3, ClipboardList, Users, UserCog, FileText, type LucideIcon } from 'lucide-react';
 
 export interface NavItem {
   href: string;
@@ -38,6 +38,15 @@ export const NAV_ITEMS: NavItem[] = [
     icon: BarChart3,
     visible: (role) => canViewFinance(role),
   },
+  // التقارير — read-only financial statements over an explicit Amman window
+  // (WO-REPORTS-R2). Sibling of التحليلات والمالية, never an edit to it; backed
+  // by /owner/reports/* which excludes staff (RequireRole owner/admin).
+  {
+    href: '/reports',
+    label: 'التقارير',
+    icon: FileText,
+    visible: (role) => canViewFinance(role),
+  },
   {
     href: '/staff',
     label: 'الموظفون',
@@ -50,7 +59,7 @@ export const NAV_ITEMS: NavItem[] = [
 // guard so a staff user deep-linking here is redirected cleanly instead of
 // rendered into a page the backend will 403. The CRM (/customers) is owner-only,
 // the same boundary the backend enforces with RequireRole("owner","admin").
-export const FINANCE_ROUTES = ['/analytics', '/customers', '/calendar', '/day-view', '/staff'];
+export const FINANCE_ROUTES = ['/analytics', '/customers', '/calendar', '/day-view', '/reports', '/staff'];
 
 export function isFinanceRoute(pathname: string): boolean {
   return FINANCE_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`));
