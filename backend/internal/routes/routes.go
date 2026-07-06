@@ -46,6 +46,8 @@ func Register(
 	calendarHandler := handlers.NewCalendarHandler(repository.NewCalendarRepository(db))
 	// Day View (PR-1): single-pitch, single-day 30-minute occupancy timeline.
 	dayViewHandler := handlers.NewDayViewHandler(repository.NewDayViewRepository(db))
+	// Reports (R1): read-only financial + bookings statements over an Amman window.
+	reportsHandler := handlers.NewReportsHandler(repository.NewReportsRepository(db))
 	// Phase 2 / WO-F2: Expense Ledger + Net Profit (reuses the analytics collected leg).
 	analyticsRepo := repository.NewAnalyticsRepository(db)
 	expenseRepo := repository.NewExpenseRepository(db)
@@ -265,6 +267,18 @@ func Register(
 		protected.GET("/owner/day-view",
 			middleware.RequireRole("owner", "admin"),
 			dayViewHandler.GetDayView,
+		)
+
+		// ── Reports (owner/admin ONLY) — printable statements, read-only ───────
+		// Revenue predicates ratified to equal OwnerTimeSeries (dashboard parity);
+		// explicit from/to required; out-of-scope pitch_id → 404 (day-view shape).
+		protected.GET("/owner/reports/financial",
+			middleware.RequireRole("owner", "admin"),
+			reportsHandler.GetFinancialReport,
+		)
+		protected.GET("/owner/reports/bookings",
+			middleware.RequireRole("owner", "admin"),
+			reportsHandler.GetBookingsReport,
 		)
 
 		// ── Financials / Expense Ledger (owner/admin ONLY) ─────────────────────
