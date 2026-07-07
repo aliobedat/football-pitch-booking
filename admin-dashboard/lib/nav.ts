@@ -19,7 +19,7 @@ export const NAV_ITEMS: NavItem[] = [
   // for them in the sidebar and enforced by the layout confinement guard.
   { href: '/', label: 'نظرة عامة', icon: LayoutDashboard, visible: (role) => role !== 'staff' },
   { href: '/schedule', label: 'جدول اليوم', icon: ClipboardList, visible: () => true },
-  { href: '/bookings', label: 'الحجوزات', icon: CalendarCheck, visible: () => true },
+  { href: '/bookings', label: 'الحجوزات', icon: CalendarCheck, visible: (role) => role === 'staff' },
   { href: '/calendar', label: 'التقويم', icon: CalendarRange, visible: (role) => canViewFinance(role) },
   // الدفتر — single-pitch day-view timeline (owner/admin; backed by /owner/day-view,
   // which excludes staff). Distinct label from جدول اليوم (/schedule) so the two
