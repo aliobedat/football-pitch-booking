@@ -23,7 +23,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
 } from 'recharts';
-import { FileText, CalendarRange, Calendar, BarChart3, Loader2 } from 'lucide-react';
+import { FileText, CalendarRange, Calendar, BarChart3, Loader2, Printer } from 'lucide-react';
 import api from '@/lib/api';
 import { formatCurrency, formatNumber, formatDate } from '@/lib/format';
 import {
@@ -231,6 +231,15 @@ function ReportsInner() {
     setOpenPicker(which);
   };
 
+  // ── طباعة target (WO-REPORTS-R4): the print route matching the ACTIVE tab,
+  //    carrying the live from/to/pitch_id. Opens in a new tab; the print route
+  //    fetches its own data and auto-prints on resolve (ruling A1).
+  const printHref = useMemo(() => {
+    const q = new URLSearchParams({ from: window_.from, to: window_.to });
+    if (pitchId !== '') q.set('pitch_id', String(pitchId));
+    return `/reports/print/${tab === 'bookings' ? 'bookings' : 'financial'}?${q.toString()}`;
+  }, [window_.from, window_.to, pitchId, tab]);
+
   const periodLabel = mode === 'month'
     ? monthYearLabel(month)
     : `${formatDate(ammanInstant(rangeFrom, 12).toISOString(), { day: 'numeric', month: 'short' })} – ${formatDate(ammanInstant(rangeTo, 12).toISOString(), { day: 'numeric', month: 'short', year: 'numeric' })}`;
@@ -313,6 +322,27 @@ function ReportsInner() {
           <option value="">كل الملاعب</option>
           {pitches.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
         </select>
+
+        {/* طباعة — present on both tabs; disabled while the selection is invalid. */}
+        {rangeIssue ? (
+          <span
+            aria-disabled="true"
+            className="ms-auto inline-flex items-center gap-2 min-h-[44px] px-4 rounded-xl border border-white/[0.06] bg-[#141715] text-[12.5px] font-semibold text-white/25 cursor-not-allowed select-none"
+          >
+            <Printer size={14} aria-hidden />
+            طباعة
+          </span>
+        ) : (
+          <a
+            href={printHref}
+            target="_blank"
+            rel="noopener"
+            className="ms-auto inline-flex items-center gap-2 min-h-[44px] px-4 rounded-xl border border-white/[0.09] bg-[#141715] text-[12.5px] font-semibold text-[#f0efe8] hover:border-emerald-500/40 transition-all"
+          >
+            <Printer size={14} className="text-emerald-400" aria-hidden />
+            طباعة
+          </a>
+        )}
       </div>
 
       {/* ── Tabs — sit BELOW the shared selector, so switching never resets it ── */}
