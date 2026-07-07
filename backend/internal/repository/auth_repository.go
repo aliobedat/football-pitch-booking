@@ -18,6 +18,17 @@ import (
 	"github.com/ali/football-pitch-api/internal/models"
 )
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Sentinel errors
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ErrPrivilegedPhoneBookingRefused is returned by EnsureBookingUser when the
+// phone already belongs to a non-player account (owner/admin/staff or any
+// unknown role). The unauthenticated no-OTP booking path must NEVER yield a
+// privileged session, so it fails closed here and mutates nothing. The handler
+// maps this to a neutral 403 that does not confirm the phone's privilege.
+var ErrPrivilegedPhoneBookingRefused = errors.New("auth: booking session refused for this phone")
+
 // AuthRepository persists phone-first identities, their OTP opt-in consent, and
 // the refresh tokens issued once a phone is verified.
 type AuthRepository interface {
@@ -56,11 +67,14 @@ type AuthRepository interface {
 	// Called after a successful OTP verification.
 	EnsureVerifiedUser(ctx context.Context, phone string) (*models.User, error)
 
-	// EnsureBookingUser returns the user for phone, creating one if absent, for the
-	// NO-OTP booking flow (BOOKING_OTP_REQUIRED=false). It MUST NOT verify the
+	// EnsureBookingUser returns the PLAYER user for phone, creating one if absent,
+	// for the NO-OTP booking flow (BOOKING_OTP_REQUIRED=false). It fails closed: a
+	// phone already held by a non-player (owner/admin/staff/unknown) is refused with
+	// ErrPrivilegedPhoneBookingRefused and nothing is mutated — an unauthenticated
+	// path must never yield or inherit a privileged role. It MUST NOT verify the
 	// phone — phone_verified stays at its existing value (false for a new row),
 	// since no code was checked. fullName is captured JIT only when the user has no
-	// name yet (an existing verified user's name is never overwritten).
+	// name yet (an existing name is never overwritten).
 	EnsureBookingUser(ctx context.Context, phone, fullName string) (*models.User, error)
 
 	// FindByID loads a user by primary key, surfacing nullable phone-first
@@ -205,26 +219,78 @@ func (r *authRepo) EnsureVerifiedUser(ctx context.Context, phone string) (*model
 }
 
 // EnsureBookingUser upserts the phone's user row for the NO-OTP booking flow and
-// returns it. Unlike EnsureVerifiedUser it NEVER sets phone_verified — no code was
-// checked, so a new row keeps the column default (false) and an existing row keeps
-// whatever it had (a returning OTP-verified user is not downgraded). full_name is
-// captured JIT only when currently empty, so an existing name is never overwritten.
+// returns it — but ONLY ever as a player. This endpoint is unauthenticated and
+// phone-only, so it must never let a privileged account inherit its role into a
+// booking session (WO-ENSUREBOOKINGUSER). It fails closed, mirroring the
+// CreateStaffBindings pattern: lock the row FOR UPDATE, read the existing role,
+// and refuse anything that is not a brand-new phone or an existing player.
+//
+// Allowlist: a missing row (new phone) or an existing role = 'player' → proceed
+// and return the player identity. An existing role in {owner, admin, staff} or
+// any unknown value → ErrPrivilegedPhoneBookingRefused, mutating NOTHING (the
+// read-only tx is rolled back, so updated_at is never bumped on refusal).
+//
+// Like EnsureVerifiedUser it NEVER sets phone_verified — no code was checked.
+// full_name is captured JIT only when currently empty, so an existing name is
+// never overwritten. The 'player' role floor holds on BOTH the insert and the
+// proceed branch. A concurrent create of the same fresh phone is race-safe: the
+// guarded ON CONFLICT converts the collision into an idempotent player update
+// (the WHERE role = 'player' also backstops a TOCTOU privileged insert, which
+// then surfaces as the same refusal).
 func (r *authRepo) EnsureBookingUser(ctx context.Context, phone, fullName string) (*models.User, error) {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("EnsureBookingUser: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Lock the existing row (if any) and read its role. FOR UPDATE serialises the
+	// allowlist decision against a concurrent role change so it cannot race a write.
+	var existingRole string
+	err = tx.QueryRow(ctx,
+		`SELECT role::text FROM users WHERE phone = $1 FOR UPDATE`, phone,
+	).Scan(&existingRole)
+	switch {
+	case err == nil:
+		// Fail closed: only an existing player may proceed.
+		if existingRole != string(models.RolePlayer) {
+			return nil, ErrPrivilegedPhoneBookingRefused
+		}
+	case errors.Is(err, pgx.ErrNoRows):
+		// Brand-new phone — the insert below creates a player.
+	default:
+		return nil, fmt.Errorf("EnsureBookingUser: lookup: %w", err)
+	}
+
+	// Proceed branch (new phone OR existing player). The 'player' literal floors the
+	// role on insert; ON CONFLICT re-floors it and does JIT name capture. The
+	// WHERE role = 'player' guard keeps the update fail-closed against a privileged
+	// row racing in between the locked read and this write — that yields no row.
 	var u models.User
-	err := r.db.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		INSERT INTO users (phone, role, full_name)
 		VALUES ($1, 'player', NULLIF($2, ''))
 		ON CONFLICT (phone) DO UPDATE SET
+			role       = 'player',
 			full_name  = COALESCE(NULLIF(users.full_name, ''), NULLIF($2, '')),
 			updated_at = NOW()
+		WHERE users.role = 'player'
 		RETURNING id, COALESCE(full_name,''), COALESCE(email,''), COALESCE(phone,''),
 		          role, created_at, updated_at
 	`, phone, fullName).Scan(
 		&u.ID, &u.FullName, &u.Email, &u.Phone,
 		&u.Role, &u.CreatedAt, &u.UpdatedAt,
 	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The guarded ON CONFLICT declined to touch a non-player row (TOCTOU) — refuse.
+		return nil, ErrPrivilegedPhoneBookingRefused
+	}
 	if err != nil {
-		return nil, fmt.Errorf("EnsureBookingUser: %w", err)
+		return nil, fmt.Errorf("EnsureBookingUser: upsert: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("EnsureBookingUser: commit: %w", err)
 	}
 	return &u, nil
 }

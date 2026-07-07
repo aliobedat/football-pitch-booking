@@ -11,6 +11,7 @@ package handlers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"strconv"
@@ -269,9 +270,28 @@ func (h *PhoneAuthHandler) CreateBookingSession(c *gin.Context) {
 
 	user, err := h.store.EnsureBookingUser(c.Request.Context(), phone, strings.TrimSpace(req.FullName))
 	if err != nil {
+		// Fail closed: a privileged phone is refused with a NEUTRAL 403 that does
+		// not confirm the phone's privilege (no oracle). The store mutated nothing.
+		if errors.Is(err, repository.ErrPrivilegedPhoneBookingRefused) {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "booking_session_unavailable", "message": "لا يمكن بدء جلسة حجز بهذا الرقم",
+			})
+			return
+		}
 		c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error": "internal_error", "message": "could not start your booking session, please try again",
+		})
+		return
+	}
+
+	// Defense in depth (Layer 2): the booking path may only ever mint a player
+	// session. Even if the store guarantee above ever regressed, refuse — never
+	// mint — anything other than a player, with the same neutral 403.
+	if user.Role != models.RolePlayer {
+		c.Error(fmt.Errorf("CreateBookingSession: refusing to mint non-player role %q for user %d", user.Role, user.ID))
+		c.JSON(http.StatusForbidden, gin.H{
+			"error": "booking_session_unavailable", "message": "لا يمكن بدء جلسة حجز بهذا الرقم",
 		})
 		return
 	}

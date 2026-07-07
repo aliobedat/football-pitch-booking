@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -47,6 +48,13 @@ type fakeAuthStore struct {
 	users    map[string]*models.User
 	nextID   int
 	refreshN int
+
+	// Test hooks for the booking-session path (WO-ENSUREBOOKINGUSER Layer 2). When
+	// bookingErr is set, EnsureBookingUser returns it. Otherwise, when bookingRole
+	// is set, the returned user carries that role — letting a handler test simulate
+	// the store's guarantee having regressed (a privileged role leaking through).
+	bookingErr  error
+	bookingRole models.UserRole
 }
 
 func newFakeAuthStore() *fakeAuthStore {
@@ -91,6 +99,13 @@ func (f *fakeAuthStore) EnsureVerifiedUser(_ context.Context, phone string) (*mo
 func (f *fakeAuthStore) EnsureBookingUser(_ context.Context, phone, fullName string) (*models.User, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.bookingErr != nil {
+		return nil, f.bookingErr
+	}
+	role := models.RolePlayer
+	if f.bookingRole != "" {
+		role = f.bookingRole
+	}
 	if u, ok := f.users[phone]; ok {
 		if u.FullName == "" && fullName != "" {
 			u.FullName = fullName
@@ -102,7 +117,7 @@ func (f *fakeAuthStore) EnsureBookingUser(_ context.Context, phone, fullName str
 		ID:        f.nextID,
 		FullName:  fullName,
 		Phone:     phone,
-		Role:      models.RolePlayer,
+		Role:      role,
 		CreatedAt: time.Now(),
 		UpdatedAt: time.Now(),
 	}
@@ -441,5 +456,103 @@ func TestNormalizePhone(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("normalizePhone(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WO-ENSUREBOOKINGUSER — Layer 2 (handler) defense in depth.
+//
+// These prove the handler's own guarantees independent of the store: it maps a
+// store refusal to a neutral 403 (no privilege oracle), and — the belt behind
+// the suspenders — it refuses to mint a session for ANY non-player role even if
+// the store guarantee ever regresses and leaks a privileged user through.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const bookingPhone = "+962790000123"
+
+// noSessionCookies fails the test if either session cookie was set.
+func noSessionCookies(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if ck := cookieByName(rec, "malaab_access"); ck != nil {
+		t.Fatalf("a session was minted: malaab_access cookie present (%q)", ck.Value)
+	}
+	if ck := cookieByName(rec, "malaab_refresh"); ck != nil {
+		t.Fatalf("a session was minted: malaab_refresh cookie present")
+	}
+}
+
+// assertNeutralRefusal checks the 403 + neutral code + vague Arabic message, and
+// that no role claim / token leaked into the body.
+func assertNeutralRefusal(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403; body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error   string `json:"error"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.Error != "booking_session_unavailable" {
+		t.Fatalf("error code = %q, want booking_session_unavailable (must not confirm privilege)", body.Error)
+	}
+	// The refusal must not confirm the phone's privilege in any field.
+	if s := rec.Body.String(); strings.Contains(s, "owner") || strings.Contains(s, "admin") || strings.Contains(s, "staff") || strings.Contains(s, "privileg") {
+		t.Fatalf("refusal body leaks a privilege signal: %s", s)
+	}
+	noSessionCookies(t, rec)
+}
+
+// The store refused (privileged phone) → handler returns the neutral 403.
+func TestCreateBookingSession_StoreRefusal_Neutralised(t *testing.T) {
+	h := newHarness(t)
+	h.store.bookingErr = repository.ErrPrivilegedPhoneBookingRefused
+
+	rec := h.do(t, http.MethodPost, "/auth/booking-session",
+		map[string]any{"phone": bookingPhone, "full_name": "Attacker"}, "")
+	assertNeutralRefusal(t, rec)
+}
+
+// Belt behind the suspenders: even if the store LEAKS a privileged role, the
+// handler assertion refuses to mint — no cookies, neutral 403.
+func TestCreateBookingSession_PrivilegedRoleLeak_Refused(t *testing.T) {
+	for _, role := range []models.UserRole{models.RoleOwner, models.RoleAdmin, "staff"} {
+		t.Run(string(role), func(t *testing.T) {
+			h := newHarness(t)
+			h.store.bookingRole = role // store hands back a privileged user
+
+			rec := h.do(t, http.MethodPost, "/auth/booking-session",
+				map[string]any{"phone": bookingPhone, "full_name": "X"}, "")
+			assertNeutralRefusal(t, rec)
+		})
+	}
+}
+
+// Happy path unchanged: a player user yields a real session (cookies minted).
+func TestCreateBookingSession_Player_MintsSession(t *testing.T) {
+	h := newHarness(t)
+
+	rec := h.do(t, http.MethodPost, "/auth/booking-session",
+		map[string]any{"phone": bookingPhone, "full_name": "لاعب"}, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if ck := cookieByName(rec, "malaab_access"); ck == nil || ck.Value == "" || !ck.HttpOnly {
+		t.Fatalf("expected an httpOnly malaab_access cookie, got %+v", ck)
+	}
+	var body struct {
+		Data struct {
+			User struct {
+				Role string `json:"role"`
+			} `json:"user"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body.Data.User.Role != "player" {
+		t.Fatalf("minted role = %q, want player", body.Data.User.Role)
 	}
 }
