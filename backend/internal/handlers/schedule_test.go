@@ -52,6 +52,21 @@ func (f *fakeScheduleRepo) SetPayment(_ context.Context, _ auth.Actor, boundPitc
 	return &repository.ScheduleRow{ID: int64(bookingID), PaymentStatus: payment}, nil
 }
 
+// ApplyPayment records the call and returns a minimal sheet (or the injected
+// error). Enough for the existing handler tests; the WO-BOOKING-SHEET behaviour
+// is covered by the DB-backed suite.
+func (f *fakeScheduleRepo) ApplyPayment(_ context.Context, _ auth.Actor, boundPitchIDs []int, bookingID int, intent repository.PaymentIntent) (*repository.BookingSheet, error) {
+	f.setCalls++
+	f.lastBound, f.lastBookingID = boundPitchIDs, bookingID
+	if intent.Mode == "legacy_paid" || intent.Mode == "legacy_unpaid" {
+		f.lastPayment = map[string]string{"legacy_paid": "paid_cash", "legacy_unpaid": "unpaid"}[intent.Mode]
+	}
+	if f.setErr != nil {
+		return nil, f.setErr
+	}
+	return &repository.BookingSheet{ID: int64(bookingID), PaymentStatus: f.lastPayment, PaymentDisplay: "untracked"}, nil
+}
+
 // inject mimics RequireAuth + ResolveScope: sets actor + bound-pitch scope.
 func scheduleRouter(h *ScheduleHandler, userID int, role string, boundPitch int) *gin.Engine {
 	r := gin.New()
@@ -132,12 +147,14 @@ func TestPayment_InvalidValueRejected(t *testing.T) {
 	}
 }
 
-func TestPayment_OutOfScopeForbidden(t *testing.T) {
-	repo := &fakeScheduleRepo{setErr: repository.ErrBookingNotInScope}
+// Out-of-scope payment now returns 404, not 403 (WO-BOOKING-SHEET §4.2
+// amendment: existence is not leaked — payment mirrors the extend/Day-View 404).
+func TestPayment_OutOfScopeNotFound(t *testing.T) {
+	repo := &fakeScheduleRepo{setErr: repository.ErrSheetNotInScope}
 	r := scheduleRouter(NewScheduleHandler(repo), 9, "staff", 7)
 	rec := doJSON(t, r, http.MethodPatch, "/bookings/55/payment", map[string]any{"payment_status": "paid_cash"})
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want 403 for out-of-scope payment toggle", rec.Code)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for out-of-scope payment", rec.Code)
 	}
 }
 
