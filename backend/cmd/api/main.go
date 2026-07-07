@@ -269,6 +269,20 @@ func main() {
 
 	router := gin.New()
 
+	// ── Client-IP trust (fix/trusted-proxy-clientip) ─────────────────────────
+	// Behind Railway's edge proxy, gin's default (trust ALL proxies) makes
+	// ClientIP() return the client-most X-Forwarded-For entry — which a caller can
+	// forge by prepending the header, defeating any per-IP rate limit. Railway
+	// sets X-Real-IP un-spoofably at the edge (clients cannot override it), so we
+	// resolve the client from that header directly: gin checks TrustedPlatform
+	// FIRST in ClientIP() and returns its value without consulting the forgeable
+	// XFF chain. SetTrustedProxies(nil) is defense in depth — if X-Real-IP is ever
+	// absent, the fallback returns the direct RemoteAddr instead of a forged XFF.
+	router.TrustedPlatform = "X-Real-IP"
+	if err := router.SetTrustedProxies(nil); err != nil {
+		log.Fatalf("[FATAL] Could not configure trusted proxies: %v", err)
+	}
+
 	// Allowed CORS origins. The browser's `Origin` header never carries a
 	// trailing slash or surrounding space, and the lookup below is exact-match,
 	// so every configured origin is normalised the same way (trim space, drop a
