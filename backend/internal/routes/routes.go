@@ -71,6 +71,10 @@ func Register(
 	analyticsHandler := handlers.NewAnalyticsHandler(repository.NewAnalyticsRepository(db))
 	// Dashboard PR 4: staff daily schedule + attendance.
 	scheduleHandler := handlers.NewScheduleHandler(repository.NewScheduleRepository(db))
+	// WO-BOOKING-SHEET / PR-A: owner/admin booking extension (payment lives on the
+	// existing schedule PatchPayment handler). Hours resolved via the shared PitchModel.
+	bookingSheetHandler := handlers.NewBookingSheetHandler(
+		repository.NewBookingSheetRepository(db), &data.PitchModel{DB: db})
 	v1 := r.Group("/api/v1")
 
 	// ════════════════════════════════════════════════════════════════════════
@@ -334,10 +338,17 @@ func Register(
 			middleware.RequireRole("staff", "owner", "admin"),
 			scheduleHandler.PatchAttendance,
 		)
-		// Cash-Settlement Marker (WO-F1): unpaid | paid_cash on a non-cancelled booking.
+		// Cash-Settlement Marker (WO-F1) + partial payment (WO-BOOKING-SHEET): legacy
+		// payment_status OR the new amount_paid form on a non-cancelled booking.
 		protected.PATCH("/bookings/:id/payment",
 			middleware.RequireRole("staff", "owner", "admin"),
 			scheduleHandler.PatchPayment,
+		)
+		// WO-BOOKING-SHEET / PR-A: extend a booking's end time (+30/+60). Owner/admin
+		// only — staff cannot extend (barred here at the route).
+		protected.PATCH("/bookings/:id/extend",
+			middleware.RequireRole("owner", "admin"),
+			bookingSheetHandler.ExtendBooking,
 		)
 
 		// Owner/admin BLOCKS: create held time (source='block'), or remove it.

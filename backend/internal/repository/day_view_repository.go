@@ -41,10 +41,17 @@ type DayViewBookingRef struct {
 	Source        string    `json:"source"`         // player | manual | academy | block
 	Status        string    `json:"status"`         // confirmed | pending
 	Attendance    string    `json:"attendance"`     // pending | checked_in | no_show
-	PaymentStatus string    `json:"payment_status"` // unpaid | paid_cash
+	PaymentStatus string    `json:"payment_status"` // unpaid | paid_cash (legacy, unchanged)
 	Title         string    `json:"title"`          // player name → guest name → block label
 	StartTime     time.Time `json:"start_time"`
 	EndTime       time.Time `json:"end_time"`
+
+	// Booking-sheet money fields (WO-BOOKING-SHEET / PR-A, additive). amount_paid is
+	// nullable (null = untracked); payment_display/remaining are DERIVED.
+	TotalPrice     float64  `json:"total_price"`
+	AmountPaid     *float64 `json:"amount_paid"`
+	PaymentDisplay string   `json:"payment_display"` // untracked | unpaid | partial | paid
+	Remaining      *float64 `json:"remaining"`       // null when untracked
 }
 
 // DayViewSlot is one 30-minute cell. `partial` is true when a booked cell is only
@@ -80,9 +87,12 @@ type DayView struct {
 	Timezone    string                  `json:"timezone"`     // "Asia/Amman"
 	SlotMinutes int                     `json:"slot_minutes"` // 30
 	HasSchedule bool                    `json:"has_schedule"` // false ⇒ open 24/7
-	OpenWindows []data.ConcreteInterval `json:"open_windows"`
-	Slots       []DayViewSlot           `json:"slots"`
-	Summary     DayViewSummary          `json:"summary"`
+	// PricePerHour is the pitch's whole-JOD hourly rate, exposed so the client can
+	// project extension prices without a round-trip (WO-BOOKING-SHEET, additive).
+	PricePerHour int                     `json:"price_per_hour"`
+	OpenWindows  []data.ConcreteInterval `json:"open_windows"`
+	Slots        []DayViewSlot           `json:"slots"`
+	Summary      DayViewSummary          `json:"summary"`
 }
 
 type DayViewRepository interface {
@@ -118,14 +128,15 @@ func (r *dayViewRepo) OwnerDayView(ctx context.Context, actor auth.Actor, pitchI
 	args = append(args, ownerArgs...)
 
 	var (
-		name     string
-		isActive bool
+		name         string
+		isActive     bool
+		pricePerHour int
 	)
 	err := r.db.QueryRow(ctx, fmt.Sprintf(`
-		SELECT name, is_active
+		SELECT name, is_active, price_per_hour
 		FROM pitches
 		WHERE id = $1 AND deleted_at IS NULL AND %s
-	`, ownerClause), args...).Scan(&name, &isActive)
+	`, ownerClause), args...).Scan(&name, &isActive, &pricePerHour)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrPitchNotFound
@@ -186,11 +197,12 @@ func (r *dayViewRepo) OwnerDayView(ctx context.Context, actor auth.Actor, pitchI
 		IsActive:    isActive,
 		Date:        dateStr,
 		Timezone:    "Asia/Amman",
-		SlotMinutes: SlotMinutes,
-		HasSchedule: hasSchedule,
-		OpenWindows: openWindows,
-		Slots:       slots,
-		Summary:     summary,
+		SlotMinutes:  SlotMinutes,
+		HasSchedule:  hasSchedule,
+		PricePerHour: pricePerHour,
+		OpenWindows:  openWindows,
+		Slots:        slots,
+		Summary:      summary,
 	}, nil
 }
 
@@ -198,7 +210,8 @@ func (r *dayViewRepo) OwnerDayView(ctx context.Context, actor auth.Actor, pitchI
 func (r *dayViewRepo) loadOccupancy(ctx context.Context, pitchID int64, fromUTC, toUTC time.Time) ([]dayBooking, error) {
 	rows, err := r.db.Query(ctx, fmt.Sprintf(`
 		SELECT b.id, b.source, b.status, b.attendance, b.payment_status,
-		       lower(b.booking_range), upper(b.booking_range), b.total_price,
+		       lower(b.booking_range), upper(b.booking_range),
+		       b.total_price::float8, b.amount_paid::float8,
 		       %s
 		FROM bookings b
 		LEFT JOIN users u ON u.id = b.player_id
@@ -216,10 +229,18 @@ func (r *dayViewRepo) loadOccupancy(ctx context.Context, pitchID int64, fromUTC,
 	for rows.Next() {
 		var b dayBooking
 		if err := rows.Scan(&b.ref.ID, &b.ref.Source, &b.ref.Status, &b.ref.Attendance,
-			&b.ref.PaymentStatus, &b.ref.StartTime, &b.ref.EndTime, &b.totalPrice,
+			&b.ref.PaymentStatus, &b.ref.StartTime, &b.ref.EndTime,
+			&b.totalPrice, &b.ref.AmountPaid,
 			&b.ref.Title); err != nil {
 			return nil, fmt.Errorf("OwnerDayView: occupancy scan: %w", err)
 		}
+		// Additive money fields (WO-BOOKING-SHEET): expose total + derived display.
+		b.ref.TotalPrice = round3(b.totalPrice)
+		if b.ref.AmountPaid != nil {
+			v := round3(*b.ref.AmountPaid)
+			b.ref.AmountPaid = &v
+		}
+		b.ref.PaymentDisplay, b.ref.Remaining = derivePayment(b.ref.TotalPrice, b.ref.AmountPaid)
 		occ = append(occ, b)
 	}
 	if err := rows.Err(); err != nil {
