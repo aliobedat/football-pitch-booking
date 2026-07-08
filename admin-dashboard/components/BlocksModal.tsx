@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Ban, ChevronRight, ChevronLeft, X, AlertTriangle, Info, CalendarDays, Loader2, Sparkles, UserPlus, Clock, Repeat, Trash2 } from 'lucide-react';
+import { Ban, ChevronRight, ChevronLeft, X, AlertTriangle, Info, CalendarDays, Loader2, Sparkles, Repeat, Trash2 } from 'lucide-react';
 import api from '@/lib/api';
 import { formatDate, formatTime } from '@/lib/format';
 import {
@@ -90,26 +90,12 @@ export default function BlocksModal({
   const [submitting, setSubmitting] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [conflict, setConflict] = useState<BlockConflict | null>(null);
-  const [conflictWeek, setConflictWeek] = useState<number | null>(null); // failing week (recurring)
 
   // unblock confirmation target.
   const [unblockTarget, setUnblockTarget] = useState<DayBooking | null>(null);
 
-  // walk-in (manual) guest form: open over the selected range.
-  const [manualOpen, setManualOpen] = useState(false);
-  const [guestName, setGuestName]   = useState('');
-  const [guestPhone, setGuestPhone] = useState('');
-  const [guestPhoneError, setGuestPhoneError] = useState<string | null>(null);
-  const [repeatWeeks, setRepeatWeeks] = useState(1); // 1 = one-off; >1 = recurring
-
-  // Recurrence UUID lifecycle: generated client-side, kept STABLE across a 409/422
-  // rollback (so the owner can fix the conflict and retry the same group), and
-  // regenerated ONLY after a successful create. Sent only for a recurring (>1) series.
-  const [groupId, setGroupId] = useState<string>(() => crypto.randomUUID());
-
-  // Soft override: holds the pending walk-in payload after a 422 out-of-hours
-  // rejection, awaiting the owner's confirmation to resubmit with force_bypass_hours.
-  const [overridePending, setOverridePending] = useState<{ start: number; end: number } | null>(null);
+  // Manual walk-in CREATE moved to DayViewManualSheet (WO-RECURRING-ENTRY); this
+  // tool keeps only block create/lift + the manual CANCEL affordance below.
 
   // Manual-booking cancel: the clicked walk-in awaiting a cancel decision. A
   // recurring row (recurrence_group_id set) offers single-vs-all; a one-off offers
@@ -144,16 +130,15 @@ export default function BlocksModal({
 
   useEffect(() => { reload(); }, [reload]);
 
-  // Changing the day clears any in-progress selection / form / error.
+  // Changing the day clears any in-progress selection / error.
   useEffect(() => {
-    setSel(null); setConflict(null); setConflictWeek(null); setActionError(null);
-    setManualOpen(false); setGuestName(''); setGuestPhone(''); setGuestPhoneError(null);
-    setRepeatWeeks(1); setOverridePending(null); setCancelManualTarget(null);
+    setSel(null); setConflict(null); setActionError(null);
+    setCancelManualTarget(null);
   }, [viewDate]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
-    if (e.key === 'Escape' && !submitting && !unblockTarget && !overridePending && !cancelManualTarget) onClose();
-  }, [submitting, unblockTarget, overridePending, cancelManualTarget, onClose]);
+    if (e.key === 'Escape' && !submitting && !unblockTarget && !cancelManualTarget) onClose();
+  }, [submitting, unblockTarget, cancelManualTarget, onClose]);
 
   const isToday = sameCivilDate(viewDate, todayCivil);
 
@@ -245,87 +230,6 @@ export default function BlocksModal({
     }
   };
 
-  // ── Log a walk-in (manual) booking over the selected range ─────────────────
-  // Jordanian mobile: +9627######## or 07########. Optional — only validated when
-  // the owner actually types a number.
-  const phoneValid = (raw: string) => /^(\+962|0)7\d{8}$/.test(raw.replace(/[\s-]/g, ''));
-
-  const openManualForm = () => {
-    setConflict(null);
-    setActionError(null);
-    setGuestPhoneError(null);
-    setManualOpen(true);
-  };
-
-  const closeManualForm = () => {
-    setManualOpen(false);
-    setGuestName('');
-    setGuestPhone('');
-    setGuestPhoneError(null);
-    setRepeatWeeks(1);
-    setConflictWeek(null);
-  };
-
-  // Core POST. `bypass` is set on the override-confirmed resubmit. A recurring (>1)
-  // series carries repeat_weeks + the STABLE client UUID (recurrence_group_id); a
-  // one-off sends neither, so its row keeps a NULL group (standard cancel only).
-  const postManual = async (range: { start: number; end: number }, name: string, phone: string, bypass: boolean) => {
-    const body: Record<string, unknown> = {
-      start_time: ammanInstant(viewDate, range.start).toISOString(),
-      end_time:   ammanInstant(viewDate, range.end).toISOString(),
-      guest_name: name,
-    };
-    if (phone) body.guest_phone = phone;
-    if (bypass) body.force_bypass_hours = true;
-    if (repeatWeeks > 1) {
-      body.repeat_weeks = repeatWeeks;
-      body.recurrence_group_id = groupId;
-    }
-    await api.post(`/pitches/${pitchId}/bookings/manual`, body);
-  };
-
-  const submitManual = async (bypass = false) => {
-    if (!selRange) return;
-    const name = guestName.trim();
-    if (!name) { setActionError('اسم الضيف مطلوب'); return; }
-    const phone = guestPhone.trim();
-    if (phone && !phoneValid(phone)) {
-      setGuestPhoneError('رقم هاتف غير صالح (مثال: 0791234567 أو ‎+962791234567)');
-      return;
-    }
-    setSubmitting(true);
-    setActionError(null);
-    setConflict(null);
-    setConflictWeek(null);
-    setGuestPhoneError(null);
-    try {
-      await postManual(selRange, name, phone, bypass);
-      // SUCCESS → only now regenerate the recurrence UUID (a fresh series next time);
-      // reset the form + selection and refresh occupancy.
-      setGroupId(crypto.randomUUID());
-      setSel(null);
-      setOverridePending(null);
-      closeManualForm();
-      await reload();
-    } catch (err: any) {
-      // NB: the group UUID is intentionally NOT regenerated here — it stays stable so
-      // the owner can fix the conflict and retry the SAME series (idempotent).
-      const status = err?.response?.status;
-      const data = err?.response?.data;
-      if (status === 409 && Array.isArray(data?.conflicts) && data.conflicts.length > 0) {
-        setConflict(data.conflicts[0] as BlockConflict);
-        setConflictWeek(data?.occurrence?.week ?? null);
-      } else if (status === 422 && data?.error === 'outside_operating_hours' && !bypass) {
-        // Soft override: stage the confirmation dialog instead of erroring.
-        setOverridePending({ start: selRange.start, end: selRange.end });
-      } else {
-        setActionError(data?.message ?? 'تعذّر تسجيل الحجز، حاول مجدداً');
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   // ── Cancel a manual walk-in from the grid ──────────────────────────────────
   const cancelSingleOccurrence = async () => {
     if (!cancelManualTarget) return;
@@ -382,7 +286,7 @@ export default function BlocksModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onKeyDown={handleKeyDown}>
       <div
         className="absolute inset-0 bg-black/70 backdrop-blur-sm"
-        onClick={() => { if (!submitting && !unblockTarget && !overridePending && !cancelManualTarget) onClose(); }}
+        onClick={() => { if (!submitting && !unblockTarget && !cancelManualTarget) onClose(); }}
         aria-hidden
       />
 
@@ -537,7 +441,6 @@ export default function BlocksModal({
               <div className="flex items-start gap-2 mb-3 text-[12px] text-red-300 bg-red-500/[0.07] border border-red-500/20 rounded-xl px-4 py-2.5 leading-relaxed">
                 <AlertTriangle size={14} className="flex-shrink-0 mt-0.5 text-red-400" aria-hidden />
                 <span>
-                  {conflictWeek ? <>الأسبوع {conflictWeek}: </> : null}
                   هذا الموعد يتعارض مع{' '}
                   {conflict.source === 'block' ? 'حجب قائم' : conflict.source === 'manual' ? 'حجز يدوي' : 'حجز'}{' '}
                   الساعة{' '}
@@ -564,7 +467,7 @@ export default function BlocksModal({
                 </span>
                 <button
                   type="button"
-                  onClick={() => { setSel(null); closeManualForm(); }}
+                  onClick={() => { setSel(null); setConflict(null); }}
                   className="text-[11px] font-semibold text-white/40 hover:text-white/70 transition-colors"
                 >
                   مسح التحديد
@@ -574,199 +477,44 @@ export default function BlocksModal({
               <div className="flex items-start gap-2 mb-3 px-3.5 py-2.5 rounded-xl bg-white/[0.02] border border-white/[0.06]">
                 <Info size={13} className="text-white/30 flex-shrink-0 mt-0.5" aria-hidden />
                 <p className="text-[11.5px] text-white/35 leading-relaxed">
-                  اضغط على الساعات المتاحة لتحديد فترة، ثم احجبها أو سجّل حجزاً يدوياً. «حجب اليوم بالكامل» متاح أيضاً، واضغط على فترة محظورة لرفعها.
+                  اضغط على الساعات المتاحة لتحديد فترة ثم احجبها. «حجب اليوم بالكامل» متاح أيضاً، واضغط على فترة محظورة لرفعها.
                 </p>
               </div>
             )}
 
-            {/* Walk-in guest form (opens over the selected range) */}
-            {manualOpen && selRange ? (
-              <div className="flex flex-col gap-3">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <div>
-                    <label className="block text-[11px] font-semibold text-white/40 mb-1.5">
-                      اسم الضيف <span className="text-red-400/60">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      value={guestName}
-                      onChange={e => { setGuestName(e.target.value); setActionError(null); }}
-                      placeholder="مثال: أبو محمد"
-                      autoFocus
-                      className="w-full bg-white/[0.04] border border-white/[0.13] rounded-xl px-4 py-2.5 text-[13px] text-[#f0efe8] placeholder:text-white/25 focus:outline-none focus:border-sky-500/60 focus:ring-2 focus:ring-sky-500/20 transition-all duration-150"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-semibold text-white/40 mb-1.5">
-                      رقم الهاتف <span className="text-white/25">(اختياري)</span>
-                    </label>
-                    <input
-                      type="tel"
-                      dir="ltr"
-                      value={guestPhone}
-                      onChange={e => { setGuestPhone(e.target.value); setGuestPhoneError(null); }}
-                      placeholder="07XXXXXXXX"
-                      className="w-full bg-white/[0.04] border border-white/[0.13] rounded-xl px-4 py-2.5 text-[13px] text-[#f0efe8] placeholder:text-white/25 text-right focus:outline-none focus:border-sky-500/60 focus:ring-2 focus:ring-sky-500/20 transition-all duration-150"
-                    />
-                    {guestPhoneError && <p className="text-[10.5px] text-red-400 mt-1">{guestPhoneError}</p>}
-                  </div>
-                </div>
-                {/* Weekly recurrence — same slot, advanced 7 days per occurrence */}
-                <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl bg-sky-500/[0.04] border border-sky-500/15">
-                  <label htmlFor="repeat-weeks" className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-sky-200/80">
-                    <Repeat size={13} aria-hidden />
-                    تكرار أسبوعي
-                  </label>
-                  <select
-                    id="repeat-weeks"
-                    value={repeatWeeks}
-                    onChange={e => { setRepeatWeeks(Number(e.target.value)); setConflict(null); setConflictWeek(null); }}
-                    className="bg-white/[0.05] border border-white/[0.13] rounded-lg px-3 py-1.5 text-[12px] text-[#f0efe8] [color-scheme:dark] focus:outline-none focus:border-sky-500/60"
-                  >
-                    <option value={1}>بدون تكرار</option>
-                    <option value={4}>كل أسبوع × 4</option>
-                    <option value={8}>كل أسبوع × 8</option>
-                    <option value={12}>كل أسبوع × 12</option>
-                    <option value={24}>كل أسبوع × 24</option>
-                  </select>
-                </div>
-                {repeatWeeks > 1 && (
-                  <p className="text-[10.5px] text-white/35 -mt-1">
-                    سيتم إنشاء {repeatWeeks} حجوزات، واحدة كل أسبوع في نفس التوقيت.
-                  </p>
+            {/* Block actions (manual walk-in create moved to DayViewManualSheet) */}
+            <div className="flex items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={blockWholeDay}
+                disabled={submitting}
+                className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[12px] font-semibold text-white/55 border border-white/[0.08] hover:text-amber-300 hover:border-amber-500/30 hover:bg-amber-500/[0.05] disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150"
+              >
+                <Sparkles size={13} aria-hidden />
+                حجب اليوم بالكامل
+              </button>
+              <button
+                type="button"
+                onClick={submitBlock}
+                disabled={submitting || !selRange}
+                className={[
+                  'flex items-center gap-2 px-5 py-2.5 rounded-xl text-[12px] font-bold',
+                  'bg-amber-500/[0.12] text-amber-300 border border-amber-500/30',
+                  'hover:bg-amber-500/[0.18] hover:text-amber-200 hover:border-amber-500/45',
+                  'disabled:opacity-50 disabled:cursor-not-allowed',
+                  'transition-all duration-200 active:scale-[0.97]',
+                ].join(' ')}
+              >
+                {submitting && !unblockTarget ? (
+                  <><Loader2 size={14} className="animate-spin" aria-hidden /> جاري الحجب...</>
+                ) : (
+                  <><Ban size={13} aria-hidden /> حجب الفترة</>
                 )}
-                <div className="flex items-center justify-end gap-3">
-                  <button
-                    type="button"
-                    onClick={closeManualForm}
-                    disabled={submitting}
-                    className="px-5 py-2.5 rounded-xl text-[12px] font-semibold text-white/45 hover:text-white/70 border border-white/[0.07] hover:border-white/[0.14] disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150"
-                  >
-                    رجوع
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => submitManual(false)}
-                    disabled={submitting || !guestName.trim()}
-                    className={[
-                      'flex items-center gap-2 px-6 py-2.5 rounded-xl text-[12px] font-bold',
-                      'bg-sky-500/[0.14] text-sky-300 border border-sky-500/30',
-                      'hover:bg-sky-500/[0.20] hover:text-sky-200 hover:border-sky-500/45',
-                      'disabled:opacity-50 disabled:cursor-not-allowed',
-                      'transition-all duration-200 active:scale-[0.97]',
-                    ].join(' ')}
-                  >
-                    {submitting && !overridePending ? (
-                      <><Loader2 size={14} className="animate-spin" aria-hidden /> جاري التسجيل...</>
-                    ) : (
-                      <><UserPlus size={13} aria-hidden /> تأكيد الحجز اليدوي</>
-                    )}
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <div className="flex items-center justify-between gap-3">
-                <button
-                  type="button"
-                  onClick={blockWholeDay}
-                  disabled={submitting}
-                  className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl text-[12px] font-semibold text-white/55 border border-white/[0.08] hover:text-amber-300 hover:border-amber-500/30 hover:bg-amber-500/[0.05] disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150"
-                >
-                  <Sparkles size={13} aria-hidden />
-                  حجب اليوم بالكامل
-                </button>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={openManualForm}
-                    disabled={submitting || !selRange}
-                    className={[
-                      'flex items-center gap-2 px-4 py-2.5 rounded-xl text-[12px] font-bold',
-                      'bg-sky-500/[0.12] text-sky-300 border border-sky-500/30',
-                      'hover:bg-sky-500/[0.18] hover:text-sky-200 hover:border-sky-500/45',
-                      'disabled:opacity-50 disabled:cursor-not-allowed',
-                      'transition-all duration-200 active:scale-[0.97]',
-                    ].join(' ')}
-                  >
-                    <UserPlus size={13} aria-hidden />
-                    حجز يدوي
-                  </button>
-                  <button
-                    type="button"
-                    onClick={submitBlock}
-                    disabled={submitting || !selRange}
-                    className={[
-                      'flex items-center gap-2 px-5 py-2.5 rounded-xl text-[12px] font-bold',
-                      'bg-amber-500/[0.12] text-amber-300 border border-amber-500/30',
-                      'hover:bg-amber-500/[0.18] hover:text-amber-200 hover:border-amber-500/45',
-                      'disabled:opacity-50 disabled:cursor-not-allowed',
-                      'transition-all duration-200 active:scale-[0.97]',
-                    ].join(' ')}
-                  >
-                    {submitting && !unblockTarget && !overridePending ? (
-                      <><Loader2 size={14} className="animate-spin" aria-hidden /> جاري الحجب...</>
-                    ) : (
-                      <><Ban size={13} aria-hidden /> حجب الفترة</>
-                    )}
-                  </button>
-                </div>
-              </div>
-            )}
+              </button>
+            </div>
           </div>
         )}
       </div>
-
-      {/* Soft-override confirmation: the slot is outside operating hours */}
-      {overridePending && (
-        <div className="absolute inset-0 z-20 flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black/60"
-            onClick={() => { if (!submitting) setOverridePending(null); }}
-            aria-hidden
-          />
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="override-title"
-            dir="rtl"
-            className="relative w-full max-w-sm rounded-2xl bg-[#141715] border border-white/[0.10] shadow-2xl overflow-hidden"
-          >
-            <div className="flex items-start gap-3.5 px-6 pt-6 pb-4">
-              <div className="w-10 h-10 rounded-xl bg-amber-500/[0.10] border border-amber-500/25 flex items-center justify-center flex-shrink-0">
-                <Clock size={18} className="text-amber-400" aria-hidden />
-              </div>
-              <div className="min-w-0">
-                <h2 id="override-title" className="text-[15px] font-bold text-[#f0efe8] leading-snug">خارج أوقات العمل</h2>
-                <p className="text-[12.5px] text-white/40 mt-1 leading-relaxed">
-                  هذا الوقت خارج أوقات العمل المحددة، هل تود تأكيد الحجز؟
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center justify-end gap-3 px-6 py-5 mt-1 border-t border-white/[0.05] bg-[#111312]">
-              <button
-                type="button"
-                onClick={() => { if (!submitting) setOverridePending(null); }}
-                disabled={submitting}
-                className="px-5 py-2.5 rounded-xl text-[12px] font-semibold text-white/45 hover:text-white/70 border border-white/[0.07] hover:border-white/[0.14] disabled:opacity-50 disabled:cursor-not-allowed transition-all duration-150"
-              >
-                تراجع
-              </button>
-              <button
-                type="button"
-                onClick={() => submitManual(true)}
-                disabled={submitting}
-                className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-[12px] font-bold bg-amber-500/[0.12] text-amber-300 border border-amber-500/30 hover:bg-amber-500/[0.18] hover:text-amber-200 hover:border-amber-500/45 disabled:opacity-60 disabled:cursor-not-allowed transition-all duration-200 active:scale-[0.97]"
-              >
-                {submitting ? (
-                  <><Loader2 size={13} className="animate-spin" aria-hidden /> جاري التسجيل...</>
-                ) : (
-                  <><UserPlus size={13} aria-hidden /> تأكيد رغم ذلك</>
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* Unblock confirmation */}
       {unblockTarget && (
