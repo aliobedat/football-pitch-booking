@@ -21,7 +21,7 @@ import {
 } from '@/lib/amman';
 import DayViewDatePicker from '@/components/DayViewDatePicker';
 import DayViewManualSheet from '@/components/DayViewManualSheet';
-import DayViewBookingSheet, { type SheetBooking, paymentDisplayBadge } from '@/components/DayViewBookingSheet';
+import BookingSheet, { paymentDisplayBadge } from '@/components/BookingSheet';
 
 // ── Payload types (mirror the PR-1 DayView JSON) ─────────────────────────────
 type SlotStatus = 'available' | 'booked' | 'blocked' | 'closed';
@@ -204,10 +204,10 @@ function DayViewInner() {
 
   // The open booking-details sheet's booking, re-derived from the freshest day
   // payload by id (never held as its own copy — refetch is authoritative).
-  const sheetBooking = useMemo<SheetBooking | null>(() => {
+  const sheetBooking = useMemo<DVBooking | null>(() => {
     if (sheetId == null || !data) return null;
     for (const s of data.slots) {
-      if (s.booking && s.booking.id === sheetId) return s.booking as SheetBooking;
+      if (s.booking && s.booking.id === sheetId) return s.booking;
     }
     return null;
   }, [sheetId, data]);
@@ -429,9 +429,12 @@ function DayViewInner() {
       )}
 
       {sheetBooking && data && (
-        <DayViewBookingSheet
+        <BookingSheet
           booking={sheetBooking}
+          title={sheetBooking.title}
           pricePerHour={data.price_per_hour}
+          canExtend={true}
+          canEditTotal={true}
           onClose={() => setSheetId(null)}
           onRefetch={() => fetchDay(true)}
         />

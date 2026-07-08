@@ -1,12 +1,15 @@
 'use client';
 
-// Booking details bottom sheet for the Day View (WO-BOOKING-SHEET / PR-B).
-// Opens on a booked, non-block slot: payment tracking (amount_paid source of
-// truth) + booking extension. Consumes the frozen PR-A backend contract:
+// Booking details bottom sheet (WO-BOOKING-SHEET / PR-B, generalized in
+// PR-B.2b for Day View + جدول اليوم). Opens on a booked, non-block row:
+// payment tracking (amount_paid source of truth) + booking extension. Consumes
+// the frozen PR-A backend contract:
 //   PATCH /bookings/:id/payment  { amount_paid: number|null, total_price?: number }
 //   PATCH /bookings/:id/extend   { minutes: 30|60 }
-// Never optimistic — every successful action refetches the day and the sheet
-// re-renders from the fresh payload (the parent re-derives `booking` by id).
+// Never optimistic — every successful action refetches the parent's data and
+// the sheet re-renders from the fresh payload (the parent re-derives `booking`
+// by id). Capability props mirror the backend role rules (staff: extend is
+// 403'd at the route, total_price 403'd in the handler) — UX mirror only.
 //
 // Visual language mirrors DayViewManualSheet (bottom sheet on mobile, centred
 // modal on desktop). PaymentStatusPill is deliberately NOT reused — it only
@@ -25,7 +28,6 @@ export interface SheetBooking {
   status: string;
   attendance: string;
   payment_status: string; // legacy
-  title: string;
   start_time: string;
   end_time: string;
   total_price: number;
@@ -73,14 +75,20 @@ function sanitizeMoney(raw: string): string {
 
 type ErrorState = { context: 'payment' | 'extend'; text: string } | null;
 
-export default function DayViewBookingSheet({
+export default function BookingSheet({
   booking,
+  title,
   pricePerHour,
+  canExtend,
+  canEditTotal,
   onClose,
   onRefetch,
 }: {
   booking: SheetBooking;
+  title: string;
   pricePerHour: number;
+  canExtend: boolean;
+  canEditTotal: boolean;
   onClose: () => void;
   onRefetch: () => Promise<void>;
 }) {
@@ -178,7 +186,7 @@ export default function DayViewBookingSheet({
         <div className="flex items-start justify-between gap-3 mb-4">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <h2 className="text-[15px] font-bold text-[#f0efe8] truncate">{booking.title || 'حجز'}</h2>
+              <h2 className="text-[15px] font-bold text-[#f0efe8] truncate">{title || 'حجز'}</h2>
               {badgeEl}
             </div>
             <p className="text-[12px] text-white/40 mt-1" dir="rtl">
@@ -195,7 +203,11 @@ export default function DayViewBookingSheet({
           {/* Total (editable) */}
           <div className="flex items-center justify-between gap-3">
             <span className="text-[12px] text-white/45">الإجمالي</span>
-            {editingTotal ? (
+            {!canEditTotal ? (
+              <span className="text-[15px] font-bold text-[#f0efe8] tabular-nums">
+                {jod3(booking.total_price)} <span className="text-[11px] text-emerald-500/80 font-semibold">د.أ</span>
+              </span>
+            ) : editingTotal ? (
               <div className="flex items-center gap-2">
                 <input
                   value={totalInput}
@@ -289,8 +301,8 @@ export default function DayViewBookingSheet({
           )}
         </div>
 
-        {/* ── Extension ── (hidden once the booking has ended) */}
-        {!ended && (
+        {/* ── Extension ── (hidden for staff and once the booking has ended) */}
+        {canExtend && !ended && (
           <div className="mt-4 flex flex-col gap-2">
             <span className="text-[12px] text-white/45">تمديد الحجز</span>
             <div className="flex items-center gap-2">

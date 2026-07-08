@@ -1,11 +1,23 @@
 'use client';
 
+// جدول اليوم — the operator's daily list (staff/owner/admin).
+//
+// WO-BOOKING-SHEET / PR-B.2b: each booking row opens the shared BookingSheet
+// (payment tracking + extension). The legacy one-tap مدفوع toggle is REPLACED
+// by the sheet (first executed third of
+// docs/followups/legacy-setpayment-callers-migration.md); attendance buttons
+// stay optimistic-with-rollback and stopPropagation so a حضر tap never opens
+// the sheet. Blocks keep their inert row. Money state on the row comes from
+// the PR-B.2a additive payload and is never mutated client-side.
+
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Loader2, Check, X, Clock, Lock, Banknote } from 'lucide-react';
+import { Loader2, Check, X, Clock, Lock, ChevronLeft } from 'lucide-react';
 import api from '@/lib/api';
+import { useAuth } from '@/context/AuthContext';
+import BookingSheet, { type SheetBooking, paymentDisplayBadge } from '@/components/BookingSheet';
+import { formatCurrency } from '@/lib/format';
 
 type Attendance = 'pending' | 'checked_in' | 'no_show';
-type Payment = 'unpaid' | 'paid_cash';
 
 interface Row {
   id: number;
@@ -13,17 +25,25 @@ interface Row {
   pitch_name: string;
   start_time: string;
   end_time: string;
-  source: 'player' | 'manual' | 'block';
+  source: 'player' | 'manual' | 'academy' | 'block';
   status: string;
   attendance: Attendance;
-  payment_status: Payment;
+  payment_status: string; // legacy (display no longer reads it)
   attendee_name: string;
+  // PR-B.2a additive money payload (server-derived; authoritative).
+  total_price: number;
+  amount_paid: number | null;
+  payment_display: 'untracked' | 'unpaid' | 'partial' | 'paid';
+  remaining: number | null;
+  price_per_hour: number; // per-row: the schedule spans pitches with different rates
 }
 
 function fmtTime(iso: string): string {
   const d = new Date(iso);
   return d.toLocaleTimeString('ar-JO', { hour: '2-digit', minute: '2-digit', hour12: true });
 }
+
+const jod3 = (v: number) => formatCurrency(v, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 
 const STATE_STYLE: Record<Attendance, string> = {
   pending: 'text-white/45 bg-white/[0.05] border-white/[0.09]',
@@ -37,13 +57,20 @@ const STATE_LABEL: Record<Attendance, string> = {
 };
 
 export default function SchedulePage() {
+  const { user } = useAuth();
   const [rows, setRows] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pitchFilter, setPitchFilter] = useState<number>(0); // 0 = all in scope
+  const [sheetId, setSheetId] = useState<number | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  // Staff can settle payment but not extend or reprice — the backend enforces
+  // this (extend route is owner/admin; total_price 403s for staff); these
+  // props just hide what the server would refuse.
+  const canManage = user != null && user.role !== 'staff';
+
+  const load = useCallback(async (silent = false): Promise<void> => {
+    if (!silent) setLoading(true);
     setError(null);
     try {
       const { data } = await api.get<{ data: Row[] }>('/schedule', {
@@ -51,9 +78,9 @@ export default function SchedulePage() {
       });
       setRows(data.data ?? []);
     } catch {
-      setError('تعذّر تحميل الجدول.');
+      if (!silent) setError('تعذّر تحميل الجدول.');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [pitchFilter]);
 
@@ -69,6 +96,16 @@ export default function SchedulePage() {
   }, [rows]);
   const showSelector = pitchFilter !== 0 || pitches.length > 1;
 
+  // The open sheet's booking, re-derived from the freshest payload by id —
+  // refetch is authoritative (Day View pattern).
+  const sheetRow = useMemo<Row | null>(
+    () => (sheetId == null ? null : rows.find((r) => r.id === sheetId) ?? null),
+    [sheetId, rows],
+  );
+  useEffect(() => {
+    if (sheetId != null && !rows.some((r) => r.id === sheetId)) setSheetId(null);
+  }, [sheetId, rows]);
+
   // Reversible/idempotent: tapping the active state again reverts to 'pending'.
   async function setAttendance(row: Row, next: Attendance) {
     const target = row.attendance === next ? 'pending' : next;
@@ -78,19 +115,6 @@ export default function SchedulePage() {
       await api.patch(`/bookings/${row.id}/attendance`, { attendance: target });
     } catch {
       setRows((rs) => rs.map((r) => (r.id === row.id ? { ...r, attendance: prev } : r))); // rollback
-    }
-  }
-
-  // One-click cash settlement (WO-F1 endpoint). Optimistic flip with rollback so
-  // the floor operator never waits on the network mid-shift.
-  async function togglePayment(row: Row) {
-    const target: Payment = row.payment_status === 'paid_cash' ? 'unpaid' : 'paid_cash';
-    const prev = row.payment_status;
-    setRows((rs) => rs.map((r) => (r.id === row.id ? { ...r, payment_status: target } : r))); // optimistic
-    try {
-      await api.patch(`/bookings/${row.id}/payment`, { payment_status: target });
-    } catch {
-      setRows((rs) => rs.map((r) => (r.id === row.id ? { ...r, payment_status: prev } : r))); // rollback
     }
   }
 
@@ -124,9 +148,12 @@ export default function SchedulePage() {
         <div className="flex flex-col gap-2">
           {rows.map((r) => {
             const isBlock = r.source === 'block';
-            return (
-              <div key={r.id} className="flex flex-wrap items-center gap-4 rounded-xl bg-[#141715] border border-white/[0.08] px-4 py-3">
-                <div className="flex items-center gap-1.5 text-white/55 min-w-[120px]">
+            const ended = new Date(r.end_time).getTime() < Date.now();
+            const badge = paymentDisplayBadge(r.payment_display);
+            const tappable = !isBlock;
+            const rowInner = (
+              <>
+                <div className="flex items-center gap-1.5 text-white/55 min-w-[110px] shrink-0">
                   <Clock size={13} aria-hidden />
                   <span className="text-[12.5px] font-mono">{fmtTime(r.start_time)} – {fmtTime(r.end_time)}</span>
                 </div>
@@ -137,9 +164,10 @@ export default function SchedulePage() {
                 <span className={`shrink-0 rounded-full border px-2.5 py-0.5 text-[10.5px] font-bold ${STATE_STYLE[r.attendance]}`}>
                   {STATE_LABEL[r.attendance]}
                 </span>
-                {/* Actions on player/manual rows only — never blocks. */}
+                {/* Attendance on player/manual/academy rows only — never blocks.
+                    stopPropagation: a حضر tap must never open the sheet. */}
                 {!isBlock && (
-                  <div className="flex items-center gap-1.5 shrink-0">
+                  <div className="flex items-center gap-1.5 shrink-0" onClick={(e) => e.stopPropagation()}>
                     <button
                       type="button"
                       onClick={() => setAttendance(r, 'checked_in')}
@@ -154,23 +182,60 @@ export default function SchedulePage() {
                     >
                       <X size={12} aria-hidden /> لم يحضر
                     </button>
-                    {/* Divider then the one-click cash-settlement toggle. Emerald =
-                        paid, amber = unpaid (consistent with the calendar view). */}
-                    <span className="w-px h-5 bg-white/10 mx-0.5" aria-hidden />
-                    <button
-                      type="button"
-                      onClick={() => togglePayment(r)}
-                      aria-pressed={r.payment_status === 'paid_cash'}
-                      className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-bold border transition-colors ${r.payment_status === 'paid_cash' ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300' : 'border-amber-500/25 text-amber-300/80 hover:text-amber-300 hover:border-amber-500/40'}`}
-                    >
-                      <Banknote size={12} aria-hidden /> {r.payment_status === 'paid_cash' ? 'مدفوع' : 'تحصيل'}
-                    </button>
                   </div>
                 )}
+                {/* Payment state at a glance (untracked = deliberately silent) +
+                    the tap affordance. Replaces the legacy مدفوع toggle. */}
+                {!isBlock && (
+                  <div className="flex items-center gap-2 shrink-0 ms-auto sm:ms-0">
+                    {badge && (
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border ${badge.cls}`}>
+                        {badge.label}
+                      </span>
+                    )}
+                    {r.payment_display === 'partial' && r.remaining != null && (
+                      <span className="text-[11px] font-bold text-red-400 tabular-nums whitespace-nowrap">
+                        باقي {jod3(r.remaining)}
+                      </span>
+                    )}
+                    <ChevronLeft size={15} className="text-white/25" aria-hidden />
+                  </div>
+                )}
+              </>
+            );
+
+            return tappable ? (
+              <button
+                key={r.id}
+                type="button"
+                onClick={() => setSheetId(r.id)}
+                aria-label={`تفاصيل حجز ${r.attendee_name || ''}`}
+                className={`flex flex-wrap items-center gap-x-4 gap-y-2 text-start w-full min-h-[48px] rounded-xl bg-[#141715] border border-white/[0.08] px-4 py-3 transition-colors hover:border-white/[0.16] active:bg-white/[0.04] ${ended ? 'opacity-60' : ''}`}
+              >
+                {rowInner}
+              </button>
+            ) : (
+              <div
+                key={r.id}
+                className="flex flex-wrap items-center gap-x-4 gap-y-2 min-h-[48px] rounded-xl bg-[#141715] border border-white/[0.08] px-4 py-3"
+              >
+                {rowInner}
               </div>
             );
           })}
         </div>
+      )}
+
+      {sheetRow && (
+        <BookingSheet
+          booking={sheetRow as SheetBooking}
+          title={sheetRow.attendee_name}
+          pricePerHour={sheetRow.price_per_hour}
+          canExtend={canManage}
+          canEditTotal={canManage}
+          onClose={() => setSheetId(null)}
+          onRefetch={() => load(true)}
+        />
       )}
     </div>
   );
