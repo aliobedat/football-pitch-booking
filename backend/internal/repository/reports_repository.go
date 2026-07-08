@@ -9,7 +9,9 @@ package repository
 // tiles for the same window):
 //   - gross    = SUM(total_price) WHERE status='confirmed' (source-agnostic;
 //     blocks carry total_price 0)
-//   - collected = same, FILTER (payment_status='paid_cash')
+//   - collected = SUM(collectedExpr) over the same set (WO-REPORTS-COLLECTED /
+//     PR-C amended semantics, ratified globally for financial READ surfaces —
+//     analytics/net-profit use the identical expression to preserve parity)
 //   - booking_count excludes source='block'
 //   - attribution strictly by the booking START: lower(booking_range) inside
 //     the half-open UTC window [from, to) — never && (no double attribution)
@@ -32,6 +34,16 @@ import (
 
 	"github.com/ali/football-pitch-api/internal/auth"
 )
+
+// collectedExpr is THE ratified collected-cash expression (WO-REPORTS-COLLECTED
+// / PR-C), shared by every financial read surface (reports, analytics KPIs,
+// OwnerTimeSeries → net profit) so dashboard parity holds by construction:
+//   - tracked   (amount_paid IS NOT NULL)      → amount_paid (even 0; even when
+//     the legacy payment_status still says paid_cash — tracking wins)
+//   - untracked + payment_status = 'paid_cash' → total_price (legacy fully-settled)
+//   - otherwise                                → 0
+// Requires the bookings alias to be `b`.
+const collectedExpr = `COALESCE(b.amount_paid, CASE WHEN b.payment_status = 'paid_cash' THEN b.total_price ELSE 0 END)`
 
 // FinancialReportSummary is the statement's headline roll-up.
 type FinancialReportSummary struct {
@@ -94,6 +106,9 @@ type ReportBookingRow struct {
 	CustomerPhone string    `json:"customer_phone"`
 	TotalPrice    float64   `json:"total_price"`
 	PaymentStatus string    `json:"payment_status"`
+	// PR-C additive money state per statement line (collectedExpr semantics).
+	CollectedAmount float64 `json:"collected_amount"`
+	RemainingAmount float64 `json:"remaining_amount"`
 }
 
 // BookingsReport is the repository payload for the bookings statement.
@@ -181,13 +196,12 @@ func (r *reportsRepo) OwnerFinancialReport(ctx context.Context, actor auth.Actor
 		SELECT
 			COUNT(*) FILTER (WHERE b.status = 'confirmed' AND b.source <> 'block'),
 			COALESCE(SUM(b.total_price) FILTER (WHERE b.status = 'confirmed'), 0)::float8,
-			COALESCE(SUM(b.total_price) FILTER (
-				WHERE b.status = 'confirmed' AND b.payment_status = 'paid_cash'), 0)::float8,
+			COALESCE(SUM(%s) FILTER (WHERE b.status = 'confirmed'), 0)::float8,
 			COUNT(*) FILTER (WHERE b.status = 'cancelled' AND b.source <> 'block')
 		FROM bookings b
 		JOIN pitches p ON p.id = b.pitch_id
 		WHERE %s AND %s AND %s
-	`, ownerClause, pitchClause, window), args...).Scan(
+	`, collectedExpr, ownerClause, pitchClause, window), args...).Scan(
 		&rep.Summary.BookingCount, &rep.Summary.GrossRevenue,
 		&rep.Summary.Collected, &rep.Summary.CancelledCount)
 	if err != nil {
@@ -204,13 +218,13 @@ func (r *reportsRepo) OwnerFinancialReport(ctx context.Context, actor auth.Actor
 			to_char(date_trunc('day', lower(b.booking_range) AT TIME ZONE 'Asia/Amman'), 'YYYY-MM-DD') AS day,
 			COUNT(*) FILTER (WHERE b.source <> 'block'),
 			COALESCE(SUM(b.total_price), 0)::float8,
-			COALESCE(SUM(b.total_price) FILTER (WHERE b.payment_status = 'paid_cash'), 0)::float8
+			COALESCE(SUM(%s), 0)::float8
 		FROM bookings b
 		JOIN pitches p ON p.id = b.pitch_id
 		WHERE b.status = 'confirmed' AND %s AND %s AND %s
 		GROUP BY 1
 		ORDER BY 1 ASC
-	`, ownerClause, pitchClause, window), args...)
+	`, collectedExpr, ownerClause, pitchClause, window), args...)
 	if err != nil {
 		return FinancialReport{}, fmt.Errorf("OwnerFinancialReport: by_day query: %w", err)
 	}
@@ -234,13 +248,13 @@ func (r *reportsRepo) OwnerFinancialReport(ctx context.Context, actor auth.Actor
 			SELECT p.id, p.name,
 				COUNT(*) FILTER (WHERE b.source <> 'block'),
 				COALESCE(SUM(b.total_price), 0)::float8,
-				COALESCE(SUM(b.total_price) FILTER (WHERE b.payment_status = 'paid_cash'), 0)::float8
+				COALESCE(SUM(%s), 0)::float8
 			FROM bookings b
 			JOIN pitches p ON p.id = b.pitch_id
 			WHERE b.status = 'confirmed' AND %s AND %s
 			GROUP BY p.id, p.name
 			ORDER BY 4 DESC, p.id ASC
-		`, ownerClause, window), args...)
+		`, collectedExpr, ownerClause, window), args...)
 		if err != nil {
 			return FinancialReport{}, fmt.Errorf("OwnerFinancialReport: by_pitch query: %w", err)
 		}
@@ -297,14 +311,15 @@ func (r *reportsRepo) OwnerBookingsReport(ctx context.Context, actor auth.Actor,
 			b.source, b.status, b.attendance,
 			COALESCE(b.guest_name,  b.contact_name,  u.full_name, ''),
 			COALESCE(b.guest_phone, b.contact_phone, u.phone,     ''),
-			b.total_price, b.payment_status
+			b.total_price, b.payment_status,
+			(%[1]s)::float8, (b.total_price - %[1]s)::float8
 		FROM bookings b
 		JOIN pitches p ON p.id = b.pitch_id
 		LEFT JOIN users u ON u.id = b.player_id
-		WHERE b.source <> 'block' AND b.status <> 'cancelled' AND %s AND %s AND %s
+		WHERE b.source <> 'block' AND b.status <> 'cancelled' AND %[2]s AND %[3]s AND %[4]s
 		ORDER BY lower(b.booking_range) ASC, b.id ASC
-		LIMIT $%d
-	`, ownerClause, pitchClause, window, len(limitArgs)), limitArgs...)
+		LIMIT $%[5]d
+	`, collectedExpr, ownerClause, pitchClause, window, len(limitArgs)), limitArgs...)
 	if err != nil {
 		return BookingsReport{}, fmt.Errorf("OwnerBookingsReport: rows query: %w", err)
 	}
@@ -319,6 +334,7 @@ func (r *reportsRepo) OwnerBookingsReport(ctx context.Context, actor auth.Actor,
 			&row.Source, &row.Status, &row.Attendance,
 			&row.CustomerName, &row.CustomerPhone,
 			&row.TotalPrice, &row.PaymentStatus,
+			&row.CollectedAmount, &row.RemainingAmount,
 		); err != nil {
 			return BookingsReport{}, fmt.Errorf("OwnerBookingsReport: rows scan: %w", err)
 		}

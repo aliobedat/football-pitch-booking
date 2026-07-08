@@ -17,3 +17,17 @@ lands. Verify against the live schema before trusting file presence.
   was applied. No migration file touches `capacity`; the live default was set
   out-of-band. Fix candidate: a migration codifying the default, or correcting
   `schema.sql`.
+
+- **2026-07-08 (WO-REPORTS-COLLECTED / PR-C scratch run):** the live `pitches`
+  table has drifted substantially from `database/schema.sql` + all migrations —
+  the file schema is missing columns the app's `data.PitchModel.CreatePitch`
+  depends on, so any DB test that seeds via `CreatePitch` (e.g. the reports
+  repository suite) cannot run against a file-built scratch DB. Missing on the
+  file side: `neighborhood`, `surface` (enum), `format` (enum), `amenities`,
+  `rating`, `pitch_hue`, `is_featured`, `review_count`. Conversely `schema.sql`
+  still declares `surface_type` + `capacity` (NOT NULL), which the live schema
+  no longer matches (surface/format enums replaced surface_type; capacity is
+  defaulted out-of-band — see the prior citation). No migration file reconciles
+  any of this; the live pitches schema was evolved out-of-band. Fix candidate:
+  regenerate `schema.sql` from a live `pg_dump --schema-only`, or add migrations
+  codifying the enum columns + drops. NOT fixed in PR-C (out of scope).

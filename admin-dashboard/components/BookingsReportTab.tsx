@@ -36,6 +36,8 @@ interface ReportBookingRow {
   customer_phone: string;
   total_price: number;
   payment_status: string;
+  collected_amount: number; // PR-C amended collected semantics (server-derived)
+  remaining_amount: number;
 }
 interface BookingsReport {
   from: string;
@@ -152,6 +154,8 @@ export default function BookingsReportTab({
                   <th className="text-right font-semibold pb-3 pe-4">التاريخ</th>
                   <th className="text-right font-semibold pb-3 pe-4">الوقت</th>
                   <th className="text-right font-semibold pb-3 pe-4">المبلغ (د.أ)</th>
+                  <th className="text-right font-semibold pb-3 pe-4">المحصّل (د.أ)</th>
+                  <th className="text-right font-semibold pb-3 pe-4">المتبقي (د.أ)</th>
                   <th className="text-right font-semibold pb-3 pe-4">الحضور</th>
                   <th className="text-right font-semibold pb-3">الدفع</th>
                 </tr>
@@ -187,6 +191,8 @@ export default function BookingsReportTab({
                       {formatTime(row.end_time)}
                     </td>
                     <td className="py-3 pe-4 tabular-nums whitespace-nowrap">{jod3(row.total_price)}</td>
+                    <td className="py-3 pe-4 tabular-nums whitespace-nowrap text-emerald-300">{jod3(row.collected_amount)}</td>
+                    <td className={`py-3 pe-4 tabular-nums whitespace-nowrap ${row.remaining_amount > 0 ? 'text-red-400' : 'text-white/35'}`}>{jod3(row.remaining_amount)}</td>
                     <td className="py-3 pe-4"><AttendancePill attendance={row.attendance} /></td>
                     <td className="py-3"><PaymentStatusPill status={row.payment_status} /></td>
                   </tr>
