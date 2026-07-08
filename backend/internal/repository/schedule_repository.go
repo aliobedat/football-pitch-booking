@@ -54,6 +54,9 @@ type ScheduleRow struct {
 	PaymentDisplay string   `json:"payment_display"` // derived: untracked|unpaid|partial|paid
 	Remaining      *float64 `json:"remaining"`       // derived; null when untracked
 	PricePerHour   int      `json:"price_per_hour"`  // whole-JOD hourly rate of the row's pitch
+
+	// WO-SERIES-CANCEL: recurrence grouping handle (null for a one-off). Additive.
+	RecurrenceGroupID *string `json:"recurrence_group_id"`
 }
 
 // ScheduleRepository reads the daily schedule and writes attendance.
@@ -133,7 +136,8 @@ func (r *scheduleRepo) DailySchedule(ctx context.Context, actor auth.Actor, boun
 		       lower(b.booking_range), upper(b.booking_range),
 		       b.source, b.status, b.attendance, b.payment_status,
 		       %s,
-		       b.total_price::float8, b.amount_paid::float8, p.price_per_hour
+		       b.total_price::float8, b.amount_paid::float8, p.price_per_hour,
+		       b.recurrence_group_id
 		FROM bookings b
 		JOIN pitches p ON p.id = b.pitch_id
 		LEFT JOIN users u ON u.id = b.player_id
@@ -158,7 +162,7 @@ func (r *scheduleRepo) DailySchedule(ctx context.Context, actor auth.Actor, boun
 		var s ScheduleRow
 		if err := rows.Scan(&s.ID, &s.PitchID, &s.PitchName, &s.StartTime, &s.EndTime,
 			&s.Source, &s.Status, &s.Attendance, &s.PaymentStatus, &s.AttendeeName,
-			&s.TotalPrice, &s.AmountPaid, &s.PricePerHour); err != nil {
+			&s.TotalPrice, &s.AmountPaid, &s.PricePerHour, &s.RecurrenceGroupID); err != nil {
 			return nil, fmt.Errorf("DailySchedule: scan: %w", err)
 		}
 		// Same 3-dp normalisation + derivation as the booking-sheet endpoints, so
