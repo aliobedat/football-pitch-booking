@@ -17,7 +17,7 @@
 
 import { useMemo, useState } from 'react';
 import {
-  X, Loader2, AlertTriangle, BanknoteArrowUp, Pencil, Check, Clock, Plus,
+  X, Loader2, AlertTriangle, BanknoteArrowUp, Pencil, Check, Clock, Plus, Repeat, Trash2,
 } from 'lucide-react';
 import api from '@/lib/api';
 import { formatDate, formatTime, formatCurrency } from '@/lib/format';
@@ -34,6 +34,7 @@ export interface SheetBooking {
   amount_paid: number | null;
   payment_display: 'untracked' | 'unpaid' | 'partial' | 'paid';
   remaining: number | null;
+  recurrence_group_id: string | null; // WO-SERIES-CANCEL: series handle (null = one-off)
 }
 
 // Strict 3-dp JOD (fils) — mirrors the reports `jod3` convention; lib/format
@@ -81,16 +82,25 @@ export default function BookingSheet({
   pricePerHour,
   canExtend,
   canEditTotal,
+  canCancel = false,
+  pitchId,
   onClose,
   onRefetch,
+  onCancelled,
 }: {
   booking: SheetBooking;
   title: string;
   pricePerHour: number;
   canExtend: boolean;
   canEditTotal: boolean;
+  // WO-SERIES-CANCEL: cancel UI renders ONLY when canCancel (Day View true,
+  // schedule false — false means no cancel UI at all, not a disabled control).
+  // pitchId is required for the group endpoints and only used when canCancel.
+  canCancel?: boolean;
+  pitchId?: number;
   onClose: () => void;
   onRefetch: () => Promise<void>;
+  onCancelled?: () => void; // fired after a successful cancel (parent shows a toast)
 }) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<ErrorState>(null);
@@ -100,6 +110,16 @@ export default function BookingSheet({
   const [editingTotal, setEditingTotal] = useState(false);
   const [totalInput, setTotalInput] = useState<string>(String(booking.total_price));
   const [extendConfirm, setExtendConfirm] = useState<30 | 60 | null>(null);
+
+  // ── Cancel (WO-SERIES-CANCEL) ──────────────────────────────────────────────
+  // stage: null = closed · 'choose' = series two-option chooser · 'single' =
+  // one-occurrence confirm · 'series' = cancel-all-upcoming confirm.
+  const [cancelStage, setCancelStage] = useState<null | 'choose' | 'single' | 'series'>(null);
+  const [upcoming, setUpcoming] = useState<{ count: number; tracked: boolean } | null>(null);
+  const [loadingUpcoming, setLoadingUpcoming] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+
+  const isSeries = booking.recurrence_group_id != null;
 
   const ended = useMemo(() => new Date(booking.end_time).getTime() < Date.now(), [booking.end_time]);
   const badge = paymentDisplayBadge(booking.payment_display);
@@ -140,6 +160,73 @@ export default function BookingSheet({
       await afterSuccess();
     } catch (err) {
       mapError(err, 'extend');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Open the danger zone: one-off → straight to the single confirm; a series →
+  // the two-option chooser first.
+  const openCancel = () => {
+    setCancelError(null);
+    setUpcoming(null);
+    setCancelStage(isSeries ? 'choose' : 'single');
+  };
+
+  // «إلغاء كل المواعيد القادمة» — lazy-fetch the count/tracked-money preview, then
+  // show the series confirm. A 404 is treated as an empty group ({0,false}).
+  const loadUpcomingThenConfirm = async () => {
+    if (pitchId == null || booking.recurrence_group_id == null) return;
+    setLoadingUpcoming(true);
+    setCancelError(null);
+    try {
+      const { data } = await api.get(
+        `/pitches/${pitchId}/bookings/group/${booking.recurrence_group_id}/upcoming`,
+      );
+      setUpcoming({ count: data.upcoming_count ?? 0, tracked: !!data.has_tracked_money });
+      setCancelStage('series');
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        setUpcoming({ count: 0, tracked: false });
+        setCancelStage('series');
+      } else {
+        setCancelError(GENERIC_ERROR);
+      }
+    } finally {
+      setLoadingUpcoming(false);
+    }
+  };
+
+  // On a successful cancel: refetch (the slot frees), notify the parent (toast),
+  // then close. Day View also auto-closes when the booking vanishes post-refetch.
+  const afterCancel = async () => {
+    await onRefetch();
+    onCancelled?.();
+    onClose();
+  };
+
+  const cancelSingle = async () => {
+    setSubmitting(true);
+    setCancelError(null);
+    try {
+      await api.patch(`/bookings/${booking.id}/cancel`);
+      await afterCancel();
+    } catch (err: any) {
+      setCancelError(copyFor(err?.response?.data?.error));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const cancelSeries = async () => {
+    if (pitchId == null || booking.recurrence_group_id == null) return;
+    setSubmitting(true);
+    setCancelError(null);
+    try {
+      await api.delete(`/pitches/${pitchId}/bookings/group/${booking.recurrence_group_id}`);
+      await afterCancel();
+    } catch (err: any) {
+      setCancelError(copyFor(err?.response?.data?.error));
     } finally {
       setSubmitting(false);
     }
@@ -192,6 +279,11 @@ export default function BookingSheet({
             <p className="text-[12px] text-white/40 mt-1" dir="rtl">
               {dateLabel}، <span dir="ltr" className="font-mono tabular-nums">{hm(booking.start_time)}–{hm(booking.end_time)}</span>
             </p>
+            {isSeries && (
+              <p className="mt-1 inline-flex items-center gap-1 text-[11px] font-semibold text-sky-300/80">
+                <Repeat size={11} aria-hidden /> يتكرر أسبوعيًا
+              </p>
+            )}
           </div>
           <button type="button" onClick={onClose} aria-label="إغلاق" className="text-white/40 hover:text-white/80 shrink-0">
             <X size={18} aria-hidden />
@@ -365,7 +457,156 @@ export default function BookingSheet({
             )}
           </div>
         )}
+
+        {/* ── Danger zone (WO-SERIES-CANCEL) ── separated from payment/extend, at
+            the very bottom. Renders ONLY when canCancel (Day View), never disabled. */}
+        {canCancel && (
+          <div className="mt-5 pt-4 border-t border-white/[0.08]">
+            <button
+              type="button"
+              onClick={openCancel}
+              disabled={submitting}
+              className="w-full min-h-[48px] inline-flex items-center justify-center gap-2 rounded-xl border border-red-500/25 bg-transparent text-[13px] font-bold text-red-400 hover:bg-red-500/[0.08] hover:border-red-500/40 disabled:opacity-50 disabled:cursor-not-allowed transition-all active:scale-[0.99]"
+            >
+              <Trash2 size={15} aria-hidden />
+              إلغاء الحجز
+            </button>
+          </div>
+        )}
       </div>
+
+      {/* ── Cancel dialogs ── overlay above the sheet panel. */}
+      {cancelStage && (
+        <div className="absolute inset-0 z-10 flex items-center justify-center p-4" dir="rtl">
+          <div
+            className="absolute inset-0 bg-black/60"
+            onClick={() => { if (!submitting) setCancelStage(null); }}
+            aria-hidden
+          />
+          <div role="dialog" aria-modal="true" className="relative w-full max-w-sm rounded-2xl bg-[#141715] border border-white/[0.1] shadow-2xl p-6">
+            {/* Series two-option chooser */}
+            {cancelStage === 'choose' && (
+              <>
+                <h3 className="text-[15px] font-bold text-[#f0efe8] mb-1">إلغاء الحجز المتكرر</h3>
+                <p className="text-[12.5px] text-white/45 mb-4">{title || 'حجز'}</p>
+                <div className="flex flex-col gap-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setCancelStage('single')}
+                    disabled={submitting || loadingUpcoming}
+                    className="w-full min-h-[48px] inline-flex items-center justify-center gap-2 rounded-xl border border-white/[0.12] bg-white/[0.03] text-[12.5px] font-bold text-white/80 hover:text-white hover:border-white/25 disabled:opacity-50 transition-all"
+                  >
+                    <Trash2 size={14} aria-hidden /> إلغاء هذا الموعد فقط
+                  </button>
+                  <button
+                    type="button"
+                    onClick={loadUpcomingThenConfirm}
+                    disabled={submitting || loadingUpcoming}
+                    className="w-full min-h-[48px] inline-flex items-center justify-center gap-2 rounded-xl border border-red-500/25 bg-transparent text-[12.5px] font-bold text-red-400 hover:bg-red-500/[0.08] hover:border-red-500/40 disabled:opacity-50 transition-all"
+                  >
+                    {loadingUpcoming ? <Loader2 size={14} className="animate-spin" aria-hidden /> : <Repeat size={14} aria-hidden />}
+                    إلغاء كل المواعيد القادمة
+                  </button>
+                </div>
+                {cancelError && (
+                  <div className="flex items-center gap-2 mt-3 px-3 py-2 rounded-lg bg-red-500/[0.07] border border-red-500/20 text-[12px] text-red-300">
+                    <AlertTriangle size={13} aria-hidden className="shrink-0" /> {cancelError}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setCancelStage(null)}
+                  disabled={submitting || loadingUpcoming}
+                  className="w-full mt-2.5 min-h-[44px] rounded-xl text-[12px] font-semibold text-white/50 hover:text-white/80 border border-white/[0.07] hover:border-white/[0.14] disabled:opacity-50 transition-all"
+                >
+                  تراجع
+                </button>
+              </>
+            )}
+
+            {/* Single-occurrence confirm */}
+            {cancelStage === 'single' && (
+              <>
+                <h3 className="text-[15px] font-bold text-[#f0efe8] mb-2">إلغاء حجز {title || 'الضيف'}؟</h3>
+                {booking.amount_paid !== null && (
+                  <div className="flex items-center gap-2 mb-3 px-3 py-2 rounded-lg bg-amber-500/[0.08] border border-amber-500/25 text-[12px] text-amber-300">
+                    <AlertTriangle size={13} aria-hidden className="shrink-0" /> هذا الحجز عليه مبلغ مدفوع مسجّل
+                  </div>
+                )}
+                {cancelError && (
+                  <div className="flex items-center gap-2 mb-3 px-3 py-2 rounded-lg bg-red-500/[0.07] border border-red-500/20 text-[12px] text-red-300">
+                    <AlertTriangle size={13} aria-hidden className="shrink-0" /> {cancelError}
+                  </div>
+                )}
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setCancelStage(null)}
+                    disabled={submitting}
+                    className="flex-1 min-h-[48px] rounded-xl text-[12.5px] font-bold text-[#08130d] bg-emerald-500 hover:bg-emerald-400 disabled:opacity-60 transition-all"
+                  >
+                    تراجع
+                  </button>
+                  <button
+                    type="button"
+                    onClick={cancelSingle}
+                    disabled={submitting}
+                    className="flex-1 min-h-[48px] inline-flex items-center justify-center gap-2 rounded-xl border border-red-500/30 text-[12.5px] font-bold text-red-400 hover:bg-red-500/[0.08] disabled:opacity-50 transition-all"
+                  >
+                    {submitting ? <Loader2 size={14} className="animate-spin" aria-hidden /> : <Trash2 size={14} aria-hidden />}
+                    إلغاء الحجز
+                  </button>
+                </div>
+              </>
+            )}
+
+            {/* Series cancel-all confirm */}
+            {cancelStage === 'series' && upcoming && (
+              <>
+                <h3 className="text-[15px] font-bold text-[#f0efe8] mb-2">إلغاء المواعيد القادمة</h3>
+                {upcoming.count === 0 ? (
+                  <p className="text-[12.5px] text-white/55 leading-relaxed mb-4">
+                    لا توجد مواعيد قادمة لإلغائها لـ {title || 'الضيف'}. الحجوزات السابقة لن تتأثر.
+                  </p>
+                ) : (
+                  <p className="text-[12.5px] text-white/60 leading-relaxed mb-3">
+                    سيتم إلغاء <span className="font-bold text-[#f0efe8]">{upcoming.count}</span> حجوزات قادمة لـ {title || 'الضيف'}. الحجوزات السابقة لن تتأثر.
+                  </p>
+                )}
+                {upcoming.tracked && upcoming.count > 0 && (
+                  <div className="flex items-center gap-2 mb-3 px-3 py-2 rounded-lg bg-amber-500/[0.08] border border-amber-500/25 text-[12px] text-amber-300">
+                    <AlertTriangle size={13} aria-hidden className="shrink-0" /> بعض هذه الحجوزات عليها مبالغ مدفوعة مسجّلة
+                  </div>
+                )}
+                {cancelError && (
+                  <div className="flex items-center gap-2 mb-3 px-3 py-2 rounded-lg bg-red-500/[0.07] border border-red-500/20 text-[12px] text-red-300">
+                    <AlertTriangle size={13} aria-hidden className="shrink-0" /> {cancelError}
+                  </div>
+                )}
+                <div className="flex items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setCancelStage(null)}
+                    disabled={submitting}
+                    className="flex-1 min-h-[48px] rounded-xl text-[12.5px] font-bold text-[#08130d] bg-emerald-500 hover:bg-emerald-400 disabled:opacity-60 transition-all"
+                  >
+                    تراجع
+                  </button>
+                  <button
+                    type="button"
+                    onClick={cancelSeries}
+                    disabled={submitting || upcoming.count === 0}
+                    className="flex-1 min-h-[48px] inline-flex items-center justify-center gap-2 rounded-xl border border-red-500/30 text-[12.5px] font-bold text-red-400 hover:bg-red-500/[0.08] disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                  >
+                    {submitting ? <Loader2 size={14} className="animate-spin" aria-hidden /> : <Trash2 size={14} aria-hidden />}
+                    إلغاء {upcoming.count} حجوزات
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
