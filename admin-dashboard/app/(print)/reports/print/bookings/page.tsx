@@ -32,6 +32,8 @@ interface ReportBookingRow {
   customer_phone: string;
   total_price: number;
   payment_status: string;
+  collected_amount: number; // PR-C amended collected semantics (server-derived)
+  remaining_amount: number;
 }
 interface BookingsReport {
   from: string;
@@ -137,6 +139,8 @@ function BookingsPrintInner() {
                 <th className={TH}>التاريخ</th>
                 <th className={TH}>الوقت</th>
                 <th className={TH}>المبلغ (د.أ)</th>
+                <th className={TH}>المحصّل (د.أ)</th>
+                <th className={TH}>المتبقي (د.أ)</th>
                 <th className={TH}>الحضور</th>
                 <th className={`${TH} pe-0`}>الدفع</th>
               </tr>
@@ -160,6 +164,8 @@ function BookingsPrintInner() {
                     {formatTime(row.start_time)} — {formatTime(row.end_time)}
                   </td>
                   <td className={`${TD} tabular-nums whitespace-nowrap`}>{jod3(row.total_price)}</td>
+                  <td className={`${TD} tabular-nums whitespace-nowrap`}>{jod3(row.collected_amount)}</td>
+                  <td className={`${TD} tabular-nums whitespace-nowrap`}>{jod3(row.remaining_amount)}</td>
                   <td className={`${TD} whitespace-nowrap`}>{ATTENDANCE_TEXT[row.attendance] ?? '—'}</td>
                   <td className={`${TD} pe-0 whitespace-nowrap`}>{paymentPillLabel(row.payment_status)}</td>
                 </tr>

@@ -124,3 +124,121 @@ func TestReports_MoneyExactThroughEndpointJSON(t *testing.T) {
 		t.Errorf("outstanding JSON token = %q, want \"45.5\"", got)
 	}
 }
+
+// TestReports_CollectedAmendedThroughEndpointJSON proves the PR-C collected
+// amendment survives the full handler→SQL→JSON path: a tracked partial payment
+// (amount_paid=12.505 of 20) reports collected 12.505 and each bookings row
+// carries collected_amount/remaining_amount as exact JSON tokens.
+func TestReports_CollectedAmendedThroughEndpointJSON(t *testing.T) {
+	dsn := os.Getenv("PITCH_SCOPING_TEST_DATABASE_URL")
+	if dsn == "" {
+		t.Skip("PITCH_SCOPING_TEST_DATABASE_URL not set; skipping collected amendment endpoint test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		t.Fatalf("ping: %v", err)
+	}
+
+	suffix := time.Now().UnixNano() % 1_000_000
+	var ownerID int64
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO users (full_name, phone, role, opt_in) VALUES ('RPT Amend Owner',$1,'owner',TRUE) RETURNING id
+	`, fmt.Sprintf("+96287%06d", suffix)).Scan(&ownerID); err != nil {
+		pool.Close()
+		t.Fatalf("seed owner: %v", err)
+	}
+	model := &data.PitchModel{DB: pool}
+	p, err := model.CreatePitch(ctx, data.CreatePitchRequest{
+		Name: "RPT Amend Pitch", Neighborhood: "Amman", Surface: "artificial_grass",
+		Format: "خماسي", PricePerHour: 30, OwnerID: int(ownerID),
+	})
+	if err != nil {
+		pool.Close()
+		t.Fatalf("seed pitch: %v", err)
+	}
+	pitchID := int64(p.ID)
+	t.Cleanup(func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer ccancel()
+		_, _ = pool.Exec(cctx, `DELETE FROM bookings WHERE pitch_id = $1`, pitchID)
+		_, _ = pool.Exec(cctx, `DELETE FROM pitch_audit_log WHERE pitch_id = $1`, pitchID)
+		_, _ = pool.Exec(cctx, `DELETE FROM pitches WHERE id = $1`, pitchID)
+		_, _ = pool.Exec(cctx, `DELETE FROM users WHERE id = $1`, ownerID)
+		pool.Close()
+	})
+
+	const civilDay = "2031-07-20"
+	anchor, _ := time.Parse("2006-01-02", civilDay)
+	dayStart, _ := timeutil.AmmanDayBoundsUTC(anchor)
+	// One tracked partial: amount_paid 12.505 of total 20.000.
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO bookings (pitch_id, player_id, booking_range, status, source, total_price, amount_paid, payment_status, guest_name)
+		VALUES ($1, NULL, tstzrange($2::timestamptz, $3::timestamptz, '[)'), 'confirmed', 'manual', 20.000, 12.505, 'unpaid', 'RPT Amend Guest')
+	`, pitchID, dayStart.Add(9*time.Hour), dayStart.Add(10*time.Hour)); err != nil {
+		t.Fatalf("seed tracked booking: %v", err)
+	}
+
+	h := NewReportsHandler(repository.NewReportsRepository(pool))
+	r := newReportsRouter(h, int(ownerID), "owner")
+
+	// Financial summary: collected exactly 12.505, outstanding 7.495.
+	rec := doJSON(t, r, http.MethodGet,
+		fmt.Sprintf("/owner/reports/financial?from=%s&to=%s&pitch_id=%d", civilDay, civilDay, pitchID), nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("financial status = %d (body: %s)", rec.Code, rec.Body.String())
+	}
+	dec := json.NewDecoder(rec.Body)
+	dec.UseNumber()
+	var fbody struct {
+		Data struct {
+			Summary struct {
+				Collected   json.Number `json:"collected"`
+				Outstanding json.Number `json:"outstanding"`
+			} `json:"summary"`
+		} `json:"data"`
+	}
+	if err := dec.Decode(&fbody); err != nil {
+		t.Fatalf("decode financial: %v", err)
+	}
+	if got := fbody.Data.Summary.Collected.String(); got != "12.505" {
+		t.Errorf("collected JSON token = %q, want \"12.505\" (amount_paid, not paid_cash flag)", got)
+	}
+	if got := fbody.Data.Summary.Outstanding.String(); got != "7.495" {
+		t.Errorf("outstanding JSON token = %q, want \"7.495\"", got)
+	}
+
+	// Bookings rows: collected_amount 12.505, remaining_amount 7.495.
+	rec2 := doJSON(t, r, http.MethodGet,
+		fmt.Sprintf("/owner/reports/bookings?from=%s&to=%s&pitch_id=%d", civilDay, civilDay, pitchID), nil)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("bookings status = %d (body: %s)", rec2.Code, rec2.Body.String())
+	}
+	dec2 := json.NewDecoder(rec2.Body)
+	dec2.UseNumber()
+	var bbody struct {
+		Data struct {
+			Rows []struct {
+				CollectedAmount json.Number `json:"collected_amount"`
+				RemainingAmount json.Number `json:"remaining_amount"`
+			} `json:"rows"`
+		} `json:"data"`
+	}
+	if err := dec2.Decode(&bbody); err != nil {
+		t.Fatalf("decode bookings: %v", err)
+	}
+	if len(bbody.Data.Rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(bbody.Data.Rows))
+	}
+	if got := bbody.Data.Rows[0].CollectedAmount.String(); got != "12.505" {
+		t.Errorf("row collected_amount JSON token = %q, want \"12.505\"", got)
+	}
+	if got := bbody.Data.Rows[0].RemainingAmount.String(); got != "7.495" {
+		t.Errorf("row remaining_amount JSON token = %q, want \"7.495\"", got)
+	}
+}

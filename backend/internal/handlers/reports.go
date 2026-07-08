@@ -203,6 +203,8 @@ func (h *ReportsHandler) GetBookingsReport(c *gin.Context) {
 
 	for i := range rep.Rows {
 		rep.Rows[i].TotalPrice = round3(rep.Rows[i].TotalPrice)
+		rep.Rows[i].CollectedAmount = round3(rep.Rows[i].CollectedAmount)
+		rep.Rows[i].RemainingAmount = round3(rep.Rows[i].RemainingAmount)
 	}
 
 	resp := gin.H{

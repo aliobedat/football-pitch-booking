@@ -35,8 +35,10 @@ type KPISummary struct {
 	WeekToDateRevenue   float64 `json:"week_to_date_revenue"`  // EXPECTED: confirmed revenue since the start of the current Amman week
 	UpcomingBookings    int     `json:"upcoming_bookings"`     // confirmed, non-block bookings whose slot is still in the future
 
-	// COLLECTED (WO-F1): cash actually settled (payment_status='paid_cash'). The
-	// gap Expected − Collected is the owner's leakage.
+	// COLLECTED (WO-F1; semantics amended by WO-REPORTS-COLLECTED / PR-C): cash
+	// actually settled per collectedExpr — amount_paid when tracked, else
+	// total_price for legacy paid_cash rows, else 0. The gap Expected − Collected
+	// is the owner's leakage.
 	TodayCollected      float64 `json:"today_collected"`
 	WeekToDateCollected float64 `json:"week_to_date_collected"`
 }
@@ -47,7 +49,7 @@ type KPISummary struct {
 type TimeBucket struct {
 	Bucket    string  `json:"bucket"`    // YYYY-MM-DD (Amman) — start of the day/week/month
 	Revenue   float64 `json:"revenue"`   // EXPECTED: confirmed revenue
-	Collected float64 `json:"collected"` // COLLECTED: paid_cash revenue (WO-F1)
+	Collected float64 `json:"collected"` // COLLECTED per collectedExpr (WO-F1, amended by PR-C)
 	Volume    int     `json:"volume"`
 }
 
@@ -146,16 +148,14 @@ func (r *analyticsRepo) OwnerKPIs(ctx context.Context, actor auth.Actor) (KPISum
 				WHERE lower(b.booking_range) >= $%[3]d AND lower(b.booking_range) < $%[4]d), 0)::float8 AS wtd_revenue,
 			COUNT(*) FILTER (
 				WHERE b.source <> 'block' AND lower(b.booking_range) >= $%[4]d) AS upcoming,
-			COALESCE(SUM(b.total_price) FILTER (
-				WHERE b.payment_status = 'paid_cash'
-				  AND lower(b.booking_range) >= $%[1]d AND lower(b.booking_range) < $%[2]d), 0)::float8 AS today_collected,
-			COALESCE(SUM(b.total_price) FILTER (
-				WHERE b.payment_status = 'paid_cash'
-				  AND lower(b.booking_range) >= $%[3]d AND lower(b.booking_range) < $%[4]d), 0)::float8 AS wtd_collected
+			COALESCE(SUM(%[6]s) FILTER (
+				WHERE lower(b.booking_range) >= $%[1]d AND lower(b.booking_range) < $%[2]d), 0)::float8 AS today_collected,
+			COALESCE(SUM(%[6]s) FILTER (
+				WHERE lower(b.booking_range) >= $%[3]d AND lower(b.booking_range) < $%[4]d), 0)::float8 AS wtd_collected
 		FROM bookings b
 		JOIN pitches p ON p.id = b.pitch_id
 		WHERE b.status = 'confirmed' AND %[5]s
-	`, ts, ts+1, ts+2, ts+3, ownerClause),
+	`, ts, ts+1, ts+2, ts+3, ownerClause, collectedExpr),
 		args...).Scan(&k.TodayRevenue, &k.TodayConfirmedCount, &k.WeekToDateRevenue, &k.UpcomingBookings,
 		&k.TodayCollected, &k.WeekToDateCollected)
 	if err != nil {
@@ -192,7 +192,7 @@ func (r *analyticsRepo) OwnerTimeSeries(ctx context.Context, actor auth.Actor, p
 		SELECT
 			to_char(%s, 'YYYY-MM-DD') AS bucket,
 			COALESCE(SUM(b.total_price), 0)::float8 AS revenue,
-			COALESCE(SUM(b.total_price) FILTER (WHERE b.payment_status = 'paid_cash'), 0)::float8 AS collected,
+			COALESCE(SUM(%s), 0)::float8 AS collected,
 			COUNT(*) FILTER (WHERE b.source <> 'block') AS volume
 		FROM bookings b
 		JOIN pitches p ON p.id = b.pitch_id
@@ -203,7 +203,7 @@ func (r *analyticsRepo) OwnerTimeSeries(ctx context.Context, actor auth.Actor, p
 		  AND lower(b.booking_range) <  $%d
 		GROUP BY 1
 		ORDER BY 1 ASC
-	`, bucketExpr, ownerClause, pitchClause, fromIdx, toIdx), args...)
+	`, bucketExpr, collectedExpr, ownerClause, pitchClause, fromIdx, toIdx), args...)
 	if err != nil {
 		return nil, fmt.Errorf("OwnerTimeSeries: query: %w", err)
 	}
