@@ -52,6 +52,10 @@ type DayViewBookingRef struct {
 	AmountPaid     *float64 `json:"amount_paid"`
 	PaymentDisplay string   `json:"payment_display"` // untracked | unpaid | partial | paid
 	Remaining      *float64 `json:"remaining"`       // null when untracked
+
+	// WO-SERIES-CANCEL: recurrence grouping handle so the sheet can detect a
+	// series (repeat glyph + cancel-all option). Null for a one-off. Additive.
+	RecurrenceGroupID *string `json:"recurrence_group_id"`
 }
 
 // DayViewSlot is one 30-minute cell. `partial` is true when a booked cell is only
@@ -212,7 +216,8 @@ func (r *dayViewRepo) loadOccupancy(ctx context.Context, pitchID int64, fromUTC,
 		SELECT b.id, b.source, b.status, b.attendance, b.payment_status,
 		       lower(b.booking_range), upper(b.booking_range),
 		       b.total_price::float8, b.amount_paid::float8,
-		       %s
+		       %s,
+		       b.recurrence_group_id
 		FROM bookings b
 		LEFT JOIN users u ON u.id = b.player_id
 		WHERE b.pitch_id = $1
@@ -231,7 +236,7 @@ func (r *dayViewRepo) loadOccupancy(ctx context.Context, pitchID int64, fromUTC,
 		if err := rows.Scan(&b.ref.ID, &b.ref.Source, &b.ref.Status, &b.ref.Attendance,
 			&b.ref.PaymentStatus, &b.ref.StartTime, &b.ref.EndTime,
 			&b.totalPrice, &b.ref.AmountPaid,
-			&b.ref.Title); err != nil {
+			&b.ref.Title, &b.ref.RecurrenceGroupID); err != nil {
 			return nil, fmt.Errorf("OwnerDayView: occupancy scan: %w", err)
 		}
 		// Additive money fields (WO-BOOKING-SHEET): expose total + derived display.

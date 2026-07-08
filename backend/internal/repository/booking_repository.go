@@ -163,6 +163,14 @@ type BookingRepository interface {
 	// Owner/admin scoped via the pitch ownership predicate. Returns how many rows
 	// were cancelled (0 when nothing matches — NOT an error/404).
 	CancelFutureGroup(ctx context.Context, params CancelGroupParams) (int64, error)
+
+	// GroupUpcoming previews what a subsequent CancelFutureGroup WOULD cancel: the
+	// count of non-past, non-cancelled children of the group on the pitch, and
+	// whether ANY of them has tracked money. Its predicate is textually identical
+	// to CancelFutureGroup's UPDATE ... WHERE, so the dialog count equals the real
+	// cancel count. Owner/admin scoped identically; unowned pitch → {0,false}
+	// (matches the DELETE's idempotent-empty semantics, no existence leak).
+	GroupUpcoming(ctx context.Context, params CancelGroupParams) (upcomingCount int64, hasTrackedMoney bool, err error)
 }
 
 // CancelGroupParams scopes a bulk future-occurrence cancellation. The audit reason
@@ -1065,6 +1073,60 @@ func (r *bookingRepo) CancelFutureGroup(ctx context.Context, p CancelGroupParams
 		return 0, fmt.Errorf("CancelFutureGroup: commit: %w", err)
 	}
 	return cancelled, nil
+}
+
+// GroupUpcoming is the read-only preview of CancelFutureGroup. The WHERE below is
+// the VERBATIM predicate of CancelFutureGroup's UPDATE (recurrence_group_id +
+// pitch_id + status<>'cancelled' + lower(booking_range)>now() + the same owner
+// EXISTS), so upcoming_count is exactly what a subsequent cancel would remove.
+// bool_or reports whether any of those same rows carries tracked money.
+func (r *bookingRepo) GroupUpcoming(ctx context.Context, p CancelGroupParams) (int64, bool, error) {
+	// BOLA gate: the pitch itself must exist and be in the caller's scope, else
+	// 404 (an unowned/unknown pitch never reveals group state). Owner → owned;
+	// admin → any existing pitch. An unknown GROUP on an OWNED pitch is NOT a 404 —
+	// it falls through to a {0,false} count (the DELETE's idempotent-empty rule).
+	pitchScope := "TRUE"
+	resolveArgs := []any{p.PitchID}
+	if !p.Actor.IsAdmin() {
+		pitchScope = "owner_id = $2"
+		resolveArgs = append(resolveArgs, p.ActorID)
+	}
+	var exists bool
+	if err := r.db.QueryRow(ctx, fmt.Sprintf(
+		`SELECT EXISTS (SELECT 1 FROM pitches WHERE id = $1 AND deleted_at IS NULL AND %s)`, pitchScope),
+		resolveArgs...).Scan(&exists); err != nil {
+		return 0, false, fmt.Errorf("GroupUpcoming: resolve pitch: %w", err)
+	}
+	if !exists {
+		return 0, false, ErrPitchNotFound
+	}
+
+	// Count preview. The WHERE below is the VERBATIM predicate of CancelFutureGroup's
+	// UPDATE (incl. the same owner EXISTS), so upcoming_count == the row count a
+	// subsequent cancel removes. $1 group, $2 pitch, $3 actor — same arg order.
+	ownsPredicate := "TRUE"
+	args := []any{p.GroupID, p.PitchID, p.ActorID}
+	if !p.Actor.IsAdmin() {
+		ownsPredicate = `EXISTS (SELECT 1 FROM pitches pt WHERE pt.id = $2 AND pt.owner_id = $3 AND pt.deleted_at IS NULL)`
+	}
+
+	var (
+		count   int64
+		tracked bool
+	)
+	err := r.db.QueryRow(ctx, fmt.Sprintf(`
+		SELECT count(*), COALESCE(bool_or(amount_paid IS NOT NULL), false)
+		FROM bookings
+		WHERE recurrence_group_id = $1
+		  AND pitch_id = $2
+		  AND status <> 'cancelled'
+		  AND lower(booking_range) > now()
+		  AND %s
+	`, ownsPredicate), args...).Scan(&count, &tracked)
+	if err != nil {
+		return 0, false, fmt.Errorf("GroupUpcoming: %w", err)
+	}
+	return count, tracked, nil
 }
 
 type bookingRepo struct {

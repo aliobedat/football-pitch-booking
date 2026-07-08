@@ -385,6 +385,13 @@ func Register(
 			middleware.RequireRole("owner", "admin"),
 			bookingHandler.CancelGroup,
 		)
+		// Preview what the DELETE above would cancel: upcoming count + tracked-money
+		// flag for the cancel-all confirm dialog (WO-SERIES-CANCEL). Owner/admin,
+		// matching the DELETE; unowned/unknown pitch → 404 (BOLA).
+		protected.GET("/pitches/:id/bookings/group/:groupId/upcoming",
+			middleware.RequireRole("owner", "admin"),
+			bookingHandler.GetGroupUpcoming,
+		)
 
 		// Owner/admin: list all bookings across all users and pitches. Staff are
 		// also permitted but scoped in SQL to their bound pitch(es) (ResolveScope

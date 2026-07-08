@@ -759,6 +759,54 @@ func (h *BookingHandler) CancelGroup(c *gin.Context) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// GET /api/v1/pitches/:id/bookings/group/:groupId/upcoming              ← NEW
+// ─────────────────────────────────────────────────────────────────────────────
+
+// GetGroupUpcoming previews what CancelGroup would cancel: the count of non-past,
+// non-cancelled occurrences of a recurring group on the pitch and whether any of
+// them carries tracked money — for the cancel-all confirm dialog. Owner/admin-
+// scoped identically to the DELETE; an unowned/unknown pitch yields {0,false}
+// (the DELETE's idempotent-empty semantics, no existence leak). Read-only.
+func (h *BookingHandler) GetGroupUpcoming(c *gin.Context) {
+	pitchID, ok := parseIDParam(c, "id")
+	if !ok {
+		return
+	}
+	groupID := strings.TrimSpace(c.Param("groupId"))
+	if _, err := uuid.Parse(groupID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": "invalid_group_id", "message": "معرّف التكرار غير صالح",
+		})
+		return
+	}
+
+	count, tracked, err := h.repo.GroupUpcoming(c.Request.Context(), repository.CancelGroupParams{
+		PitchID: int64(pitchID),
+		GroupID: groupID,
+		Actor:   middleware.GetActor(c),
+		ActorID: int64(middleware.GetUserID(c)),
+	})
+	if err != nil {
+		if errors.Is(err, repository.ErrPitchNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "not_found", "message": "الملعب غير موجود أو لا تملك صلاحية عرضه",
+			})
+			return
+		}
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "internal_error", "message": "تعذّر تحميل تفاصيل السلسلة",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"upcoming_count":    count,
+		"has_tracked_money": tracked,
+	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // DELETE /api/v1/pitches/:id/blocks/:bookingId                          ← NEW
 // ─────────────────────────────────────────────────────────────────────────────
 
