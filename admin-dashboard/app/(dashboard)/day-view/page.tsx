@@ -19,9 +19,9 @@ import { formatDate, formatTime, formatNumber, formatCurrency } from '@/lib/form
 import {
   type CivilDate, ammanCivilDate, ammanInstant, sameCivilDate, addDays, ymd, parseYmd,
 } from '@/lib/amman';
-import PaymentStatusPill from '@/components/PaymentStatusPill';
 import DayViewDatePicker from '@/components/DayViewDatePicker';
 import DayViewManualSheet from '@/components/DayViewManualSheet';
+import DayViewBookingSheet, { type SheetBooking, paymentDisplayBadge } from '@/components/DayViewBookingSheet';
 
 // ── Payload types (mirror the PR-1 DayView JSON) ─────────────────────────────
 type SlotStatus = 'available' | 'booked' | 'blocked' | 'closed';
@@ -31,10 +31,16 @@ interface DVBooking {
   source: 'player' | 'manual' | 'academy' | 'block';
   status: string;
   attendance: string;
-  payment_status: string;
+  payment_status: string; // legacy (unchanged)
   title: string;
   start_time: string;
   end_time: string;
+  // Booking-sheet money fields (PR-A backend; additive). amount_paid/remaining
+  // are nullable (null = untracked); payment_display is server-derived.
+  total_price: number;
+  amount_paid: number | null;
+  payment_display: 'untracked' | 'unpaid' | 'partial' | 'paid';
+  remaining: number | null;
 }
 interface DVSlot {
   start: string; // UTC RFC3339
@@ -59,6 +65,7 @@ interface DayViewData {
   timezone: string;
   slot_minutes: number;
   has_schedule: boolean;
+  price_per_hour: number; // whole-JOD hourly rate (PR-A; for extension projection)
   slots: DVSlot[];
   summary: DVSummary;
 }
@@ -103,11 +110,12 @@ function DayViewInner() {
 
   const [filter, setFilter] = useState<Filter>('all');
 
-  // Date picker + manual booking sheet.
+  // Date picker + manual booking sheet + booking-details sheet (by booking id).
   const [pickerOpen, setPickerOpen] = useState(false);
   const dateBtnRef = useRef<HTMLButtonElement>(null);
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
   const [manual, setManual] = useState<{ prefill: string | null } | null>(null);
+  const [sheetId, setSheetId] = useState<number | null>(null);
 
   const dateStr = useMemo(() => ymd(date), [date]);
   const isToday = sameCivilDate(date, today);
@@ -127,15 +135,21 @@ function DayViewInner() {
   }, []);
 
   // ── Day fetch — memoised on (pitchId, dateStr): exactly one request per change,
-  //    no refetch loop from object identity (dateStr is a string). ──────────────
-  const fetchDay = useCallback(() => {
-    if (pitchId == null) return;
-    setLoading(true);
+  //    no refetch loop from object identity (dateStr is a string). `silent` skips
+  //    the timeline skeleton so a sheet action refetches without flashing the grid.
+  //    Returns the promise so a sheet can await the refetch before clearing its
+  //    in-flight state (ruling 7: authoritative money, never optimistic). A stale
+  //    guard drops an out-of-order response (the reports-race fix pattern). ──────
+  const reqSeq = useRef(0);
+  const fetchDay = useCallback((silent = false): Promise<void> => {
+    if (pitchId == null) return Promise.resolve();
+    const seq = ++reqSeq.current;
+    if (!silent) setLoading(true);
     setError(null);
-    api.get('/owner/day-view', { params: { pitch_id: pitchId, date: dateStr } })
-      .then(res => setData(res.data.data as DayViewData))
-      .catch(() => setError('تعذّر تحميل جدول الملعب. تأكد من صلاحيات الحساب.'))
-      .finally(() => setLoading(false));
+    return api.get('/owner/day-view', { params: { pitch_id: pitchId, date: dateStr } })
+      .then(res => { if (seq === reqSeq.current) setData(res.data.data as DayViewData); })
+      .catch(() => { if (seq === reqSeq.current) setError('تعذّر تحميل جدول الملعب. تأكد من صلاحيات الحساب.'); })
+      .finally(() => { if (!silent && seq === reqSeq.current) setLoading(false); });
   }, [pitchId, dateStr]);
   useEffect(() => { fetchDay(); }, [fetchDay]);
 
@@ -187,6 +201,24 @@ function DayViewInner() {
     () => (data?.slots ?? []).filter(s => s.status === 'available').map(s => ({ start: s.start, end: s.end })),
     [data],
   );
+
+  // The open booking-details sheet's booking, re-derived from the freshest day
+  // payload by id (never held as its own copy — refetch is authoritative).
+  const sheetBooking = useMemo<SheetBooking | null>(() => {
+    if (sheetId == null || !data) return null;
+    for (const s of data.slots) {
+      if (s.booking && s.booking.id === sheetId) return s.booking as SheetBooking;
+    }
+    return null;
+  }, [sheetId, data]);
+
+  // If the open booking vanished after a refetch (cancelled/removed elsewhere),
+  // close the sheet rather than strand it.
+  useEffect(() => {
+    if (sheetId != null && data && !data.slots.some(s => s.booking?.id === sheetId)) {
+      setSheetId(null);
+    }
+  }, [sheetId, data]);
 
   const dateLabel = (isToday ? 'اليوم، ' : '')
     + formatDate(ammanInstant(date, 12).toISOString(), { weekday: 'long', day: 'numeric', month: 'long' });
@@ -296,7 +328,7 @@ function DayViewInner() {
           <span className="text-[12.5px] text-red-400">{error}</span>
           <button
             type="button"
-            onClick={fetchDay}
+            onClick={() => fetchDay()}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-semibold text-white/70 border border-white/[0.1] hover:border-white/25 transition-all"
           >
             <RotateCcw size={13} aria-hidden />
@@ -350,7 +382,12 @@ function DayViewInner() {
             <div className="flex flex-col gap-1.5">
               {rows.map((row, i) => row.kind === 'closed'
                 ? <ClosedRow key={`c-${i}`} start={row.start} end={row.end} />
-                : <SlotRow key={row.slot.start} slot={row.slot} onPick={iso => setManual({ prefill: iso })} />)}
+                : <SlotRow
+                    key={row.slot.start}
+                    slot={row.slot}
+                    onPick={iso => setManual({ prefill: iso })}
+                    onOpen={b => setSheetId(b.id)}
+                  />)}
             </div>
           )}
         </>
@@ -358,7 +395,7 @@ function DayViewInner() {
 
       {/* FAB — add a manual booking. Bottom-left (RTL), above the thumb zone,
           hidden while any sheet is open. */}
-      {data && pitchId != null && !manual && !pickerOpen && (
+      {data && pitchId != null && !manual && !pickerOpen && sheetId == null && (
         <button
           type="button"
           onClick={() => setManual({ prefill: null })}
@@ -391,6 +428,15 @@ function DayViewInner() {
         />
       )}
 
+      {sheetBooking && data && (
+        <DayViewBookingSheet
+          booking={sheetBooking}
+          pricePerHour={data.price_per_hour}
+          onClose={() => setSheetId(null)}
+          onRefetch={() => fetchDay(true)}
+        />
+      )}
+
       <style jsx>{`
         .chip-scroll { scrollbar-width: none; }
         .chip-scroll::-webkit-scrollbar { display: none; }
@@ -401,7 +447,7 @@ function DayViewInner() {
 
 // ── Row renderers ────────────────────────────────────────────────────────────
 
-function SlotRow({ slot, onPick }: { slot: DVSlot; onPick?: (startIso: string) => void }) {
+function SlotRow({ slot, onPick, onOpen }: { slot: DVSlot; onPick?: (startIso: string) => void; onOpen?: (booking: DVBooking) => void }) {
   const range = (
     <span className="font-mono text-[11px] tabular-nums text-white/45 shrink-0" dir="ltr">
       {hm(slot.start)}<span className="mx-1 text-white/20">–</span>{hm(slot.end)}
@@ -440,11 +486,16 @@ function SlotRow({ slot, onPick }: { slot: DVSlot; onPick?: (startIso: string) =
     );
   }
 
-  // booked
+  // booked — tappable (opens the details sheet) for real bookings; blocks never
+  // reach here (they render as 'blocked'). Badge is driven by payment_display:
+  // untracked → no badge (ruling 2), so the board doesn't scream "unpaid".
   const b = slot.booking;
-  const badge = b ? SOURCE_BADGE[b.source] : undefined;
-  return (
-    <div className={`flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-white/[0.09] bg-white/[0.03] ${partialEdge}`}>
+  const srcBadge = b ? SOURCE_BADGE[b.source] : undefined;
+  const payBadge = b ? paymentDisplayBadge(b.payment_display) : null;
+  const tappable = !!b && b.source !== 'block' && !!onOpen;
+
+  const inner = (
+    <>
       <div className="min-w-0 flex items-center gap-2.5">
         {range}
         <div className="min-w-0">
@@ -452,13 +503,35 @@ function SlotRow({ slot, onPick }: { slot: DVSlot; onPick?: (startIso: string) =
         </div>
       </div>
       <div className="flex items-center gap-1.5 shrink-0">
-        {badge && (
-          <span className={`inline-flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-bold border ${badge.cls}`}>
-            {badge.label}
+        {srcBadge && (
+          <span className={`inline-flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-bold border ${srcBadge.cls}`}>
+            {srcBadge.label}
           </span>
         )}
-        {b && b.source !== 'block' && <PaymentStatusPill status={b.payment_status} />}
+        {payBadge && (
+          <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[9px] font-bold border ${payBadge.cls}`}>
+            {payBadge.label}
+          </span>
+        )}
       </div>
+    </>
+  );
+
+  if (tappable) {
+    return (
+      <button
+        type="button"
+        onClick={() => onOpen!(b!)}
+        className={`w-full flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-white/[0.09] bg-white/[0.03] hover:bg-white/[0.055] hover:border-white/20 transition-all active:scale-[0.99] text-start ${partialEdge}`}
+        aria-label={`تفاصيل حجز ${b!.title || ''} ${hm(slot.start)}`}
+      >
+        {inner}
+      </button>
+    );
+  }
+  return (
+    <div className={`flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-white/[0.09] bg-white/[0.03] ${partialEdge}`}>
+      {inner}
     </div>
   );
 }
