@@ -5,10 +5,18 @@
 // backend change. Start times are constrained to the currently-loaded day's
 // AVAILABLE cells (the grid already knows what's taken); duration is 30-min
 // snapped with a 60-min floor mirroring the DB. Mobile: bottom sheet. Desktop:
-// centred modal. repeat_weeks/recurrence is intentionally NOT surfaced here.
+// centred modal.
+//
+// WO-RECURRING-ENTRY: this is now the SINGLE entry point for manual recurring
+// bookings — the weekly-count recurrence sub-form (repeat_weeks +
+// client-generated stable recurrence_group_id) was moved here from BlocksModal.
+// The single-booking path (repeat_weeks == 1) is byte-identical to before:
+// repeat_weeks/recurrence_group_id are sent ONLY for a >1 series. Recurrence is
+// all-or-nothing server-side (a clash on any week creates ZERO rows); the 409's
+// occurrence.week is surfaced as a legible Arabic message.
 
 import { useEffect, useMemo, useState } from 'react';
-import { X, UserPlus, Loader2, AlertTriangle, Clock, Minus, Plus } from 'lucide-react';
+import { X, UserPlus, Loader2, AlertTriangle, Clock, Minus, Plus, Repeat } from 'lucide-react';
 import api from '@/lib/api';
 import { formatDate, formatTime } from '@/lib/format';
 
@@ -72,6 +80,13 @@ export default function DayViewManualSheet({
   const [phoneError, setPhoneError] = useState<string | null>(null);
   const [override, setOverride] = useState(false); // 422 soft-override pending
 
+  // Weekly recurrence (moved verbatim from BlocksModal): 1 = one-off. The group
+  // UUID is generated client-side and kept STABLE across a 409/422 retry so the
+  // owner can fix the clash and resubmit the SAME series (server idempotency
+  // replays it); it is regenerated ONLY after a successful create.
+  const [repeatWeeks, setRepeatWeeks] = useState(1);
+  const [groupId, setGroupId] = useState(() => crypto.randomUUID());
+
   // If a refetch (post-409) drops the selected start, fall back to the first valid one.
   useEffect(() => {
     if (start && !starts.some(s => s.start === start)) setStart(starts[0]?.start ?? '');
@@ -120,14 +135,29 @@ export default function DayViewManualSheet({
       const body: Record<string, unknown> = { start_time: start, end_time: endIso, guest_name: guestName };
       if (p) body.guest_phone = p;
       if (bypass) body.force_bypass_hours = true;
+      // Recurrence keys sent ONLY for a >1 series — the one-off request is
+      // byte-identical to the pre-WO body.
+      if (repeatWeeks > 1) {
+        body.repeat_weeks = repeatWeeks;
+        body.recurrence_group_id = groupId;
+      }
       await api.post(`/pitches/${pitchId}/bookings/manual`, body);
+      // SUCCESS → a fresh series next time (moot on unmount, but keeps the UUID
+      // lifecycle correct if the sheet is ever reused without remount).
+      setGroupId(crypto.randomUUID());
       onBooked(); // success → parent closes + refetches; the new cell IS the confirmation
     } catch (err: any) {
       const status = err?.response?.status;
       const code = err?.response?.data?.error;
+      const week = err?.response?.data?.occurrence?.week;
       if (status === 409) {
-        // The GIST referee: someone booked this slot first. Not an error to hide.
-        setError('تم حجز هذا الوقت للتو');
+        if (repeatWeeks > 1 && typeof week === 'number') {
+          // All-or-nothing: a clash on any week creates ZERO rows. Name the week.
+          setError(`تعذّر إنشاء السلسلة — يوجد تعارض في الأسبوع ${week}. لم يتم إنشاء أي حجز.`);
+        } else {
+          // The GIST referee: someone booked this slot first. Not an error to hide.
+          setError('تم حجز هذا الوقت للتو');
+        }
         onRefetch();
       } else if (status === 422 && code === 'outside_operating_hours' && !bypass) {
         setOverride(true); // mirror the BlocksModal soft-override
@@ -241,6 +271,32 @@ export default function DayViewManualSheet({
               </div>
             </div>
           </div>
+
+          {/* Weekly recurrence — same slot, advanced 7 days per occurrence.
+              Ported verbatim from BlocksModal (settled weekly-count options). */}
+          <div className="flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl bg-sky-500/[0.04] border border-sky-500/15">
+            <label htmlFor="repeat-weeks" className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-sky-200/80">
+              <Repeat size={13} aria-hidden />
+              تكرار أسبوعي
+            </label>
+            <select
+              id="repeat-weeks"
+              value={repeatWeeks}
+              onChange={e => { setRepeatWeeks(Number(e.target.value)); setError(null); }}
+              className="bg-white/[0.05] border border-white/[0.13] rounded-lg px-3 py-1.5 text-[12px] text-[#f0efe8] [color-scheme:dark] focus:outline-none focus:border-sky-500/60"
+            >
+              <option value={1}>بدون تكرار</option>
+              <option value={4}>كل أسبوع × 4</option>
+              <option value={8}>كل أسبوع × 8</option>
+              <option value={12}>كل أسبوع × 12</option>
+              <option value={24}>كل أسبوع × 24</option>
+            </select>
+          </div>
+          {repeatWeeks > 1 && (
+            <p className="text-[10.5px] text-white/35 -mt-1">
+              سيتم إنشاء {repeatWeeks} حجوزات، واحدة كل أسبوع في نفس التوقيت.
+            </p>
+          )}
 
           {/* Live summary */}
           {summary && (
