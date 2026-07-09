@@ -36,6 +36,7 @@ interface Row {
   payment_display: 'untracked' | 'unpaid' | 'partial' | 'paid';
   remaining: number | null;
   price_per_hour: number; // per-row: the schedule spans pitches with different rates
+  recurrence_group_id: string | null; // carried by the payload; satisfies SheetBooking (cancel gated off here)
 }
 
 function fmtTime(iso: string): string {
@@ -233,6 +234,7 @@ export default function SchedulePage() {
           pricePerHour={sheetRow.price_per_hour}
           canExtend={canManage}
           canEditTotal={canManage}
+          canCancel={false}
           onClose={() => setSheetId(null)}
           onRefetch={() => load(true)}
         />

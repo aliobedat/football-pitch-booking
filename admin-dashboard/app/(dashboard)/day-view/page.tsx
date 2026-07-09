@@ -12,7 +12,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import {
-  CalendarClock, ChevronRight, ChevronLeft, RotateCcw, Ban, Plus,
+  CalendarClock, ChevronRight, ChevronLeft, RotateCcw, Ban, Plus, Repeat, Check,
 } from 'lucide-react';
 import api from '@/lib/api';
 import { formatDate, formatTime, formatNumber, formatCurrency } from '@/lib/format';
@@ -41,6 +41,7 @@ interface DVBooking {
   amount_paid: number | null;
   payment_display: 'untracked' | 'unpaid' | 'partial' | 'paid';
   remaining: number | null;
+  recurrence_group_id: string | null; // WO-SERIES-CANCEL (additive; null = one-off)
 }
 interface DVSlot {
   start: string; // UTC RFC3339
@@ -116,6 +117,12 @@ function DayViewInner() {
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
   const [manual, setManual] = useState<{ prefill: string | null } | null>(null);
   const [sheetId, setSheetId] = useState<number | null>(null);
+  // Transient confirmation toast (WO-SERIES-CANCEL: shown after a cancel).
+  const [toast, setToast] = useState<string | null>(null);
+  const showToast = useCallback((msg: string) => {
+    setToast(msg);
+    window.setTimeout(() => setToast(null), 2500);
+  }, []);
 
   const dateStr = useMemo(() => ymd(date), [date]);
   const isToday = sameCivilDate(date, today);
@@ -435,9 +442,24 @@ function DayViewInner() {
           pricePerHour={data.price_per_hour}
           canExtend={true}
           canEditTotal={true}
+          canCancel={true}
+          pitchId={data.pitch_id}
           onClose={() => setSheetId(null)}
           onRefetch={() => fetchDay(true)}
+          onCancelled={() => showToast('تم الإلغاء')}
         />
+      )}
+
+      {/* Confirmation toast (WO-SERIES-CANCEL). */}
+      {toast && (
+        <div
+          role="status"
+          className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[70] inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-[#141715] border border-emerald-500/30 text-[13px] font-bold text-emerald-300 shadow-2xl"
+          dir="rtl"
+        >
+          <Check size={15} aria-hidden />
+          {toast}
+        </div>
       )}
 
       <style jsx>{`
@@ -506,6 +528,9 @@ function SlotRow({ slot, onPick, onOpen }: { slot: DVSlot; onPick?: (startIso: s
         </div>
       </div>
       <div className="flex items-center gap-1.5 shrink-0">
+        {b?.recurrence_group_id && (
+          <Repeat size={11} className="text-sky-400/80 flex-shrink-0" aria-label="حجز متكرر" />
+        )}
         {srcBadge && (
           <span className={`inline-flex items-center px-1.5 py-0.5 rounded-md text-[9px] font-bold border ${srcBadge.cls}`}>
             {srcBadge.label}
