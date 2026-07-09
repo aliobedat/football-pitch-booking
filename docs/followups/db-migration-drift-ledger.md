@@ -31,3 +31,12 @@ lands. Verify against the live schema before trusting file presence.
   any of this; the live pitches schema was evolved out-of-band. Fix candidate:
   regenerate `schema.sql` from a live `pg_dump --schema-only`, or add migrations
   codifying the enum columns + drops. NOT fixed in PR-C (out of scope).
+
+- **2026-07-09 (WO-SERIES-CANCEL incident fix):** the same pitches drift bit
+  test fixtures — `bsEnv.mkPitch` (`booking_sheet_db_test.go`) and the inline
+  `mkPitch` in `schedule_payload_db_test.go` seed pitches via raw INSERTs that
+  omit `neighborhood`/`surface`/`format` (NOT NULL live), so those suites die at
+  fixture setup on a faithful live-schema scratch. `bsEnv.mkPitch` was repaired
+  (defaults added, fixture-only) with the incident fix; the
+  `schedule_payload_db_test.go` fixture is still unrepaired — fix alongside the
+  schema reconciliation.

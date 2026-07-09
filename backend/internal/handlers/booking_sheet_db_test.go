@@ -81,9 +81,12 @@ func (e *bsEnv) mkUser(t *testing.T, role string) int64 {
 
 func (e *bsEnv) mkPitch(t *testing.T, owner int64) int64 {
 	t.Helper()
+	// neighborhood/surface/format are NOT NULL on the live schema (drift ledger);
+	// defaults only — no assertion reads them.
 	var id int64
 	if err := e.pool.QueryRow(context.Background(),
-		`INSERT INTO pitches (owner_id, name, price_per_hour) VALUES ($1,$2,$3) RETURNING id`,
+		`INSERT INTO pitches (owner_id, name, price_per_hour, neighborhood, surface, format)
+		 VALUES ($1,$2,$3,'Amman','artificial_grass','خماسي') RETURNING id`,
 		owner, "P", 25).Scan(&id); err != nil {
 		t.Fatalf("mkPitch: %v", err)
 	}

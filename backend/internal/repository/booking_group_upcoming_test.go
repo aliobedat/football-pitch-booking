@@ -100,33 +100,70 @@ func TestGroupUpcoming_TrackedMoney(t *testing.T) {
 }
 
 // Dialog-honesty proof: the previewed count equals what the DELETE then removes.
+// Role-matrix: exercised as OWNER and as ADMIN (the admin branch builds a
+// different predicate/arg set — the exact path behind the production 500).
 func TestGroupUpcoming_CountEqualsDelete(t *testing.T) {
+	e := newBlockEnv(t)
+
+	cases := []struct {
+		name  string
+		actor auth.Actor
+	}{
+		{"owner", e.ownerActor()},
+		{"admin", auth.Actor{UserID: int(e.otherID), Role: auth.RoleAdmin}},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			group := uuid.NewString()
+			// Distinct windows per role run (one shared pitch → EXCLUDE).
+			base := time.Now().Add(time.Duration(i*200) * time.Hour)
+			e.seedRowFull(t, &group, base.Add(-500*time.Hour), time.Hour, "confirmed", nil) // past
+			e.seedRowFull(t, &group, base.Add(24*time.Hour), time.Hour, "confirmed", nil)
+			e.seedRowFull(t, &group, base.Add(48*time.Hour), time.Hour, "confirmed", nil)
+			e.seedRowFull(t, &group, base.Add(72*time.Hour), time.Hour, "confirmed", nil)
+
+			preview, _, err := e.repo.GroupUpcoming(context.Background(), CancelGroupParams{
+				PitchID: e.pitchID, GroupID: group, Actor: tc.actor, ActorID: int64(tc.actor.UserID),
+			})
+			if err != nil {
+				t.Fatalf("GroupUpcoming (%s): %v", tc.name, err)
+			}
+			cancelled, err := e.repo.CancelFutureGroup(context.Background(), CancelGroupParams{
+				PitchID: e.pitchID, GroupID: group, Actor: tc.actor, ActorID: int64(tc.actor.UserID),
+			})
+			if err != nil {
+				t.Fatalf("CancelFutureGroup (%s): %v", tc.name, err)
+			}
+			if preview != cancelled {
+				t.Fatalf("dialog dishonesty (%s): upcoming_count=%d but cancelled_count=%d", tc.name, preview, cancelled)
+			}
+			if preview != 3 {
+				t.Errorf("(%s) expected 3 upcoming, got %d", tc.name, preview)
+			}
+		})
+	}
+}
+
+// REGRESSION (prod incident 2026-07-09): GroupUpcoming as an ADMIN actor. The
+// shipped PR-1 code always bound 3 parameters while the admin predicate ("TRUE")
+// referenced only $1/$2 → pgx "expected 2 arguments, got 3" → 500. This test
+// FAILS on that code and passes once args are built like the resolve query's.
+func TestGroupUpcoming_AdminActor(t *testing.T) {
 	e := newBlockEnv(t)
 	group := uuid.NewString()
 	now := time.Now()
+	e.seedRowFull(t, &group, now.Add(120*time.Hour), time.Hour, "confirmed", nil)
+	e.seedRowFull(t, &group, now.Add(144*time.Hour), time.Hour, "confirmed", fptr(10))
 
-	e.seedRowFull(t, &group, now.Add(-24*time.Hour), time.Hour, "confirmed", nil) // past
-	e.seedRowFull(t, &group, now.Add(24*time.Hour), time.Hour, "confirmed", nil)
-	e.seedRowFull(t, &group, now.Add(48*time.Hour), time.Hour, "confirmed", nil)
-	e.seedRowFull(t, &group, now.Add(72*time.Hour), time.Hour, "confirmed", nil)
-
-	preview, _, err := e.repo.GroupUpcoming(context.Background(), CancelGroupParams{
-		PitchID: e.pitchID, GroupID: group, Actor: e.ownerActor(), ActorID: e.ownerID,
+	admin := auth.Actor{UserID: int(e.otherID), Role: auth.RoleAdmin}
+	count, tracked, err := e.repo.GroupUpcoming(context.Background(), CancelGroupParams{
+		PitchID: e.pitchID, GroupID: group, Actor: admin, ActorID: e.otherID,
 	})
 	if err != nil {
-		t.Fatalf("GroupUpcoming: %v", err)
+		t.Fatalf("admin GroupUpcoming must not error (prod 500 regression): %v", err)
 	}
-	cancelled, err := e.repo.CancelFutureGroup(context.Background(), CancelGroupParams{
-		PitchID: e.pitchID, GroupID: group, Actor: e.ownerActor(), ActorID: e.ownerID,
-	})
-	if err != nil {
-		t.Fatalf("CancelFutureGroup: %v", err)
-	}
-	if preview != cancelled {
-		t.Fatalf("dialog dishonesty: upcoming_count=%d but cancelled_count=%d", preview, cancelled)
-	}
-	if preview != 3 {
-		t.Errorf("expected 3 upcoming, got %d", preview)
+	if count != 2 || !tracked {
+		t.Errorf("admin GroupUpcoming = (%d,%v), want (2,true)", count, tracked)
 	}
 }
 
@@ -143,12 +180,22 @@ func TestGroupUpcoming_ScopeAndEmpty(t *testing.T) {
 		t.Fatalf("cross-tenant err = %v, want ErrPitchNotFound (404)", err)
 	}
 
-	// Owner, unknown group on their OWN pitch → 0/false, no error (idempotent-empty).
-	count, tracked, err := e.repo.GroupUpcoming(context.Background(), CancelGroupParams{
-		PitchID: e.pitchID, GroupID: uuid.NewString(), Actor: e.ownerActor(), ActorID: e.ownerID,
-	})
-	if err != nil || count != 0 || tracked {
-		t.Fatalf("unknown-group = (%d,%v,%v), want (0,false,nil)", count, tracked, err)
+	// Unknown group on an in-scope pitch → 0/false, no error (idempotent-empty).
+	// Role-matrix: owner AND admin (the admin branch was the prod-500 blind spot).
+	for _, tc := range []struct {
+		name  string
+		actor auth.Actor
+		id    int64
+	}{
+		{"owner", e.ownerActor(), e.ownerID},
+		{"admin", auth.Actor{UserID: int(e.otherID), Role: auth.RoleAdmin}, e.otherID},
+	} {
+		count, tracked, err := e.repo.GroupUpcoming(context.Background(), CancelGroupParams{
+			PitchID: e.pitchID, GroupID: uuid.NewString(), Actor: tc.actor, ActorID: tc.id,
+		})
+		if err != nil || count != 0 || tracked {
+			t.Fatalf("unknown-group (%s) = (%d,%v,%v), want (0,false,nil)", tc.name, count, tracked, err)
+		}
 	}
 }
 
