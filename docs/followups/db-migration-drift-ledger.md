@@ -1,9 +1,25 @@
 # Ledger: schema-file ↔ live-DB drift citations
 
-**Status:** open — no `schema_migrations` table exists; migrations are applied
-to Neon manually, so the repo's SQL files and the live database can disagree.
-Each confirmed drift gets cited here until a proper ledger/migration runner
-lands. Verify against the live schema before trusting file presence.
+**Status: RECONCILED 2026-07-09 (WO-SCHEMA-DRIFT-RECONCILIATION).**
+`database/schema.sql` was regenerated from the live schema
+(`pg_dump --schema-only --no-owner --no-privileges`) and is now the canonical
+scratch/test baseline — every citation below is baked into it. All known
+fixture breakage is repaired (`bsEnv.mkPitch` in PR #40;
+`schedule_payload_db_test.go`'s `mkPitchRate` in this WO).
+
+**Scratch DB recipe (current):** `CREATE DATABASE scratch_<name>` →
+`ALTER DATABASE scratch_<name> SET search_path TO public` → load
+`database/schema.sql` → connect via the **unpooled** Neon host (drop
+`-pooler` from the hostname; the pooler resets session defaults and rejects
+startup options). Do **NOT** replay `backend/migrations/002–032` on such a
+scratch — they are already baked into the regenerated baseline; they remain in
+the repo as history and as the manual-apply path for production.
+
+**Maintenance rule:** no `schema_migrations` table exists; migrations are still
+applied to Neon manually, so after each new production migration, regenerate
+`database/schema.sql` with the command above. New drift citations go below.
+
+## Citations (all reconciled by the 2026-07-09 regeneration)
 
 ## Citations
 
