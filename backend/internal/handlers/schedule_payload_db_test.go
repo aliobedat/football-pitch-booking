@@ -36,8 +36,11 @@ func (e *bsEnv) schedRouter(actorID int64, role string, boundPitch int64) *gin.E
 func (e *bsEnv) mkPitchRate(t *testing.T, owner int64, rate int) int64 {
 	t.Helper()
 	var id int64
+	// neighborhood/surface/format are NOT NULL on the live baseline (drift
+	// ledger); fixture defaults only — no assertion reads them.
 	if err := e.pool.QueryRow(t.Context(),
-		`INSERT INTO pitches (owner_id, name, price_per_hour) VALUES ($1,$2,$3) RETURNING id`,
+		`INSERT INTO pitches (owner_id, name, price_per_hour, neighborhood, surface, format)
+		 VALUES ($1,$2,$3,'Amman','artificial_grass','خماسي') RETURNING id`,
 		owner, fmt.Sprintf("P%d", rate), rate).Scan(&id); err != nil {
 		t.Fatalf("mkPitchRate: %v", err)
 	}
