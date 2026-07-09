@@ -1103,11 +1103,14 @@ func (r *bookingRepo) GroupUpcoming(ctx context.Context, p CancelGroupParams) (i
 
 	// Count preview. The WHERE below is the VERBATIM predicate of CancelFutureGroup's
 	// UPDATE (incl. the same owner EXISTS), so upcoming_count == the row count a
-	// subsequent cancel removes. $1 group, $2 pitch, $3 actor — same arg order.
+	// subsequent cancel removes. ActorID is bound ONLY when the predicate references
+	// $3 (non-admin) — an orphan bind param is a protocol error, the 2026-07-09
+	// prod 500 (mirrors the resolve query's discipline above).
 	ownsPredicate := "TRUE"
-	args := []any{p.GroupID, p.PitchID, p.ActorID}
+	args := []any{p.GroupID, p.PitchID}
 	if !p.Actor.IsAdmin() {
 		ownsPredicate = `EXISTS (SELECT 1 FROM pitches pt WHERE pt.id = $2 AND pt.owner_id = $3 AND pt.deleted_at IS NULL)`
+		args = append(args, p.ActorID)
 	}
 
 	var (
