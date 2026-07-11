@@ -136,6 +136,7 @@ func (h *PitchHandler) CreatePitch(c *gin.Context) {
 	}
 
 	req.OwnerID = middleware.GetUserID(c)
+	req.ActorRole = middleware.GetActor(c).Role // admin: owner derived from venue
 	req.MapsURL = strings.TrimSpace(req.MapsURL)
 
 	// Trim + length-cap the free-text description before it reaches the INSERT.
@@ -177,6 +178,14 @@ func (h *PitchHandler) CreatePitch(c *gin.Context) {
 
 	pitch, err := h.Model.CreatePitch(c.Request.Context(), req)
 	if err != nil {
+		// WO-VENUES: an unknown/foreign/deleted venue_id is a 404, never a 403
+		// (existence not leaked — the pitches convention).
+		if errors.Is(err, data.ErrVenueNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "venue_not_found", "message": "المجمع غير موجود أو لا تملك صلاحية استخدامه",
+			})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_server_error",
 			"message": "حدث خطأ أثناء إنشاء الملعب",
@@ -455,4 +464,45 @@ func (h *PitchHandler) GetOwnerPitches(c *gin.Context) {
 		"data":  pitches,
 		"count": len(pitches),
 	})
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PATCH /api/v1/pitches/:id/venue  (owner/admin — «نقل إلى مجمع», WO-VENUES)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ReassignVenue moves a pitch to another venue owned by the same owner. An
+// unknown/foreign pitch OR venue is a 404 (existence not leaked). If the old
+// venue is emptied it is soft-deleted in the same transaction; the move is
+// audited in pitch_audit_log.
+func (h *PitchHandler) ReassignVenue(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil || id <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_id", "message": "معرّف الملعب غير صالح"})
+		return
+	}
+	var req struct {
+		VenueID int64 `json:"venue_id" binding:"required,gt=0"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": "venue_id مطلوب"})
+		return
+	}
+
+	pitch, err := h.Model.ReassignVenue(c.Request.Context(), middleware.GetActor(c), id, req.VenueID)
+	if err != nil {
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "الملعب غير موجود أو لا تملك صلاحية تعديله"})
+		case errors.Is(err, data.ErrVenueNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "venue_not_found", "message": "المجمع غير موجود أو لا تملك صلاحية استخدامه"})
+		case errors.Is(err, data.ErrVenueOwnerMismatch):
+			// Admin-only surface: visible-but-refused (ownership invariant).
+			c.JSON(http.StatusConflict, gin.H{"error": "venue_owner_mismatch", "message": "المجمع يعود لمالك مختلف عن مالك الملعب — لا يمكن النقل"})
+		default:
+			c.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "تعذّر نقل الملعب"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "تم نقل الملعب إلى المجمع", "data": pitch})
 }

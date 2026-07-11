@@ -1,7 +1,7 @@
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Malaeb — CANONICAL SCHEMA BASELINE (scratch/test DBs)
 --
--- Regenerated 2026-07-09 from the LIVE production schema (schema-only, no
+-- Regenerated 2026-07-10 from the LIVE production schema (schema-only, no
 -- data) via WO-SCHEMA-DRIFT-RECONCILIATION:
 --
 --     pg_dump --schema-only --no-owner --no-privileges "$DATABASE_URL"
@@ -25,7 +25,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict Z4HayVqQ7NBc88J4NJwB9UwVfWeuk3lWAmDVHq6SzUN67OXrfv4lnbiNecZCFjX
+\restrict nVBI0Z38lbS0Xsidk6Kd2AQRJhacqWOmcOdNMgRxppk7Mk5cTrgSfzggXj3qKp3
 
 -- Dumped from database version 17.10 (21f7c76)
 -- Dumped by pg_dump version 18.4
@@ -504,6 +504,8 @@ CREATE TABLE public.pitches (
     image_url text DEFAULT ''::text NOT NULL,
     image_public_id text DEFAULT ''::text NOT NULL,
     maps_url text,
+    venue_id bigint,
+    label text,
     CONSTRAINT pitches_price_per_hour_check CHECK ((price_per_hour > 0))
 );
 
@@ -709,6 +711,49 @@ ALTER SEQUENCE public.users_id_seq OWNED BY public.users.id;
 
 
 --
+-- Name: venues; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.venues (
+    id bigint NOT NULL,
+    owner_id integer NOT NULL,
+    name text NOT NULL,
+    slug text NOT NULL,
+    neighborhood text NOT NULL,
+    maps_url text NOT NULL,
+    latitude double precision DEFAULT 0,
+    longitude double precision DEFAULT 0 NOT NULL,
+    description text,
+    cover_image_url text,
+    cover_image_public_id text,
+    is_active boolean DEFAULT true NOT NULL,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    deleted_at timestamp with time zone,
+    CONSTRAINT venues_slug_format_check CHECK ((slug ~ '^[a-z0-9]+(-[a-z0-9]+)*$'::text))
+);
+
+
+--
+-- Name: venues_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.venues_id_seq
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: venues_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.venues_id_seq OWNED BY public.venues.id;
+
+
+--
 -- Name: waba_daily_sends; Type: TABLE; Schema: public; Owner: -
 --
 
@@ -815,6 +860,13 @@ ALTER TABLE ONLY public.status_transitions ALTER COLUMN id SET DEFAULT nextval('
 --
 
 ALTER TABLE ONLY public.users ALTER COLUMN id SET DEFAULT nextval('public.users_id_seq'::regclass);
+
+
+--
+-- Name: venues id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.venues ALTER COLUMN id SET DEFAULT nextval('public.venues_id_seq'::regclass);
 
 
 --
@@ -1002,6 +1054,14 @@ ALTER TABLE ONLY public.users
 
 
 --
+-- Name: venues venues_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.venues
+    ADD CONSTRAINT venues_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: waba_daily_sends waba_daily_sends_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1157,10 +1217,10 @@ CREATE INDEX idx_pitches_owner ON public.pitches USING btree (owner_id);
 
 
 --
--- Name: idx_pitches_owner_id; Type: INDEX; Schema: public; Owner: -
+-- Name: idx_pitches_venue; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX idx_pitches_owner_id ON public.pitches USING btree (owner_id);
+CREATE INDEX idx_pitches_venue ON public.pitches USING btree (venue_id);
 
 
 --
@@ -1220,6 +1280,13 @@ CREATE UNIQUE INDEX idx_users_phone_unique ON public.users USING btree (phone);
 
 
 --
+-- Name: idx_venues_owner; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX idx_venues_owner ON public.venues USING btree (owner_id) WHERE (deleted_at IS NULL);
+
+
+--
 -- Name: uq_customers_owner_phone; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -1231,6 +1298,13 @@ CREATE UNIQUE INDEX uq_customers_owner_phone ON public.customers USING btree (ow
 --
 
 CREATE UNIQUE INDEX uq_review_player_pitch ON public.reviews USING btree (player_id, pitch_id) WHERE (deleted_at IS NULL);
+
+
+--
+-- Name: venues_slug_lower_unique; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX venues_slug_lower_unique ON public.venues USING btree (lower(slug));
 
 
 --
@@ -1330,6 +1404,14 @@ ALTER TABLE ONLY public.pitches
 
 
 --
+-- Name: pitches pitches_venue_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.pitches
+    ADD CONSTRAINT pitches_venue_id_fkey FOREIGN KEY (venue_id) REFERENCES public.venues(id) ON DELETE RESTRICT;
+
+
+--
 -- Name: refresh_tokens refresh_tokens_user_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -1378,8 +1460,16 @@ ALTER TABLE ONLY public.status_transitions
 
 
 --
+-- Name: venues venues_owner_id_fkey; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.venues
+    ADD CONSTRAINT venues_owner_id_fkey FOREIGN KEY (owner_id) REFERENCES public.users(id) ON DELETE RESTRICT;
+
+
+--
 -- PostgreSQL database dump complete
 --
 
-\unrestrict Z4HayVqQ7NBc88J4NJwB9UwVfWeuk3lWAmDVHq6SzUN67OXrfv4lnbiNecZCFjX
+\unrestrict nVBI0Z38lbS0Xsidk6Kd2AQRJhacqWOmcOdNMgRxppk7Mk5cTrgSfzggXj3qKp3
 

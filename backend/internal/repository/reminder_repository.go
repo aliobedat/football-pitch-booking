@@ -109,7 +109,7 @@ func (r *reminderRepo) ClaimDueReminders(
 		       lower(b.booking_range) AS start_time,
 		       upper(b.booking_range) AS end_time,
 		       u.phone,
-		       COALESCE(p.name, '') AS pitch_name
+		       COALESCE(`+pitchDisplayNameExpr+`, '') AS pitch_name
 		FROM bookings b
 		JOIN pitches p ON p.id = b.pitch_id
 		JOIN users   u ON u.id = b.player_id

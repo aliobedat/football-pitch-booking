@@ -1910,7 +1910,7 @@ func (r *bookingRepo) GetBookingContact(
 	// (contact_phone IS NULL). The users join is LEFT so a snapshot-only row still
 	// resolves. contact_phone is stored as NULL (never '') so COALESCE is clean.
 	err := r.db.QueryRow(ctx, `
-		SELECT COALESCE(b.contact_phone, u.phone, ''), COALESCE(p.name, '')
+		SELECT COALESCE(b.contact_phone, u.phone, ''), COALESCE(`+pitchDisplayNameExpr+`, '')
 		FROM bookings b
 		JOIN pitches p ON p.id = b.pitch_id
 		LEFT JOIN users u ON u.id = b.player_id

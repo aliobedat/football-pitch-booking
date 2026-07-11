@@ -137,10 +137,10 @@ func (r *dayViewRepo) OwnerDayView(ctx context.Context, actor auth.Actor, pitchI
 		pricePerHour int
 	)
 	err := r.db.QueryRow(ctx, fmt.Sprintf(`
-		SELECT name, is_active, price_per_hour
-		FROM pitches
+		SELECT %s, is_active, price_per_hour
+		FROM pitches p
 		WHERE id = $1 AND deleted_at IS NULL AND %s
-	`, ownerClause), args...).Scan(&name, &isActive, &pricePerHour)
+	`, pitchDisplayNameExpr, ownerClause), args...).Scan(&name, &isActive, &pricePerHour)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrPitchNotFound

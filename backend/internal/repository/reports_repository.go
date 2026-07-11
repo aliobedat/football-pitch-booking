@@ -245,16 +245,16 @@ func (r *reportsRepo) OwnerFinancialReport(ctx context.Context, actor auth.Actor
 	// Per-pitch breakdown — only for the unfiltered statement.
 	if pitchID == 0 {
 		prow, err := r.db.Query(ctx, fmt.Sprintf(`
-			SELECT p.id, p.name,
+			SELECT p.id, %s,
 				COUNT(*) FILTER (WHERE b.source <> 'block'),
 				COALESCE(SUM(b.total_price), 0)::float8,
 				COALESCE(SUM(%s), 0)::float8
 			FROM bookings b
 			JOIN pitches p ON p.id = b.pitch_id
 			WHERE b.status = 'confirmed' AND %s AND %s
-			GROUP BY p.id, p.name
+			GROUP BY p.id
 			ORDER BY 4 DESC, p.id ASC
-		`, collectedExpr, ownerClause, window), args...)
+		`, pitchDisplayNameExpr, collectedExpr, ownerClause, window), args...)
 		if err != nil {
 			return FinancialReport{}, fmt.Errorf("OwnerFinancialReport: by_pitch query: %w", err)
 		}
@@ -306,7 +306,7 @@ func (r *reportsRepo) OwnerBookingsReport(ctx context.Context, actor auth.Actor,
 	limitArgs := append(args, maxRows+1)
 	rows, err := r.db.Query(ctx, fmt.Sprintf(`
 		SELECT
-			b.id, b.pitch_id, COALESCE(p.name, ''),
+			b.id, b.pitch_id, COALESCE(%[6]s, ''),
 			lower(b.booking_range), upper(b.booking_range),
 			b.source, b.status, b.attendance,
 			COALESCE(b.guest_name,  b.contact_name,  u.full_name, ''),
@@ -319,7 +319,7 @@ func (r *reportsRepo) OwnerBookingsReport(ctx context.Context, actor auth.Actor,
 		WHERE b.source <> 'block' AND b.status <> 'cancelled' AND %[2]s AND %[3]s AND %[4]s
 		ORDER BY lower(b.booking_range) ASC, b.id ASC
 		LIMIT $%[5]d
-	`, collectedExpr, ownerClause, pitchClause, window, len(limitArgs)), limitArgs...)
+	`, collectedExpr, ownerClause, pitchClause, window, len(limitArgs), pitchDisplayNameExpr), limitArgs...)
 	if err != nil {
 		return BookingsReport{}, fmt.Errorf("OwnerBookingsReport: rows query: %w", err)
 	}
