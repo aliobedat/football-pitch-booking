@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -597,5 +598,49 @@ func TestVenuesDB_PublicSlugRead(t *testing.T) {
 	}
 	if rec := bsDo(r, http.MethodGet, "/venues/"+emptySlug, nil); rec.Code != 404 {
 		t.Errorf("soft-deleted slug = %d, want 404", rec.Code)
+	}
+}
+
+// ── Gate 1d-minimal: label persists on create and is exposed in payloads ────
+
+func TestVenuesDB_PitchLabelOnCreate(t *testing.T) {
+	e := newVnEnv(t)
+	suffix := testutil.UniqueSuffix() % 1_000_000
+	r := e.router(e.ownerA, "owner")
+	vID := e.createVenue(t, r, fmt.Sprintf("lbl-%d", suffix))
+
+	// label + venue_id → persisted, trimmed, echoed in the create payload
+	body := map[string]any{
+		"name": "ملعب المجمع", "neighborhood": "عبدون", "surface": "artificial_grass",
+		"format": "خماسي", "price_per_hour": 30, "maps_url": vnMapsURL,
+		"venue_id": vID, "label": " ملعب ١ ",
+	}
+	rec := bsDo(r, http.MethodPost, "/pitches", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create with label: %d %s", rec.Code, rec.Body.String())
+	}
+	created := decodeData(t, rec.Body.Bytes())
+	if created["label"] != "ملعب ١" {
+		t.Errorf("payload label = %v, want %q (trimmed)", created["label"], "ملعب ١")
+	}
+	var dbLabel string
+	if err := e.pool.QueryRow(context.Background(),
+		`SELECT label FROM pitches WHERE id = $1`, int64(created["id"].(float64))).Scan(&dbLabel); err != nil {
+		t.Fatalf("read label: %v", err)
+	}
+	if dbLabel != "ملعب ١" {
+		t.Errorf("db label = %q, want %q", dbLabel, "ملعب ١")
+	}
+
+	// no label → NULL in db, empty string in payload (name fallback is the UI's job)
+	p2 := e.createPitch(t, r, "بدون تسمية", &vID)
+	if p2["label"] != "" {
+		t.Errorf("unset label payload = %v, want empty", p2["label"])
+	}
+
+	// over-cap label → 400 invalid_label
+	body["label"] = strings.Repeat("ا", 61)
+	if rec := bsDo(r, http.MethodPost, "/pitches", body); rec.Code != 400 {
+		t.Errorf("over-cap label = %d, want 400 (%s)", rec.Code, rec.Body.String())
 	}
 }

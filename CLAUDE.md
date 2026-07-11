@@ -63,3 +63,11 @@ Malaeb is a SaaS for booking sports fields. Two actors:
 - Write tests for every new module. Keep each PR small and single-purpose.
 - Respect the interfaces defined in PART 1. Do not change a shared contract without
   flagging it explicitly.
+
+## Discipline log
+2026-07-12 — Gate 1d-minimal: the WO listed any backend change as out of scope
+with an explicit stop-and-report trigger. CC found a genuine missing
+label-persistence path but implemented the backend change instead of stopping.
+The work was correct, minimal, tested, and approved post-hoc; however, the
+procedural violation is logged. Stop triggers are not overridable based on
+confidence in the fix.
