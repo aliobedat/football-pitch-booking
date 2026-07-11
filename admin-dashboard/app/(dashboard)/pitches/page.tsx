@@ -5,7 +5,7 @@
 // the Cloudinary signed-upload dropzone, and mandatory maps_url validation.
 // Owner sees only their pitches (server-scoped); admin global.
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Plus, Pencil, Trash2, X, ChevronDown, MapPin, Loader2, Ban, Clock, AlertTriangle } from 'lucide-react';
 import api from '@/lib/api';
 import PitchImageDropzone, { type PitchImageValue } from '@/components/PitchImageDropzone';
@@ -25,6 +25,19 @@ interface OwnerPitch {
   image_url: string;
   image_public_id: string;
   maps_url: string;
+  // WO-VENUES Gate 1d-minimal: grouping identity + in-venue label.
+  venue_slug: string;
+  venue_name: string;
+  label: string;
+}
+
+// OwnerVenue — the subset of GET /owner/venues used by the «المجمع» dropdown.
+interface OwnerVenue {
+  id: number;
+  name: string;
+  neighborhood: string;
+  maps_url: string;
+  pitchCount: number;
 }
 
 interface PitchForm {
@@ -75,6 +88,30 @@ function AddPitchForm({ editing, onSuccess, onCancel }: {
   const [error, setError] = useState<string | null>(null);
   const [mapsUrlError, setMapsUrlError] = useState<string | null>(null);
 
+  // «المجمع» (Gate 1d-minimal, create only): '' = «مستقل» (standalone — today's
+  // request, auto-1:1 venue). Selecting a venue sends venue_id, reveals the
+  // optional label field, and prefills neighborhood/maps_url (still editable).
+  const [venues, setVenues] = useState<OwnerVenue[]>([]);
+  const [venueId, setVenueId] = useState<string>('');
+  const [label, setLabel] = useState('');
+
+  useEffect(() => {
+    if (isEdit) return;
+    api.get('/owner/venues')
+      .then((res) => setVenues(res.data.data ?? []))
+      .catch(() => setVenues([])); // dropdown degrades to «مستقل» only
+  }, [isEdit]);
+
+  const onVenueChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const next = e.target.value;
+    setVenueId(next);
+    if (next === '') return; // back to standalone: keep whatever the user typed
+    const v = venues.find((x) => String(x.id) === next);
+    if (!v) return;
+    setMapsUrlError(null);
+    setForm((prev) => ({ ...prev, neighborhood: v.neighborhood, maps_url: v.maps_url }));
+  };
+
   const set = (field: keyof PitchForm) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
       if (field === 'maps_url') setMapsUrlError(null);
@@ -106,7 +143,12 @@ function AddPitchForm({ editing, onSuccess, onCancel }: {
     }
     setSubmit(true);
     try {
-      const payload = { ...form, price_per_hour: Number(form.price_per_hour) };
+      const payload: Record<string, unknown> = { ...form, price_per_hour: Number(form.price_per_hour) };
+      // Standalone («مستقل»): request unchanged — no venue_id/label keys at all.
+      if (!isEdit && venueId !== '') {
+        payload.venue_id = Number(venueId);
+        if (label.trim()) payload.label = label.trim();
+      }
       const res = isEdit ? await api.patch(`/pitches/${editing!.id}`, payload) : await api.post('/pitches', payload);
       onSuccess(res.data.data as OwnerPitch);
     } catch (err: any) {
@@ -129,6 +171,27 @@ function AddPitchForm({ editing, onSuccess, onCancel }: {
         <button type="button" onClick={onCancel} className="text-white/25 hover:text-white/55" aria-label="إغلاق"><X size={16} /></button>
       </div>
       <form onSubmit={handleSubmit} className="p-6">
+        {!isEdit && venues.length > 0 && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 mb-5">
+            <div className="relative">
+              <label className={labelCls}>المجمع</label>
+              <select value={venueId} onChange={onVenueChange} className={`${inputCls} appearance-none pe-9`}>
+                <option value="">مستقل</option>
+                {venues.map((v) => (
+                  <option key={v.id} value={v.id}>{v.name}</option>
+                ))}
+              </select>
+              <ChevronDown size={13} className="absolute end-3 bottom-[13px] text-white/25 pointer-events-none" aria-hidden />
+            </div>
+            {venueId !== '' && (
+              <div>
+                <label className={labelCls}>تسمية الملعب</label>
+                <input type="text" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="ملعب ١" className={inputCls} />
+                <p className="text-[11px] text-white/35 mt-1.5">اسم قصير يميّز الملعب داخل المجمع — اختياري.</p>
+              </div>
+            )}
+          </div>
+        )}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 mb-5">
           <div>
             <label className={labelCls}>اسم الملعب <span className="text-red-400/60">*</span></label>
@@ -256,6 +319,77 @@ export default function PitchesPage() {
     return () => clearTimeout(t);
   }, [toast]);
 
+  // Gate 1d-minimal grouping: a venue header appears ONLY when a venue holds
+  // more than one pitch (collapse rule — a lone pitch stays a flat card with
+  // zero venue vocabulary). Consecutive flat cards share one grid so the
+  // no-multi-venue owner sees today's layout unchanged.
+  const cardBlocks = useMemo(() => {
+    const bySlug = new Map<string, OwnerPitch[]>();
+    for (const p of pitches) {
+      if (!p.venue_slug) continue;
+      bySlug.set(p.venue_slug, [...(bySlug.get(p.venue_slug) ?? []), p]);
+    }
+    const blocks: Array<{ key: string; venueName?: string; items: OwnerPitch[] }> = [];
+    const grouped = new Set<string>();
+    let flat: OwnerPitch[] = [];
+    const flushFlat = () => {
+      if (flat.length) { blocks.push({ key: `flat-${blocks.length}`, items: flat }); flat = []; }
+    };
+    for (const p of pitches) {
+      const group = p.venue_slug ? bySlug.get(p.venue_slug) ?? [] : [];
+      if (group.length > 1) {
+        if (grouped.has(p.venue_slug)) continue;
+        grouped.add(p.venue_slug);
+        flushFlat();
+        blocks.push({ key: `venue-${p.venue_slug}`, venueName: p.venue_name, items: group });
+      } else {
+        flat.push(p);
+      }
+    }
+    flushFlat();
+    return blocks;
+  }, [pitches]);
+
+  // One card, identical markup in both contexts; inside a venue group the
+  // title is the in-venue label (name fallback).
+  const renderCard = (p: OwnerPitch, inGroup: boolean) => (
+    <div key={p.id} className="rounded-2xl bg-[#141715] border border-white/[0.08] overflow-hidden flex flex-col">
+      <div className="h-32 bg-white/[0.03]">
+        {p.image_url
+          // eslint-disable-next-line @next/next/no-img-element
+          ? <img src={p.image_url} alt={p.name} className="w-full h-full object-cover" />
+          : <div className="w-full h-full flex items-center justify-center"><MapPin size={22} className="text-white/15" aria-hidden /></div>}
+      </div>
+      <div className="p-4 flex flex-col gap-2 flex-1">
+        <div className="flex items-center justify-between gap-2">
+          <h3 className="text-[14px] font-bold truncate">{inGroup ? (p.label || p.name) : p.name}</h3>
+          <span className={`text-[10px] font-bold rounded-full border px-2 py-0.5 ${p.isActive ? 'text-emerald-300 border-emerald-500/30 bg-emerald-500/15' : 'text-white/40 border-white/10 bg-white/[0.04]'}`}>
+            {p.isActive ? 'نشط' : 'معطّل'}
+          </span>
+        </div>
+        <p className="text-[11.5px] text-white/45">{p.neighborhood} · {SURFACE_LABEL[p.surface] ?? p.surface} · {p.format}</p>
+        <p className="text-[12px] text-emerald-300/90 font-bold">{p.pricePerHour} د.أ / ساعة</p>
+        <div className="mt-auto pt-2 flex flex-wrap items-center gap-2">
+          <button type="button" onClick={() => { setShowAdd(false); setEditTarget(p); }} className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] font-semibold text-white/60 hover:text-white/90 transition-colors">
+            <Pencil size={12} aria-hidden /> تعديل
+          </button>
+          <button type="button" onClick={() => setHoursTarget(p)} className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] font-semibold text-white/60 hover:text-emerald-300 hover:border-emerald-500/30 transition-colors" title="أوقات العمل">
+            <Clock size={12} aria-hidden /> الأوقات
+          </button>
+          <button type="button" onClick={() => setBlocksTarget(p)} className="inline-flex items-center gap-1 rounded-lg border border-amber-500/20 px-2.5 py-1.5 text-[11px] font-semibold text-amber-400/80 hover:text-amber-300 transition-colors">
+            <Ban size={12} aria-hidden /> الحجب
+          </button>
+          <button type="button" onClick={() => { setDeleteError(null); setDeleteTarget(p); }} className="inline-flex items-center gap-1 rounded-lg border border-red-500/15 px-2.5 py-1.5 text-[11px] font-semibold text-red-400/80 hover:text-red-400 transition-colors">
+            <Trash2 size={12} aria-hidden /> حذف
+          </button>
+          <button type="button" disabled={togglingId === p.id} onClick={() => toggleActive(p)} className="ms-auto text-[11px] font-semibold text-white/45 hover:text-white/75 disabled:opacity-50 transition-colors">
+            {p.isActive ? 'تعطيل' : 'تفعيل'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   return (
     <div className="flex flex-col gap-6">
       <div className="flex items-center justify-between gap-3">
@@ -277,45 +411,22 @@ export default function PitchesPage() {
       ) : pitches.length === 0 ? (
         <div className="rounded-2xl bg-[#141715] border border-white/[0.08] p-12 text-center text-[13px] text-white/35">لا ملاعب بعد.</div>
       ) : (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {pitches.map((p) => (
-            <div key={p.id} className="rounded-2xl bg-[#141715] border border-white/[0.08] overflow-hidden flex flex-col">
-              <div className="h-32 bg-white/[0.03]">
-                {p.image_url
-                  // eslint-disable-next-line @next/next/no-img-element
-                  ? <img src={p.image_url} alt={p.name} className="w-full h-full object-cover" />
-                  : <div className="w-full h-full flex items-center justify-center"><MapPin size={22} className="text-white/15" aria-hidden /></div>}
+        cardBlocks.map((block) => (
+          <div key={block.key} className="flex flex-col gap-3">
+            {block.venueName && (
+              <div className="flex items-center gap-2 px-1">
+                <MapPin size={13} className="text-emerald-400/70 flex-shrink-0" aria-hidden />
+                <h2 className="text-[13.5px] font-bold truncate">{block.venueName}</h2>
+                <span className="text-[10.5px] font-semibold text-white/40 bg-white/[0.05] border border-white/[0.08] rounded-full px-2 py-0.5 flex-shrink-0">
+                  {block.items.length} ملاعب
+                </span>
               </div>
-              <div className="p-4 flex flex-col gap-2 flex-1">
-                <div className="flex items-center justify-between gap-2">
-                  <h3 className="text-[14px] font-bold truncate">{p.name}</h3>
-                  <span className={`text-[10px] font-bold rounded-full border px-2 py-0.5 ${p.isActive ? 'text-emerald-300 border-emerald-500/30 bg-emerald-500/15' : 'text-white/40 border-white/10 bg-white/[0.04]'}`}>
-                    {p.isActive ? 'نشط' : 'معطّل'}
-                  </span>
-                </div>
-                <p className="text-[11.5px] text-white/45">{p.neighborhood} · {SURFACE_LABEL[p.surface] ?? p.surface} · {p.format}</p>
-                <p className="text-[12px] text-emerald-300/90 font-bold">{p.pricePerHour} د.أ / ساعة</p>
-                <div className="mt-auto pt-2 flex flex-wrap items-center gap-2">
-                  <button type="button" onClick={() => { setShowAdd(false); setEditTarget(p); }} className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] font-semibold text-white/60 hover:text-white/90 transition-colors">
-                    <Pencil size={12} aria-hidden /> تعديل
-                  </button>
-                  <button type="button" onClick={() => setHoursTarget(p)} className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] font-semibold text-white/60 hover:text-emerald-300 hover:border-emerald-500/30 transition-colors" title="أوقات العمل">
-                    <Clock size={12} aria-hidden /> الأوقات
-                  </button>
-                  <button type="button" onClick={() => setBlocksTarget(p)} className="inline-flex items-center gap-1 rounded-lg border border-amber-500/20 px-2.5 py-1.5 text-[11px] font-semibold text-amber-400/80 hover:text-amber-300 transition-colors">
-                    <Ban size={12} aria-hidden /> الحجب
-                  </button>
-                  <button type="button" onClick={() => { setDeleteError(null); setDeleteTarget(p); }} className="inline-flex items-center gap-1 rounded-lg border border-red-500/15 px-2.5 py-1.5 text-[11px] font-semibold text-red-400/80 hover:text-red-400 transition-colors">
-                    <Trash2 size={12} aria-hidden /> حذف
-                  </button>
-                  <button type="button" disabled={togglingId === p.id} onClick={() => toggleActive(p)} className="ms-auto text-[11px] font-semibold text-white/45 hover:text-white/75 disabled:opacity-50 transition-colors">
-                    {p.isActive ? 'تعطيل' : 'تفعيل'}
-                  </button>
-                </div>
-              </div>
+            )}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {block.items.map((p) => renderCard(p, !!block.venueName))}
             </div>
-          ))}
-        </div>
+          </div>
+        ))
       )}
 
       {blocksTarget && (

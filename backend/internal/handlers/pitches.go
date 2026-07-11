@@ -22,6 +22,10 @@ import (
 // text is measured fairly). Stored raw; escaped at render time.
 const maxDescriptionLen = 1000
 
+// maxLabelLen caps the pitch's in-venue label («تسمية الملعب», Gate 1d-minimal) —
+// short display text, same rune-counted fairness as the description.
+const maxLabelLen = 60
+
 // normalizeDescription trims surrounding whitespace and enforces the length cap.
 // Returns the cleaned value and false when it exceeds the cap (→ 400).
 func normalizeDescription(raw string) (string, bool) {
@@ -138,6 +142,17 @@ func (h *PitchHandler) CreatePitch(c *gin.Context) {
 	req.OwnerID = middleware.GetUserID(c)
 	req.ActorRole = middleware.GetActor(c).Role // admin: owner derived from venue
 	req.MapsURL = strings.TrimSpace(req.MapsURL)
+
+	// Label (Gate 1d-minimal): trim + rune-cap; empty is fine (falls back to name).
+	req.Label = strings.TrimSpace(req.Label)
+	if utf8.RuneCountInString(req.Label) > maxLabelLen {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":   "invalid_label",
+			"field":   "label",
+			"message": fmt.Sprintf("التسمية تتجاوز الحد الأقصى (%d حرفاً)", maxLabelLen),
+		})
+		return
+	}
 
 	// Trim + length-cap the free-text description before it reaches the INSERT.
 	if cleaned, ok := normalizeDescription(req.Description); ok {

@@ -57,7 +57,8 @@ const pitchSelectCols = `
 	p.description,
 	COALESCE(p.maps_url, ''),
 	COALESCE((SELECT v.slug FROM venues v WHERE v.id = p.venue_id), ''),
-	COALESCE((SELECT v.name FROM venues v WHERE v.id = p.venue_id), '')
+	COALESCE((SELECT v.name FROM venues v WHERE v.id = p.venue_id), ''),
+	COALESCE(p.label, '')
 `
 
 // pitchReturnCols is used in INSERT/UPDATE RETURNING clauses where no
@@ -84,7 +85,8 @@ const pitchReturnCols = `
 	description,
 	COALESCE(maps_url, ''),
 	COALESCE((SELECT v.slug FROM venues v WHERE v.id = pitches.venue_id), ''),
-	COALESCE((SELECT v.name FROM venues v WHERE v.id = pitches.venue_id), '')
+	COALESCE((SELECT v.name FROM venues v WHERE v.id = pitches.venue_id), ''),
+	COALESCE(label, '')
 `
 
 // Pitch is the canonical Go representation of a pitch row.
@@ -115,6 +117,10 @@ type Pitch struct {
 	// → /venues/:slug 301 on VenueSlug.
 	VenueSlug string `json:"venue_slug"`
 	VenueName string `json:"venue_name"`
+
+	// Label (Gate 1d-minimal, additive): the pitch's short name INSIDE its
+	// venue (e.g. «ملعب ١»). Empty when unset — display falls back to Name.
+	Label string `json:"label"`
 
 	// DistanceKm is the great-circle distance (km) from the requesting player to
 	// this pitch, populated ONLY on the nearest-sorted /pitches read when usable
@@ -158,6 +164,10 @@ type CreatePitchRequest struct {
 	// and migration 034's NOT NULL stays satisfiable.
 	VenueID *int64 `json:"venue_id"`
 
+	// Label (Gate 1d-minimal): optional short name of the pitch inside its
+	// venue (e.g. «ملعب ١»). Trimmed by the handler; empty persists as NULL.
+	Label string `json:"label"`
+
 	// ActorRole is set by the handler (never from the request body): "admin"
 	// switches VenueID resolution to derive-owner-from-venue semantics.
 	ActorRole string `json:"-"`
@@ -191,6 +201,7 @@ func scanPitch(row interface {
 		&p.Description,
 		&p.MapsURL,
 		&p.VenueSlug, &p.VenueName,
+		&p.Label,
 	)
 	return p, err
 }
@@ -651,13 +662,13 @@ func (m *PitchModel) CreatePitch(ctx context.Context, req CreatePitchRequest) (*
 		INSERT INTO pitches
 			(owner_id, name, neighborhood, surface, format, price_per_hour,
 			 rating, review_count, is_featured, pitch_hue, amenities,
-			 latitude, longitude, image_url, image_public_id, description, maps_url, venue_id)
-		VALUES ($1, $2, $3, $4, $5, $6, 0, 0, false, $7, '{}', 0, 0, $8, $9, $10, $11, $12)
+			 latitude, longitude, image_url, image_public_id, description, maps_url, venue_id, label)
+		VALUES ($1, $2, $3, $4, $5, $6, 0, 0, false, $7, '{}', 0, 0, $8, $9, $10, $11, $12, NULLIF($13, ''))
 		RETURNING id
 	`,
 		ownerID, req.Name, req.Neighborhood, req.Surface, req.Format,
 		req.PricePerHour, hue, req.ImageURL, req.ImagePublicID, req.Description, req.MapsURL,
-		req.VenueID,
+		req.VenueID, req.Label,
 	).Scan(&pitchID); err != nil {
 		return nil, fmt.Errorf("CreatePitch: insert: %w", err)
 	}
