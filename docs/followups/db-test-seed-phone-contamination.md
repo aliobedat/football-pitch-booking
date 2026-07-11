@@ -1,5 +1,15 @@
 # DB-suite seed contamination: duplicate phone across parallel fixtures
 
+> **STATUS 2026-07-11 — FIXED by WO-TEST-HYGIENE:** all four items below are
+> addressed. Phone/slug suffixes now come from `internal/testutil.UniqueSuffix()`
+> (process-seeded atomic counter — no same-microsecond collisions within a test
+> binary). The reminder fixture seeds `role` + real pitch columns + a venue
+> (`venue_id` is NOT NULL since migration 034). `TestSourceReaders_ReminderSkipsBlock`
+> asserts on its own recipient phone instead of the global claim count.
+> STILL MANUAL: run the repository package with `-timeout 25m` (go test's 10m
+> default silently truncates it); re-baseline the scratch DB from
+> `database/schema.sql` after panic-killed runs to clear orphan rows.
+
 **Observed:** 2026-07-11, WO-VENUES Gate 1b precondition run (full suite on
 scratch `scratch_gate1b`). `TestSourceCheck_PlayerWritePathUnchanged` failed
 seeding its owner user with `duplicate key value violates unique constraint

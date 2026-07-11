@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ali/football-pitch-api/internal/geo"
+	"github.com/ali/football-pitch-api/internal/testutil"
 	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
@@ -47,7 +48,7 @@ func newAvailEnv(t *testing.T) *availEnv {
 		t.Fatalf("ping: %v", err)
 	}
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	var ownerID int
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO users (full_name, phone, role, opt_in) VALUES ('Avail Owner', $1, 'owner', TRUE) RETURNING id

@@ -28,6 +28,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/middleware"
 	"github.com/ali/football-pitch-api/internal/repository"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 func TestStaffLoginRoundTrip(t *testing.T) {
@@ -44,7 +45,7 @@ func TestStaffLoginRoundTrip(t *testing.T) {
 	}
 	defer pool.Close()
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	// Seed an owner + a pitch they own.
 	var ownerID int
 	if err := pool.QueryRow(ctx, `

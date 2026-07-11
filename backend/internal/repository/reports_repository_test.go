@@ -24,6 +24,7 @@ import (
 
 	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/data"
+	"github.com/ali/football-pitch-api/internal/testutil"
 	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
@@ -53,7 +54,7 @@ func newReportsEnv(t *testing.T) *reportsEnv {
 		t.Fatalf("ping: %v", err)
 	}
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	mk := func(name, prefix string) int64 {
 		var id int64
 		if err := pool.QueryRow(ctx, `
@@ -99,9 +100,15 @@ func (e *reportsEnv) newPitch(t *testing.T, name string) int64 {
 	return int64(p.ID)
 }
 
-func (e *reportsEnv) ownerActor() auth.Actor { return auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner} }
-func (e *reportsEnv) otherActor() auth.Actor { return auth.Actor{UserID: int(e.otherID), Role: auth.RoleOwner} }
-func (e *reportsEnv) adminActor() auth.Actor { return auth.Actor{UserID: int(e.otherID), Role: auth.RoleAdmin} }
+func (e *reportsEnv) ownerActor() auth.Actor {
+	return auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner}
+}
+func (e *reportsEnv) otherActor() auth.Actor {
+	return auth.Actor{UserID: int(e.otherID), Role: auth.RoleOwner}
+}
+func (e *reportsEnv) adminActor() auth.Actor {
+	return auth.Actor{UserID: int(e.otherID), Role: auth.RoleAdmin}
+}
 
 // seedRow inserts a manual (walk-in) booking directly so the test controls
 // status/price/attendance/payment precisely. Manual rows satisfy every CHECK

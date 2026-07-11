@@ -22,6 +22,7 @@ import (
 
 	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/repository"
+	"github.com/ali/football-pitch-api/internal/testutil"
 	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
@@ -42,7 +43,7 @@ func TestReports_MoneyExactThroughEndpointJSON(t *testing.T) {
 	}
 
 	// ── fixtures: one owner, one pitch, three confirmed walk-ins ─────────────
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	var ownerID int64
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO users (full_name, phone, role, opt_in) VALUES ('RPT Money Owner',$1,'owner',TRUE) RETURNING id
@@ -145,7 +146,7 @@ func TestReports_CollectedAmendedThroughEndpointJSON(t *testing.T) {
 		t.Fatalf("ping: %v", err)
 	}
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	var ownerID int64
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO users (full_name, phone, role, opt_in) VALUES ('RPT Amend Owner',$1,'owner',TRUE) RETURNING id

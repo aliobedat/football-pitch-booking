@@ -28,6 +28,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/config"
 	"github.com/ali/football-pitch-api/internal/middleware"
 	"github.com/ali/football-pitch-api/internal/repository"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 func TestMeBOLA(t *testing.T) {
@@ -44,7 +45,7 @@ func TestMeBOLA(t *testing.T) {
 	}
 	defer pool.Close()
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	const victimOriginal = "VICTIM ORIGINAL NAME"
 	mkUser := func(name, prefix string) int {
 		var id int

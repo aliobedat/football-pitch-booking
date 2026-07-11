@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ali/football-pitch-api/internal/auth"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 type scopingEnv struct {
@@ -50,7 +51,7 @@ func newScopingEnv(t *testing.T) *scopingEnv {
 		t.Fatalf("ping: %v", err)
 	}
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	model := &PitchModel{DB: pool}
 
 	mkUser := func(name, prefix, role string) int {

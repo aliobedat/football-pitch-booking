@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/ali/football-pitch-api/internal/auth"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 // seedUser inserts a user with a unique phone and registers cleanup of any staff
@@ -27,7 +28,7 @@ import (
 func (e *blockEnv) seedUser(t *testing.T, name, prefix, role string) int64 {
 	t.Helper()
 	ctx := context.Background()
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	var id int64
 	if err := e.pool.QueryRow(ctx, `
 		INSERT INTO users (full_name, phone, role, opt_in) VALUES ($1,$2,$3,TRUE) RETURNING id

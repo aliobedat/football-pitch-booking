@@ -16,8 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ali/football-pitch-api/internal/auth"
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/ali/football-pitch-api/internal/auth"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 // hashOf returns a real bcrypt hash for assertions that exercise verification.
@@ -54,7 +56,7 @@ func (e *blockEnv) setPasswordHash(t *testing.T, userID int64, hash string) {
 // row the onboarding flow creates for it.
 func (e *blockEnv) unusedPhone(t *testing.T) string {
 	t.Helper()
-	phone := fmt.Sprintf("+96279%07d", time.Now().UnixNano()%10_000_000)
+	phone := fmt.Sprintf("+96279%07d", testutil.UniqueSuffix()%10_000_000)
 	t.Cleanup(func() {
 		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

@@ -24,6 +24,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/config"
 	"github.com/ali/football-pitch-api/internal/repository"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 // cookieByName is defined in phone_auth_test.go (same package).
@@ -60,7 +61,7 @@ func TestRefreshReject(t *testing.T) {
 	r.POST("/auth/refresh", h.Refresh) // refresh is CSRF/auth-free by design
 
 	// Seed a user + a VALID stored refresh token for the positive control.
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	var userID int
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO users (full_name, phone, role, opt_in) VALUES ($1,$2,$3,TRUE) RETURNING id

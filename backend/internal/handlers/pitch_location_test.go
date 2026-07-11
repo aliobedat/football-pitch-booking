@@ -20,6 +20,7 @@ import (
 
 	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/middleware"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 func newPitchRouter(h *PitchHandler, userID int, role string) *gin.Engine {
@@ -88,7 +89,7 @@ func newPitchLocEnv(t *testing.T) *pitchLocEnv {
 	var ownerID int
 	if err := pool.QueryRow(ctx, `
 		INSERT INTO users (full_name, phone, role, opt_in) VALUES ('Loc Owner', $1, 'owner', TRUE) RETURNING id
-	`, fmt.Sprintf("+96277%06d", time.Now().UnixNano()%1_000_000)).Scan(&ownerID); err != nil {
+	`, fmt.Sprintf("+96277%06d", testutil.UniqueSuffix()%1_000_000)).Scan(&ownerID); err != nil {
 		pool.Close()
 		t.Fatalf("seed owner: %v", err)
 	}
