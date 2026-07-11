@@ -55,7 +55,9 @@ const pitchSelectCols = `
 	p.image_url,
 	p.image_public_id,
 	p.description,
-	COALESCE(p.maps_url, '')
+	COALESCE(p.maps_url, ''),
+	COALESCE((SELECT v.slug FROM venues v WHERE v.id = p.venue_id), ''),
+	COALESCE((SELECT v.name FROM venues v WHERE v.id = p.venue_id), '')
 `
 
 // pitchReturnCols is used in INSERT/UPDATE RETURNING clauses where no
@@ -80,7 +82,9 @@ const pitchReturnCols = `
 	image_url,
 	image_public_id,
 	description,
-	COALESCE(maps_url, '')
+	COALESCE(maps_url, ''),
+	COALESCE((SELECT v.slug FROM venues v WHERE v.id = pitches.venue_id), ''),
+	COALESCE((SELECT v.name FROM venues v WHERE v.id = pitches.venue_id), '')
 `
 
 // Pitch is the canonical Go representation of a pitch row.
@@ -105,6 +109,12 @@ type Pitch struct {
 	ImagePublicID string   `json:"image_public_id"`
 	Description   string   `json:"description"`
 	MapsURL       string   `json:"maps_url" db:"maps_url"`
+
+	// WO-VENUES (additive): the owning venue's public identity. Empty strings
+	// for pre-034 rows whose venue_id is still NULL. B2C 1c keys the /pitches/:id
+	// → /venues/:slug 301 on VenueSlug.
+	VenueSlug string `json:"venue_slug"`
+	VenueName string `json:"venue_name"`
 
 	// DistanceKm is the great-circle distance (km) from the requesting player to
 	// this pitch, populated ONLY on the nearest-sorted /pitches read when usable
@@ -136,6 +146,21 @@ type CreatePitchRequest struct {
 	// handler enforces a well-formed Google host) — it is the location source from
 	// which coordinates are resolved post-commit. Persisted as-is.
 	MapsURL string `json:"maps_url"`
+
+	// VenueID (WO-VENUES): the venue the new pitch belongs to. When set:
+	//   - owner actor: the venue must exist, be non-deleted, and belong to the
+	//     session owner (ErrVenueNotFound → 404 otherwise);
+	//   - admin actor: the venue must exist and be non-deleted (404 otherwise),
+	//     and the pitch's owner_id is DERIVED from venue.owner_id — never from
+	//     the admin actor (ownership invariant, CLAUDE.md principle 5).
+	// When ABSENT, a 1:1 venue is auto-created in the same transaction
+	// (033-backfill semantics) so the pre-1d dashboard keeps working unchanged
+	// and migration 034's NOT NULL stays satisfiable.
+	VenueID *int64 `json:"venue_id"`
+
+	// ActorRole is set by the handler (never from the request body): "admin"
+	// switches VenueID resolution to derive-owner-from-venue semantics.
+	ActorRole string `json:"-"`
 }
 
 type PitchFilters struct {
@@ -165,6 +190,7 @@ func scanPitch(row interface {
 		&p.ImageURL, &p.ImagePublicID,
 		&p.Description,
 		&p.MapsURL,
+		&p.VenueSlug, &p.VenueName,
 	)
 	return p, err
 }
@@ -587,23 +613,187 @@ func (m *PitchModel) CreatePitch(ctx context.Context, req CreatePitchRequest) (*
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	hue := pitchHues[req.OwnerID%len(pitchHues)]
+	tx, err := m.DB.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("CreatePitch: begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
 
-	row := m.DB.QueryRow(ctx, fmt.Sprintf(`
+	// Explicit venue — resolve it and the pitch's effective owner together
+	// (ownership invariant: pitch.owner_id == venue.owner_id, always).
+	//   - owner actor: the venue must be live AND session-owned; a foreign/
+	//     unknown venue is a 404, never a 403 (existence not leaked).
+	//   - admin actor: the venue must be live; the pitch's owner_id is DERIVED
+	//     from venue.owner_id, never from the admin actor.
+	ownerID := req.OwnerID
+	if req.VenueID != nil {
+		var venueOwner int
+		err := tx.QueryRow(ctx,
+			`SELECT owner_id FROM venues WHERE id = $1 AND deleted_at IS NULL`,
+			*req.VenueID).Scan(&venueOwner)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrVenueNotFound
+		}
+		if err != nil {
+			return nil, fmt.Errorf("CreatePitch: resolve venue: %w", err)
+		}
+		switch {
+		case req.ActorRole == auth.RoleAdmin:
+			ownerID = venueOwner
+		case venueOwner != req.OwnerID:
+			return nil, ErrVenueNotFound
+		}
+	}
+	hue := pitchHues[ownerID%len(pitchHues)]
+
+	var pitchID int
+	if err := tx.QueryRow(ctx, `
 		INSERT INTO pitches
 			(owner_id, name, neighborhood, surface, format, price_per_hour,
 			 rating, review_count, is_featured, pitch_hue, amenities,
-			 latitude, longitude, image_url, image_public_id, description, maps_url)
-		VALUES ($1, $2, $3, $4, $5, $6, 0, 0, false, $7, '{}', 0, 0, $8, $9, $10, $11)
-		RETURNING %s
-	`, pitchReturnCols),
-		req.OwnerID, req.Name, req.Neighborhood, req.Surface, req.Format,
+			 latitude, longitude, image_url, image_public_id, description, maps_url, venue_id)
+		VALUES ($1, $2, $3, $4, $5, $6, 0, 0, false, $7, '{}', 0, 0, $8, $9, $10, $11, $12)
+		RETURNING id
+	`,
+		ownerID, req.Name, req.Neighborhood, req.Surface, req.Format,
 		req.PricePerHour, hue, req.ImageURL, req.ImagePublicID, req.Description, req.MapsURL,
-	)
+		req.VenueID,
+	).Scan(&pitchID); err != nil {
+		return nil, fmt.Errorf("CreatePitch: insert: %w", err)
+	}
 
-	p, err := scanPitch(row)
+	// No venue given → auto-create the 1:1 venue in the SAME transaction
+	// (033-backfill semantics: place fields copied, slug ASCII-slugified with a
+	// 'v-<id>' fallback on non-ASCII names or any collision).
+	if req.VenueID == nil {
+		slug := asciiSlugify(req.Name)
+		if slug != "" {
+			var taken bool
+			if err := tx.QueryRow(ctx,
+				`SELECT EXISTS (SELECT 1 FROM venues WHERE lower(slug) = lower($1))`, slug).Scan(&taken); err != nil {
+				return nil, fmt.Errorf("CreatePitch: slug check: %w", err)
+			}
+			if taken {
+				slug = ""
+			}
+		}
+		if slug == "" {
+			slug = fmt.Sprintf("v-%d", pitchID)
+		}
+		var venueID int64
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO venues (owner_id, name, slug, neighborhood, maps_url, latitude, longitude,
+			                    description, cover_image_url, cover_image_public_id)
+			VALUES ($1, $2, $3, $4, $5, 0, 0, NULLIF($6,''), NULLIF($7,''), NULLIF($8,''))
+			RETURNING id
+		`, ownerID, req.Name, slug, req.Neighborhood, req.MapsURL,
+			req.Description, req.ImageURL, req.ImagePublicID).Scan(&venueID); err != nil {
+			return nil, fmt.Errorf("CreatePitch: auto venue: %w", err)
+		}
+		if _, err := tx.Exec(ctx,
+			`UPDATE pitches SET venue_id = $1 WHERE id = $2`, venueID, pitchID); err != nil {
+			return nil, fmt.Errorf("CreatePitch: link venue: %w", err)
+		}
+	}
+
+	p, err := scanPitch(tx.QueryRow(ctx, fmt.Sprintf(
+		`SELECT %s FROM pitches WHERE id = $1`, pitchReturnCols), pitchID))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("CreatePitch: read back: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("CreatePitch: commit: %w", err)
+	}
+	return &p, nil
+}
+
+// ReassignVenue moves a pitch to another venue (WO-VENUES item 4; used by the
+// dashboard's «نقل إلى مجمع»). Scope: the pitch must be in the actor's scope
+// (admin: any pitch); the target venue must belong to the PITCH's owner
+// (ownership invariant). Unknown pitch/venue → pgx.ErrNoRows/ErrVenueNotFound
+// (404). Owner-mismatch target: ErrVenueNotFound for owners (404, existence
+// not leaked) but ErrVenueOwnerMismatch for admins (409, visible-but-refused).
+// If the old venue is left with zero non-deleted pitches it is soft-deleted in
+// the same transaction (no orphan venues), and the move is recorded in
+// pitch_audit_log.
+func (m *PitchModel) ReassignVenue(ctx context.Context, actor auth.Actor, pitchID int, venueID int64) (*Pitch, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	tx, err := m.DB.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("ReassignVenue: begin: %w", err)
+	}
+	defer tx.Rollback(ctx) //nolint:errcheck
+
+	clause, scopeArgs := actor.OwnerScopeFilter("owner_id", 2)
+	var (
+		pitchOwner int
+		oldVenue   *int64
+	)
+	err = tx.QueryRow(ctx, fmt.Sprintf(
+		`SELECT owner_id, venue_id FROM pitches
+		  WHERE id = $1 AND deleted_at IS NULL AND %s FOR UPDATE`, clause),
+		append([]any{pitchID}, scopeArgs...)...).Scan(&pitchOwner, &oldVenue)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, pgx.ErrNoRows // → 404 (missing OR foreign pitch)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("ReassignVenue: resolve pitch: %w", err)
+	}
+
+	// Ownership invariant: the target venue must belong to the PITCH's owner.
+	// Unknown/deleted venue → 404 for everyone. An owner-mismatch is a 404 for
+	// owners (a foreign venue's existence is not leaked) but a 409
+	// venue_owner_mismatch for admins — they see everything, so the refusal is
+	// explicit rather than disguised as absence.
+	var venueOwner int
+	err = tx.QueryRow(ctx,
+		`SELECT owner_id FROM venues WHERE id = $1 AND deleted_at IS NULL`,
+		venueID).Scan(&venueOwner)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrVenueNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("ReassignVenue: resolve venue: %w", err)
+	}
+	if venueOwner != pitchOwner {
+		if actor.Role == auth.RoleAdmin {
+			return nil, ErrVenueOwnerMismatch
+		}
+		return nil, ErrVenueNotFound
+	}
+
+	if _, err := tx.Exec(ctx,
+		`UPDATE pitches SET venue_id = $1, updated_at = now() WHERE id = $2`, venueID, pitchID); err != nil {
+		return nil, fmt.Errorf("ReassignVenue: update: %w", err)
+	}
+
+	// Old venue emptied? Soft-delete it — never leave an orphan shell venue.
+	if oldVenue != nil && *oldVenue != venueID {
+		if _, err := tx.Exec(ctx, `
+			UPDATE venues SET deleted_at = now(), updated_at = now()
+			WHERE id = $1 AND deleted_at IS NULL
+			  AND NOT EXISTS (SELECT 1 FROM pitches WHERE venue_id = $1 AND deleted_at IS NULL)
+		`, *oldVenue); err != nil {
+			return nil, fmt.Errorf("ReassignVenue: cleanup old venue: %w", err)
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO pitch_audit_log (pitch_id, actor_id, actor_role, action, detail)
+		VALUES ($1, $2, $3, 'venue_reassigned', jsonb_build_object('from', $4::bigint, 'to', $5::bigint))
+	`, pitchID, actor.UserID, actor.Role, oldVenue, venueID); err != nil {
+		return nil, fmt.Errorf("ReassignVenue: audit: %w", err)
+	}
+
+	p, err := scanPitch(tx.QueryRow(ctx, fmt.Sprintf(
+		`SELECT %s FROM pitches WHERE id = $1`, pitchReturnCols), pitchID))
+	if err != nil {
+		return nil, fmt.Errorf("ReassignVenue: read back: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("ReassignVenue: commit: %w", err)
 	}
 	return &p, nil
 }

@@ -213,6 +213,12 @@ type endpoint struct {
 	pathFmt  string // fmt with one %d (booking id)
 	bodyKey  string // JSON field name
 	validVal string // a value that would succeed if in-scope
+	// wantBlocked is the status an out-of-scope/nonexistent booking must yield.
+	// attendance kept the original 403 contract; payment (booking-sheet
+	// ApplyPayment) follows the locked 404-not-403 invariant — existence is not
+	// leaked to out-of-scope actors. Case 4 (unprovisioned staff) is 403 for
+	// BOTH: ResolveScope rejects before any handler runs.
+	wantBlocked int
 	// field selects which column to read from state() for this endpoint.
 	read func(att, pay string) string
 }
@@ -224,12 +230,14 @@ func TestCrossTenantStaffMutation(t *testing.T) {
 		{
 			name: "attendance", pathFmt: "/bookings/%d/attendance",
 			bodyKey: "attendance", validVal: "checked_in",
-			read: func(att, _ string) string { return att },
+			wantBlocked: http.StatusForbidden,
+			read:        func(att, _ string) string { return att },
 		},
 		{
 			name: "payment", pathFmt: "/bookings/%d/payment",
 			bodyKey: "payment_status", validVal: "paid_cash",
-			read: func(_, pay string) string { return pay },
+			wantBlocked: http.StatusNotFound,
+			read:        func(_, pay string) string { return pay },
 		},
 	}
 
@@ -242,13 +250,13 @@ func TestCrossTenantStaffMutation(t *testing.T) {
 				attBefore, payBefore := e.state(t, e.bkB)
 				before := ep.read(attBefore, payBefore)
 				rec := e.patch(t, fmt.Sprintf(ep.pathFmt, e.bkB), e.staffAToken, body)
-				if rec.Code != http.StatusForbidden {
-					t.Fatalf("staffA → BK_B = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+				if rec.Code != ep.wantBlocked {
+					t.Fatalf("staffA → BK_B = %d, want %d (body: %s)", rec.Code, ep.wantBlocked, rec.Body.String())
 				}
-				// ADVERSARIAL: the row must be byte-for-byte unchanged after the 403.
+				// ADVERSARIAL: the row must be byte-for-byte unchanged after the block.
 				attAfter, payAfter := e.state(t, e.bkB)
 				if after := ep.read(attAfter, payAfter); after != before {
-					t.Fatalf("CRITICAL: BK_B.%s mutated despite 403: %q → %q", ep.bodyKey, before, after)
+					t.Fatalf("CRITICAL: BK_B.%s mutated despite %d: %q → %q", ep.bodyKey, ep.wantBlocked, before, after)
 				}
 			})
 
@@ -258,12 +266,12 @@ func TestCrossTenantStaffMutation(t *testing.T) {
 				attBefore, payBefore := e.state(t, e.bkA2)
 				before := ep.read(attBefore, payBefore)
 				rec := e.patch(t, fmt.Sprintf(ep.pathFmt, e.bkA2), e.staffAToken, body)
-				if rec.Code != http.StatusForbidden {
-					t.Fatalf("staffA → BK_A2 (same owner, unbound pitch) = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+				if rec.Code != ep.wantBlocked {
+					t.Fatalf("staffA → BK_A2 (same owner, unbound pitch) = %d, want %d (body: %s)", rec.Code, ep.wantBlocked, rec.Body.String())
 				}
 				attAfter, payAfter := e.state(t, e.bkA2)
 				if after := ep.read(attAfter, payAfter); after != before {
-					t.Fatalf("CRITICAL: BK_A2.%s mutated despite 403 (scope leaked to owner portfolio): %q → %q", ep.bodyKey, before, after)
+					t.Fatalf("CRITICAL: BK_A2.%s mutated despite %d (scope leaked to owner portfolio): %q → %q", ep.bodyKey, ep.wantBlocked, before, after)
 				}
 			})
 
@@ -283,11 +291,11 @@ func TestCrossTenantStaffMutation(t *testing.T) {
 			})
 
 			// CASE 5 — Nonexistent booking id: no row matches the scope predicate →
-			// ErrBookingNotInScope → 403. MUST NOT 500 / leak internals.
+			// blocked status (403/404 per endpoint). MUST NOT 500 / leak internals.
 			t.Run("case5_nonexistent_booking", func(t *testing.T) {
 				rec := e.patch(t, fmt.Sprintf(ep.pathFmt, 999999), e.staffAToken, body)
-				if rec.Code != http.StatusForbidden {
-					t.Fatalf("nonexistent booking = %d, want 403 (never 500) (body: %s)", rec.Code, rec.Body.String())
+				if rec.Code != ep.wantBlocked {
+					t.Fatalf("nonexistent booking = %d, want %d (never 500) (body: %s)", rec.Code, ep.wantBlocked, rec.Body.String())
 				}
 				if bytes.Contains(rec.Body.Bytes(), []byte("SetAttendance")) ||
 					bytes.Contains(rec.Body.Bytes(), []byte("SetPayment")) ||
@@ -301,8 +309,8 @@ func TestCrossTenantStaffMutation(t *testing.T) {
 				attBefore, payBefore := e.state(t, e.bkB)
 				before := ep.read(attBefore, payBefore)
 				rec := e.patch(t, fmt.Sprintf(ep.pathFmt, e.bkB), e.ownerAToken, body)
-				if rec.Code != http.StatusForbidden {
-					t.Fatalf("ownerA → BK_B = %d, want 403 (body: %s)", rec.Code, rec.Body.String())
+				if rec.Code != ep.wantBlocked {
+					t.Fatalf("ownerA → BK_B = %d, want %d (body: %s)", rec.Code, ep.wantBlocked, rec.Body.String())
 				}
 				attAfter, payAfter := e.state(t, e.bkB)
 				if after := ep.read(attAfter, payAfter); after != before {

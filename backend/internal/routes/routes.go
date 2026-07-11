@@ -75,6 +75,8 @@ func Register(
 	// existing schedule PatchPayment handler). Hours resolved via the shared PitchModel.
 	bookingSheetHandler := handlers.NewBookingSheetHandler(
 		repository.NewBookingSheetRepository(db), &data.PitchModel{DB: db})
+	// WO-VENUES: venue CRUD + public reads.
+	venueHandler := handlers.NewVenueHandler(&data.VenueModel{DB: db})
 	v1 := r.Group("/api/v1")
 
 	// ════════════════════════════════════════════════════════════════════════
@@ -96,6 +98,13 @@ func Register(
 	// Public: a pitch's weekly operating hours — the player detail page renders
 	// bookable/closed from it (alongside availability). Read-only; no identity.
 	v1.GET("/pitches/:id/operating-hours", pitchHandler.GetOperatingHours)
+
+	// ── WO-VENUES: public venue reads (B2C) ─────────────────────────────────
+	// One card per venue; ?lat&lng → nearest-first on VENUE coordinates.
+	v1.GET("/venues", venueHandler.PublicListVenues)
+	// The param is the SLUG — named :id only because gin requires one wildcard
+	// name per position (PATCH /venues/:id below shares the segment).
+	v1.GET("/venues/:id", venueHandler.PublicVenueBySlug)
 
 	// Provider delivery-status webhooks (PART 6). Public: authentication is the
 	// Meta verify-token handshake (GET) plus, in production, request-signature
@@ -216,6 +225,34 @@ func Register(
 		protected.PATCH("/pitches/:id/active",
 			middleware.RequireRole("owner", "admin"),
 			pitchHandler.ToggleActive,
+		)
+		// WO-VENUES: move a pitch to another venue («نقل إلى مجمع»). Owner/admin;
+		// empties auto-soft-delete the old venue; audited.
+		protected.PATCH("/pitches/:id/venue",
+			middleware.RequireRole("owner", "admin"),
+			pitchHandler.ReassignVenue,
+		)
+
+		// ── WO-VENUES: venue CRUD (owner/admin; scope enforced in SQL) ────────
+		protected.POST("/venues",
+			middleware.RequireRole("owner", "admin"),
+			venueHandler.CreateVenue,
+		)
+		protected.GET("/owner/venues",
+			middleware.RequireRole("owner", "admin"),
+			venueHandler.OwnerListVenues,
+		)
+		protected.PATCH("/venues/:id",
+			middleware.RequireRole("owner", "admin"),
+			venueHandler.UpdateVenue,
+		)
+		protected.PATCH("/venues/:id/active",
+			middleware.RequireRole("owner", "admin"),
+			venueHandler.ToggleVenueActive,
+		)
+		protected.DELETE("/venues/:id",
+			middleware.RequireRole("owner", "admin"),
+			venueHandler.DeleteVenue,
 		)
 		// Replace the whole weekly operating-hours schedule (full grid). Owner/admin
 		// only; actor-scoped + audited in the data layer. Players are barred (403).

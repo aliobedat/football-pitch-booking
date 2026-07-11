@@ -345,13 +345,13 @@ func distinctCount(xs []int) int {
 // loadStaffMemberTx reads one staff member (under ownerID) grouped with all their
 // pitch bindings + names, inside the caller's tx.
 func loadStaffMemberTx(ctx context.Context, tx pgx.Tx, ownerID, userID int) (*StaffMember, error) {
-	rows, err := tx.Query(ctx, `
-		SELECT u.id, COALESCE(u.phone,''), COALESCE(u.full_name,''), s.pitch_id, p.name
+	rows, err := tx.Query(ctx, fmt.Sprintf(`
+		SELECT u.id, COALESCE(u.phone,''), COALESCE(u.full_name,''), s.pitch_id, %s
 		FROM staff s
 		JOIN users u   ON u.id = s.user_id
 		JOIN pitches p ON p.id = s.pitch_id
 		WHERE s.user_id = $1 AND s.owner_id = $2
-		ORDER BY p.name`, userID, ownerID)
+		ORDER BY p.name`, pitchDisplayNameExpr), userID, ownerID)
 	if err != nil {
 		return nil, err
 	}
@@ -415,7 +415,7 @@ func (r *staffRepo) ListStaff(ctx context.Context, actor auth.Actor) ([]StaffMem
 	// per row so admin results carry each binding's real owner.
 	clause, args := actor.OwnerScopeFilter("s.owner_id", 1)
 	rows, err := r.db.Query(ctx, `
-		SELECT s.user_id, s.owner_id, COALESCE(u.phone,''), COALESCE(u.full_name,''), s.pitch_id, p.name,
+		SELECT s.user_id, s.owner_id, COALESCE(u.phone,''), COALESCE(u.full_name,''), s.pitch_id, `+pitchDisplayNameExpr+`,
 		       max(s.created_at) OVER (PARTITION BY s.user_id) AS member_recency
 		FROM staff s
 		JOIN users u   ON u.id = s.user_id

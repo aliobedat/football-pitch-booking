@@ -38,6 +38,10 @@ Malaeb is a SaaS for booking sports fields. Two actors:
    - `cancel` triggers slot release + player notification (NO refund — see deferral note).
    - PAYMENT DEFERRAL: there is no payment system yet. Do NOT build payment, deposit, or refund logic. A dormant `payment_status` column may exist (default `unpaid`) purely as a reserved seam.
 4. Every state transition is recorded (actor, timestamp, reason) in an audit table.
+5. VENUE OWNERSHIP INVARIANT (WO-VENUES, locked 2026-07-11):
+   pitch.owner_id == venue.owner_id, ALWAYS. No pitch may reference another
+   owner's venue. Admin operations that link a pitch to a venue derive or
+   validate ownership from the venue/pitch rows — never from the admin actor.
 
 ## Hard external constraints (WhatsApp Business Platform)
 - AUTHENTICATION-category templates (OTP) are restricted to verified / high-tier

@@ -132,7 +132,7 @@ const attendeeNameExpr = `COALESCE(NULLIF(u.full_name, ''), b.guest_name, CASE W
 func (r *scheduleRepo) DailySchedule(ctx context.Context, actor auth.Actor, boundPitchIDs []int, pitchFilter int, fromUTC, toUTC time.Time) ([]ScheduleRow, error) {
 	scopeSQL, args := scopePredicate(actor, boundPitchIDs, 3) // $1,$2 are the time bounds
 	q := fmt.Sprintf(`
-		SELECT b.id, b.pitch_id, p.name,
+		SELECT b.id, b.pitch_id, %s,
 		       lower(b.booking_range), upper(b.booking_range),
 		       b.source, b.status, b.attendance, b.payment_status,
 		       %s,
@@ -143,7 +143,7 @@ func (r *scheduleRepo) DailySchedule(ctx context.Context, actor auth.Actor, boun
 		LEFT JOIN users u ON u.id = b.player_id
 		WHERE b.status <> 'cancelled'
 		  AND lower(b.booking_range) >= $1 AND lower(b.booking_range) < $2
-		  AND %s`, attendeeNameExpr, scopeSQL)
+		  AND %s`, pitchDisplayNameExpr, attendeeNameExpr, scopeSQL)
 	allArgs := append([]any{fromUTC, toUTC}, args...)
 	if pitchFilter > 0 {
 		allArgs = append(allArgs, pitchFilter)

@@ -19,6 +19,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/models"
+	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
 type readersEnv struct {
@@ -106,8 +107,11 @@ func (e *readersEnv) seed(source string, player *int64, start time.Time, dur tim
 
 func TestSourceReaders_GetBookedSlotsIncludesBlock(t *testing.T) {
 	e := newReadersEnv(t)
-	day := time.Now().UTC().Add(48 * time.Hour)
-	blockStart := day.Truncate(time.Hour)
+	// Fixed Amman-zone instant: GetBookedSlots resolves the civil day from the
+	// date's OWN zone, so a now()-derived UTC instant lands one day off when
+	// run between 00:00–03:00 Amman. An Amman-zone literal is unambiguous.
+	day := time.Date(2032, 3, 10, 0, 0, 0, 0, timeutil.Amman())
+	blockStart := time.Date(2032, 3, 10, 18, 0, 0, 0, timeutil.Amman())
 	e.seed("block", nil, blockStart, time.Hour, "confirmed")
 
 	slots, err := e.repo.GetBookedSlots(context.Background(), int(e.pitchID), day)
