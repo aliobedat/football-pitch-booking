@@ -673,6 +673,21 @@ func (m *PitchModel) CreatePitch(ctx context.Context, req CreatePitchRequest) (*
 		return nil, fmt.Errorf("CreatePitch: insert: %w", err)
 	}
 
+	// Gate 1d UX: the moment a venue gains its SECOND pitch, backfill the lone
+	// pre-existing pitch's label as «ملعب ١» — but only if the owner never set
+	// one (label IS NULL guard; an existing label is never overwritten, and
+	// venues already at 2+ pitches are left alone via the count = 2 guard,
+	// which counts the row just inserted).
+	if req.VenueID != nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE pitches SET label = 'ملعب ١', updated_at = now()
+			WHERE venue_id = $1 AND deleted_at IS NULL AND label IS NULL AND id <> $2
+			  AND (SELECT COUNT(*) FROM pitches WHERE venue_id = $1 AND deleted_at IS NULL) = 2
+		`, req.VenueID, pitchID); err != nil {
+			return nil, fmt.Errorf("CreatePitch: label first sibling: %w", err)
+		}
+	}
+
 	// No venue given → auto-create the 1:1 venue in the SAME transaction
 	// (033-backfill semantics: place fields copied, slug ASCII-slugified with a
 	// 'v-<id>' fallback on non-ASCII names or any collision).
