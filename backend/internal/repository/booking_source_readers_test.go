@@ -19,17 +19,19 @@ import (
 	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/models"
+	"github.com/ali/football-pitch-api/internal/testutil"
 	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
 type readersEnv struct {
-	pool     *pgxpool.Pool
-	repo     BookingRepository
-	reviews  ReviewRepository
-	reminder ReminderRepository
-	ownerID  int64
-	playerID int64
-	pitchID  int64
+	pool        *pgxpool.Pool
+	repo        BookingRepository
+	reviews     ReviewRepository
+	reminder    ReminderRepository
+	ownerID     int64
+	playerID    int64
+	playerPhone string
+	pitchID     int64
 }
 
 func newReadersEnv(t *testing.T) *readersEnv {
@@ -49,7 +51,7 @@ func newReadersEnv(t *testing.T) *readersEnv {
 		t.Fatalf("ping: %v", err)
 	}
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	mk := func(name, prefix, role string) int64 {
 		var id int64
 		if err := pool.QueryRow(ctx, `
@@ -62,6 +64,7 @@ func newReadersEnv(t *testing.T) *readersEnv {
 	}
 	ownerID := mk("RD Owner", "88", "owner")
 	playerID := mk("RD Player", "89", "player")
+	playerPhone := fmt.Sprintf("+96289%06d", suffix)
 
 	model := &data.PitchModel{DB: pool}
 	p, err := model.CreatePitch(ctx, data.CreatePitchRequest{
@@ -76,7 +79,7 @@ func newReadersEnv(t *testing.T) *readersEnv {
 	e := &readersEnv{
 		pool: pool, repo: NewBookingRepository(pool),
 		reviews: NewReviewRepository(pool), reminder: NewReminderRepository(pool),
-		ownerID: ownerID, playerID: playerID, pitchID: int64(p.ID),
+		ownerID: ownerID, playerID: playerID, playerPhone: playerPhone, pitchID: int64(p.ID),
 	}
 	t.Cleanup(func() {
 		cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -84,6 +87,7 @@ func newReadersEnv(t *testing.T) *readersEnv {
 		_, _ = pool.Exec(cctx, `DELETE FROM reviews WHERE pitch_id = $1`, e.pitchID)
 		_, _ = pool.Exec(cctx, `DELETE FROM bookings WHERE pitch_id = $1`, e.pitchID)
 		_, _ = pool.Exec(cctx, `DELETE FROM pitches WHERE id = $1`, e.pitchID)
+		_, _ = pool.Exec(cctx, `DELETE FROM venues WHERE owner_id = $1`, ownerID)
 		_, _ = pool.Exec(cctx, `DELETE FROM users WHERE id = ANY($1)`, []int64{ownerID, playerID})
 		pool.Close()
 	})
@@ -168,15 +172,23 @@ func TestSourceReaders_ReminderSkipsBlock(t *testing.T) {
 	e.seed("player", &e.playerID, now.Add(2*time.Hour), time.Hour, "confirmed")
 	blockID := e.seed("block", nil, now.Add(5*time.Hour), time.Hour, "confirmed")
 
-	n, err := e.reminder.ClaimDueReminders(context.Background(), now, 24*time.Hour, 100,
+	// ClaimDueReminders is GLOBAL (it scans every due booking in the window),
+	// so a shared scratch DB can contain due strays from other fixtures or
+	// panic-killed runs. Assert only on THIS env's recipient phone — the global
+	// claim count is not ours to pin down.
+	var mine int
+	_, err := e.reminder.ClaimDueReminders(context.Background(), now, 24*time.Hour, 100,
 		func(d DueReminder) (ReminderJob, error) {
+			if d.Phone == e.playerPhone {
+				mine++
+			}
 			return ReminderJob{Recipient: d.Phone, Kind: "booking_reminder", Envelope: []byte("{}")}, nil
 		})
 	if err != nil {
 		t.Fatalf("ClaimDueReminders: %v", err)
 	}
-	if n != 1 {
-		t.Fatalf("claimed %d reminders, want 1 (player only — the block must be skipped)", n)
+	if mine != 1 {
+		t.Fatalf("claimed %d reminders for this env's player, want 1 (player only — the block must be skipped)", mine)
 	}
 	// The block row must remain un-reminded.
 	var reminded bool

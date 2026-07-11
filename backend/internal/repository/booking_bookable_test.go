@@ -23,6 +23,7 @@ import (
 
 	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/models"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 type bookableEnv struct {
@@ -46,7 +47,7 @@ func newBookableEnv(t *testing.T) *bookableEnv {
 		t.Fatalf("connect: %v", err)
 	}
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	mkUser := func(name, prefix, role string) int64 {
 		var id int64
 		phone := fmt.Sprintf("+962%s%06d", prefix, suffix)

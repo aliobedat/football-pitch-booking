@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ali/football-pitch-api/internal/auth"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 type ownerScopeEnv struct {
@@ -54,7 +55,7 @@ func newOwnerScopeEnv(t *testing.T) *ownerScopeEnv {
 		t.Fatalf("connect: %v", err)
 	}
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	mkUser := func(name, prefix string) int {
 		var id int
 		phone := fmt.Sprintf("+962%s%06d", prefix, suffix)

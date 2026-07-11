@@ -19,6 +19,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/models"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 func TestBookingScoping_GetAllBookings_OwnerVsAdmin(t *testing.T) {
@@ -34,7 +35,7 @@ func TestBookingScoping_GetAllBookings_OwnerVsAdmin(t *testing.T) {
 	}
 	defer pool.Close()
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	mkUser := func(name, prefix, role string) int64 {
 		var id int64
 		phone := fmt.Sprintf("+962%s%06d", prefix, suffix)

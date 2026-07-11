@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ali/football-pitch-api/internal/auth"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 type expenseEnv struct {
@@ -41,7 +42,7 @@ func newExpenseEnv(t *testing.T) *expenseEnv {
 		t.Fatalf("connect: %v", err)
 	}
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	var ownerID int
 	phone := fmt.Sprintf("+96283%06d", suffix)
 	if err := pool.QueryRow(ctx, `

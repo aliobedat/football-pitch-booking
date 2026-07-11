@@ -22,6 +22,7 @@ import (
 
 	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/data"
+	"github.com/ali/football-pitch-api/internal/testutil"
 	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
@@ -52,7 +53,7 @@ func newDayViewEnv(t *testing.T) *dayViewEnv {
 		t.Fatalf("ping: %v", err)
 	}
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	mk := func(name, prefix, role string) int64 {
 		var id int64
 		if err := pool.QueryRow(ctx, `
@@ -94,9 +95,15 @@ func newDayViewEnv(t *testing.T) *dayViewEnv {
 	return e
 }
 
-func (e *dayViewEnv) ownerActor() auth.Actor { return auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner} }
-func (e *dayViewEnv) otherActor() auth.Actor { return auth.Actor{UserID: int(e.otherID), Role: auth.RoleOwner} }
-func (e *dayViewEnv) adminActor() auth.Actor { return auth.Actor{UserID: int(e.ownerID), Role: auth.RoleAdmin} }
+func (e *dayViewEnv) ownerActor() auth.Actor {
+	return auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner}
+}
+func (e *dayViewEnv) otherActor() auth.Actor {
+	return auth.Actor{UserID: int(e.otherID), Role: auth.RoleOwner}
+}
+func (e *dayViewEnv) adminActor() auth.Actor {
+	return auth.Actor{UserID: int(e.ownerID), Role: auth.RoleAdmin}
+}
 
 // seedBooking inserts a booking row directly (bypassing the write-path gate) so the
 // test controls source/status/total_price precisely.

@@ -22,6 +22,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/models"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 func TestReviews_EligibilityAndSecurity(t *testing.T) {
@@ -38,7 +39,7 @@ func TestReviews_EligibilityAndSecurity(t *testing.T) {
 	defer pool.Close()
 
 	repo := NewReviewRepository(pool)
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 
 	mkUser := func(name, prefix, role string) int64 {
 		var id int64

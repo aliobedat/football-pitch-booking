@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ali/football-pitch-api/internal/notification"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 // reminderTestEnv is a seeded owner/player/pitch and a connection, with cleanup.
@@ -52,27 +53,34 @@ func newReminderTestEnv(t *testing.T) *reminderTestEnv {
 	}
 
 	// Unique marker so parallel/leftover runs never collide.
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	phone := fmt.Sprintf("+96279%06d", suffix)
 	ownerPhone := fmt.Sprintf("+96278%06d", suffix)
 
-	var playerID, ownerID, pitchID int64
+	var playerID, ownerID, venueID, pitchID int64
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO users (full_name, phone, opt_in) VALUES ('Reminder Player', $1, TRUE) RETURNING id
+		INSERT INTO users (full_name, phone, role, opt_in) VALUES ('Reminder Player', $1, 'player', TRUE) RETURNING id
 	`, phone).Scan(&playerID); err != nil {
 		pool.Close()
 		t.Fatalf("seed player: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO users (full_name, phone, opt_in) VALUES ('Reminder Owner', $1, TRUE) RETURNING id
+		INSERT INTO users (full_name, phone, role, opt_in) VALUES ('Reminder Owner', $1, 'owner', TRUE) RETURNING id
 	`, ownerPhone).Scan(&ownerID); err != nil {
 		pool.Close()
 		t.Fatalf("seed owner: %v", err)
 	}
 	if err := pool.QueryRow(ctx, `
-		INSERT INTO pitches (name, location, price_per_hour, owner_id)
-		VALUES ('Reminder Pitch', 'Amman', 30, $1) RETURNING id
-	`, ownerID).Scan(&pitchID); err != nil {
+		INSERT INTO venues (owner_id, name, slug, neighborhood, maps_url)
+		VALUES ($1, 'Reminder Venue', $2, 'Amman', '') RETURNING id
+	`, ownerID, fmt.Sprintf("reminder-venue-%06d", suffix)).Scan(&venueID); err != nil {
+		pool.Close()
+		t.Fatalf("seed venue: %v", err)
+	}
+	if err := pool.QueryRow(ctx, `
+		INSERT INTO pitches (name, neighborhood, surface, format, price_per_hour, owner_id, venue_id)
+		VALUES ('Reminder Pitch', 'Amman', 'artificial_grass', 'خماسي', 30, $1, $2) RETURNING id
+	`, ownerID, venueID).Scan(&pitchID); err != nil {
 		pool.Close()
 		t.Fatalf("seed pitch: %v", err)
 	}
@@ -88,6 +96,7 @@ func newReminderTestEnv(t *testing.T) *reminderTestEnv {
 		_, _ = pool.Exec(cctx, `DELETE FROM notification_jobs WHERE recipient = $1`, phone)
 		_, _ = pool.Exec(cctx, `DELETE FROM bookings WHERE pitch_id = $1`, pitchID)
 		_, _ = pool.Exec(cctx, `DELETE FROM pitches WHERE id = $1`, pitchID)
+		_, _ = pool.Exec(cctx, `DELETE FROM venues WHERE id = $1`, venueID)
 		_, _ = pool.Exec(cctx, `DELETE FROM users WHERE id IN ($1, $2)`, playerID, ownerID)
 		pool.Close()
 	})

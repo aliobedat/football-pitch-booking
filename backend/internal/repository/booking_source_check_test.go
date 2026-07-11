@@ -21,6 +21,7 @@ import (
 
 	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/models"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 const pgCheckViolation = "23514"
@@ -49,7 +50,7 @@ func newSourceCheckEnv(t *testing.T) *sourceCheckEnv {
 		t.Fatalf("ping: %v", err)
 	}
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	var ownerID, playerID int64
 	mk := func(name, prefix, role string) int64 {
 		var id int64

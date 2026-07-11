@@ -21,6 +21,7 @@ import (
 
 	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/data"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 type cancelScopeEnv struct {
@@ -51,7 +52,7 @@ func newCancelScopeEnv(t *testing.T) *cancelScopeEnv {
 		t.Fatalf("ping: %v", err)
 	}
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	mkUser := func(name, prefix, role string) int64 {
 		var id int64
 		phone := fmt.Sprintf("+962%s%06d", prefix, suffix)

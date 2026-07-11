@@ -27,6 +27,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/middleware"
 	"github.com/ali/football-pitch-api/internal/repository"
+	"github.com/ali/football-pitch-api/internal/testutil"
 	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
@@ -79,15 +80,32 @@ func (e *bsEnv) mkUser(t *testing.T, role string) int64 {
 	return id
 }
 
+// mkVenue seeds a venue for the owner — pitches.venue_id is NOT NULL since
+// migration 034, so every raw pitch insert needs one. Named after its lone
+// pitch, mirroring the 033 1:1 backfill: the single-pitch collapse rule in
+// pitchDisplayNameExpr then yields the pitch's own name, keeping legacy
+// display fields byte-identical.
+func (e *bsEnv) mkVenue(t *testing.T, owner int64, name string) int64 {
+	t.Helper()
+	var id int64
+	if err := e.pool.QueryRow(context.Background(),
+		`INSERT INTO venues (owner_id, name, slug, neighborhood, maps_url)
+		 VALUES ($1,$2,$3,'Amman','') RETURNING id`,
+		owner, name, fmt.Sprintf("bs-venue-%d", testutil.UniqueSuffix())).Scan(&id); err != nil {
+		t.Fatalf("mkVenue: %v", err)
+	}
+	return id
+}
+
 func (e *bsEnv) mkPitch(t *testing.T, owner int64) int64 {
 	t.Helper()
 	// neighborhood/surface/format are NOT NULL on the live schema (drift ledger);
 	// defaults only — no assertion reads them.
 	var id int64
 	if err := e.pool.QueryRow(context.Background(),
-		`INSERT INTO pitches (owner_id, name, price_per_hour, neighborhood, surface, format)
-		 VALUES ($1,$2,$3,'Amman','artificial_grass','خماسي') RETURNING id`,
-		owner, "P", 25).Scan(&id); err != nil {
+		`INSERT INTO pitches (owner_id, name, price_per_hour, neighborhood, surface, format, venue_id)
+		 VALUES ($1,$2,$3,'Amman','artificial_grass','خماسي',$4) RETURNING id`,
+		owner, "P", 25, e.mkVenue(t, owner, "P")).Scan(&id); err != nil {
 		t.Fatalf("mkPitch: %v", err)
 	}
 	return id
@@ -323,8 +341,8 @@ func TestBookingSheetDB(t *testing.T) {
 
 	// ── 9. Concurrency: two parallel +60, only one fits → one 200, one 409 ──
 	t.Run("extend_concurrency", func(t *testing.T) {
-		s, en := e.span(10, 11)                                                                          // [10,11)
-		id := e.mkBooking(t, e.pitchA, "player", "confirmed", &e.playerID, s, en, 25, nil, "unpaid")     // extendable to 12
+		s, en := e.span(10, 11)                                                                                                 // [10,11)
+		id := e.mkBooking(t, e.pitchA, "player", "confirmed", &e.playerID, s, en, 25, nil, "unpaid")                            // extendable to 12
 		e.mkBooking(t, e.pitchA, "player", "confirmed", &e.playerID, en.Add(time.Hour), en.Add(2*time.Hour), 25, nil, "unpaid") // Z=[12,13)
 		var wg sync.WaitGroup
 		codes := make([]int, 2)

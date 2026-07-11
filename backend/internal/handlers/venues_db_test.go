@@ -24,6 +24,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/middleware"
 	"github.com/ali/football-pitch-api/internal/repository"
+	"github.com/ali/football-pitch-api/internal/testutil"
 	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
@@ -48,7 +49,7 @@ func newVnEnv(t *testing.T) *vnEnv {
 	t.Cleanup(pool.Close)
 
 	e := &vnEnv{pool: pool}
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	mk := func(role, prefix string) int64 {
 		var id int64
 		if err := pool.QueryRow(context.Background(),
@@ -137,7 +138,7 @@ func (e *vnEnv) createPitch(t *testing.T, r *gin.Engine, name string, venueID *i
 
 func TestVenuesDB_CRUDRoleMatrix(t *testing.T) {
 	e := newVnEnv(t)
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 
 	for i, tc := range []struct {
 		name    string
@@ -190,7 +191,7 @@ func TestVenuesDB_CRUDRoleMatrix(t *testing.T) {
 
 func TestVenuesDB_CrossTenant404(t *testing.T) {
 	e := newVnEnv(t)
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	rA := e.router(e.ownerA, "owner")
 	rB := e.router(e.ownerB, "owner")
 
@@ -227,7 +228,7 @@ func TestVenuesDB_CrossTenant404(t *testing.T) {
 
 func TestVenuesDB_SlugRules(t *testing.T) {
 	e := newVnEnv(t)
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	r := e.router(e.ownerA, "owner")
 
 	// pattern rejection (post-normalization: trim + lowercase happen first,
@@ -265,7 +266,7 @@ func TestVenuesDB_SlugRules(t *testing.T) {
 
 func TestVenuesDB_DeleteRefusalAndReassignCleanup(t *testing.T) {
 	e := newVnEnv(t)
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	r := e.router(e.ownerA, "owner")
 
 	vOld := e.createVenue(t, r, fmt.Sprintf("old-%d", suffix))
@@ -305,7 +306,7 @@ func TestVenuesDB_DeleteRefusalAndReassignCleanup(t *testing.T) {
 
 func TestVenuesDB_CreatePitchAutoVenue(t *testing.T) {
 	e := newVnEnv(t)
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	r := e.router(e.ownerA, "owner")
 
 	// (a) ASCII name → slugified auto venue
@@ -339,7 +340,7 @@ func TestVenuesDB_CreatePitchAutoVenue(t *testing.T) {
 
 func TestVenuesDB_AdminOwnershipInvariant(t *testing.T) {
 	e := newVnEnv(t)
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	rA := e.router(e.ownerA, "owner")
 	rB := e.router(e.ownerB, "owner")
 	rAdm := e.router(e.adminID, "admin")
@@ -409,7 +410,7 @@ func TestVenuesDB_AdminOwnershipInvariant(t *testing.T) {
 
 func TestVenuesDB_CompositeDisplayName(t *testing.T) {
 	e := newVnEnv(t)
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	r := e.router(e.ownerA, "owner")
 	ctx := context.Background()
 
@@ -493,7 +494,7 @@ func TestVenuesDB_CompositeDisplayName(t *testing.T) {
 
 func TestVenuesDB_PitchByteCompat(t *testing.T) {
 	e := newVnEnv(t)
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	r := e.router(e.ownerA, "owner")
 	v := e.createVenue(t, r, fmt.Sprintf("compat-%d", suffix))
 	p := e.createPitch(t, r, "Compat Pitch", &v)
@@ -555,7 +556,7 @@ func TestVenuesDB_PitchByteCompat(t *testing.T) {
 
 func TestVenuesDB_PublicSlugRead(t *testing.T) {
 	e := newVnEnv(t)
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	r := e.router(e.ownerA, "owner")
 	ctx := context.Background()
 

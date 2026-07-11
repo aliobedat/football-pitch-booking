@@ -39,9 +39,9 @@ func (e *bsEnv) mkPitchRate(t *testing.T, owner int64, rate int) int64 {
 	// neighborhood/surface/format are NOT NULL on the live baseline (drift
 	// ledger); fixture defaults only — no assertion reads them.
 	if err := e.pool.QueryRow(t.Context(),
-		`INSERT INTO pitches (owner_id, name, price_per_hour, neighborhood, surface, format)
-		 VALUES ($1,$2,$3,'Amman','artificial_grass','خماسي') RETURNING id`,
-		owner, fmt.Sprintf("P%d", rate), rate).Scan(&id); err != nil {
+		`INSERT INTO pitches (owner_id, name, price_per_hour, neighborhood, surface, format, venue_id)
+		 VALUES ($1,$2,$3,'Amman','artificial_grass','خماسي',$4) RETURNING id`,
+		owner, fmt.Sprintf("P%d", rate), rate, e.mkVenue(t, owner, fmt.Sprintf("P%d", rate))).Scan(&id); err != nil {
 		t.Fatalf("mkPitchRate: %v", err)
 	}
 	return id

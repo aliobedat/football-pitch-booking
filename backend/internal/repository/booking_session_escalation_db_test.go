@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/ali/football-pitch-api/internal/models"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 func bookingAuthPool(t *testing.T) *pgxpool.Pool {
@@ -44,7 +45,7 @@ func bookingAuthPool(t *testing.T) *pgxpool.Pool {
 // (and its refresh tokens) created for it.
 func ephemeralPhone(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
-	phone := fmt.Sprintf("+96279%07d", time.Now().UnixNano()%10_000_000)
+	phone := fmt.Sprintf("+96279%07d", testutil.UniqueSuffix()%10_000_000)
 	t.Cleanup(func() {
 		cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

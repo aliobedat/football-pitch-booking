@@ -23,6 +23,7 @@ import (
 
 	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/models"
+	"github.com/ali/football-pitch-api/internal/testutil"
 	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
@@ -52,7 +53,7 @@ func newContactEnv(t *testing.T) *contactEnv {
 		t.Fatalf("ping: %v", err)
 	}
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	mk := func(name, prefix, role string) (int64, string) {
 		ph := fmt.Sprintf("+962%s%06d", prefix, suffix)
 		var id int64

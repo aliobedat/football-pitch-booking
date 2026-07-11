@@ -35,6 +35,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/middleware"
 	"github.com/ali/football-pitch-api/internal/repository"
+	"github.com/ali/football-pitch-api/internal/testutil"
 )
 
 // staffTestHashH is a placeholder password_hash for the cross-tenant binding
@@ -79,7 +80,7 @@ func newXTEnv(t *testing.T) *xtEnv {
 	jwtManager := auth.NewJWTManager("integration-test-secret-key-min-32-chars-long", 15*time.Minute, 168*time.Hour)
 	e := &xtEnv{pool: pool, jwt: jwtManager}
 
-	suffix := time.Now().UnixNano() % 1_000_000
+	suffix := testutil.UniqueSuffix() % 1_000_000
 	phones := map[int]string{}
 	mkUser := func(name, prefix, role string) int {
 		var id int
