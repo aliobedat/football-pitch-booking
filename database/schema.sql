@@ -1,15 +1,15 @@
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Malaeb — CANONICAL SCHEMA BASELINE (scratch/test DBs)
 --
--- Regenerated 2026-07-10 from the LIVE production schema (schema-only, no
--- data) via WO-SCHEMA-DRIFT-RECONCILIATION:
+-- Regenerated 2026-07-11 from the LIVE production schema (schema-only, no
+-- data) after migration 034 (WO-VENUES: pitches.venue_id SET NOT NULL):
 --
 --     pg_dump --schema-only --no-owner --no-privileges "$DATABASE_URL"
 --
--- This file IS the full current schema: migrations 002–032 (and the historical
--- out-of-band ALTERs) are already baked in. Do NOT replay backend/migrations/*
--- on a scratch built from this file — they remain in the repo as history and
--- as the manual-apply path for PRODUCTION only.
+-- This file IS the full current schema: migrations 002–034 (and the historical
+-- out-of-band ALTERs, venues 033/034) are already baked in. Do NOT replay
+-- backend/migrations/* on a scratch built from this file — they remain in the
+-- repo as history and as the manual-apply path for PRODUCTION only.
 --
 -- MAINTENANCE RULE: whenever a new migration is applied to production,
 -- regenerate this file with the command above so scratch/test DBs stay
@@ -20,12 +20,11 @@
 -- connect via the UNPOOLED host (drop "-pooler" from the hostname) — the
 -- pooler resets session defaults and rejects startup options.
 -- ═══════════════════════════════════════════════════════════════════════════
-
 --
 -- PostgreSQL database dump
 --
 
-\restrict nVBI0Z38lbS0Xsidk6Kd2AQRJhacqWOmcOdNMgRxppk7Mk5cTrgSfzggXj3qKp3
+\restrict x12zybDh4u4a71ZN7p42F14eVcdJWH7ynOVR7fAaqaDloagiRX7sFDj38u8BAMh
 
 -- Dumped from database version 17.10 (21f7c76)
 -- Dumped by pg_dump version 18.4
@@ -504,7 +503,7 @@ CREATE TABLE public.pitches (
     image_url text DEFAULT ''::text NOT NULL,
     image_public_id text DEFAULT ''::text NOT NULL,
     maps_url text,
-    venue_id bigint,
+    venue_id bigint NOT NULL,
     label text,
     CONSTRAINT pitches_price_per_hour_check CHECK ((price_per_hour > 0))
 );
@@ -1471,5 +1470,5 @@ ALTER TABLE ONLY public.venues
 -- PostgreSQL database dump complete
 --
 
-\unrestrict nVBI0Z38lbS0Xsidk6Kd2AQRJhacqWOmcOdNMgRxppk7Mk5cTrgSfzggXj3qKp3
+\unrestrict x12zybDh4u4a71ZN7p42F14eVcdJWH7ynOVR7fAaqaDloagiRX7sFDj38u8BAMh
 
