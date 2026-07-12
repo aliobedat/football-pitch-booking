@@ -162,6 +162,7 @@ function AddPitchForm({ editing, onSuccess, onCancel }: {
             <label className={labelCls}>صيغة اللعب <span className="text-red-400/60">*</span></label>
             <select value={form.format} onChange={set('format')} className={`${inputCls} appearance-none pe-9`}>
               <option value="خماسي">خماسي (5v5)</option>
+              <option value="سداسي">سداسي (6v6)</option>
               <option value="سباعي">سباعي (7v7)</option>
             </select>
             <ChevronDown size={13} className="absolute end-3 bottom-[13px] text-white/25 pointer-events-none" aria-hidden />
@@ -290,6 +291,7 @@ function AddSiblingForm({ sibling, groupCount, onSuccess, onCancel }: {
             <label className={labelCls}>صيغة اللعب <span className="text-red-400/60">*</span></label>
             <select value={format} onChange={(e) => setFormat(e.target.value)} className={`${inputCls} appearance-none pe-9`}>
               <option value="خماسي">خماسي (5v5)</option>
+              <option value="سداسي">سداسي (6v6)</option>
               <option value="سباعي">سباعي (7v7)</option>
             </select>
             <ChevronDown size={13} className="absolute end-3 bottom-[13px] text-white/25 pointer-events-none" aria-hidden />

@@ -16,7 +16,7 @@ import { useAvailabilitySearch, AvailabilitySearchBar, AvailabilityResults } fro
 type FilterValue =
   | 'all'
   | 'عين الباشا' | 'خلدا' | 'الجبيهة' | 'شفا بدران'
-  | '5x5' | '7x7' | '11x11'
+  | '5x5' | '6x6' | '7x7' | '11x11'
   | 'available_now';
 
 interface FilterChip {
@@ -37,6 +37,7 @@ const FILTER_CHIPS: FilterChip[] = [
   { label: 'الجبيهة',       value: 'الجبيهة',       type: 'area'         },
   { label: 'شفا بدران',     value: 'شفا بدران',     type: 'area'         },
   { label: '5×5',           value: '5x5',           type: 'size'         },
+  { label: '6×6',           value: '6x6',           type: 'size'         },
   { label: '7×7',           value: '7x7',           type: 'size'         },
   { label: 'متاح الآن',     value: 'available_now', type: 'availability' },
 ];
@@ -47,6 +48,7 @@ const FILTER_CHIPS: FilterChip[] = [
 // sends (pitch.size is an unpopulated future field).
 const SIZE_TO_FORMAT: Partial<Record<FilterValue, string>> = {
   '5x5': 'خماسي',
+  '6x6': 'سداسي',
   '7x7': 'سباعي',
 };
 
