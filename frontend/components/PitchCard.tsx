@@ -75,7 +75,10 @@ export default function PitchCard({ pitch }: { pitch: Pitch }) {
 
   return (
     <Link
-      href={`/pitches/${pitch.id}`}
+      // WO-VENUES Gate 1c: pitch links point at the venue URL (pre-selected).
+      // venue_slug is always present post-034; the /pitches/:id redirect
+      // covers any row without one (never a dead end).
+      href={pitch.venue_slug ? `/venues/${pitch.venue_slug}?pitch=${pitch.id}` : `/pitches/${pitch.id}`}
       className={[
         'group block rounded-2xl overflow-hidden',
         'bg-[#141715] border border-gray-800',
