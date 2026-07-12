@@ -1188,10 +1188,15 @@ func insertConfirmedBookingTx(ctx context.Context, tx pgx.Tx, req models.CreateB
 	// insert. The WHERE clause matches the pitch by id only (no active/deleted
 	// predicate) so a non-bookable pitch is still resolved and can be told apart
 	// from a genuinely missing id.
+	// pitch_name is the composite display name (pitchDisplayNameExpr — WO-VENUES
+	// ruling #2) so the created booking's payload matches every other player
+	// surface. FOR UPDATE semantics are unchanged: the lock is on the base
+	// pitches row; the expr's correlated subqueries (venue name, sibling count)
+	// read without locking.
 	err := tx.QueryRow(ctx, `
-		SELECT name, price_per_hour, is_active, deleted_at
-		FROM pitches
-		WHERE id = $1
+		SELECT `+pitchDisplayNameExpr+`, p.price_per_hour, p.is_active, p.deleted_at
+		FROM pitches p
+		WHERE p.id = $1
 		FOR UPDATE
 	`, req.PitchID).Scan(&pitchName, &pricePerHour, &isActive, &deletedAt)
 
@@ -1569,7 +1574,7 @@ func (r *bookingRepo) GetOpenWindows(ctx context.Context, pitchID int, date time
 
 func (r *bookingRepo) GetUserBookings(ctx context.Context, userID int64) ([]models.Booking, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT b.id, b.pitch_id, COALESCE(p.name, '') AS pitch_name,
+		SELECT b.id, b.pitch_id, COALESCE(`+pitchDisplayNameExpr+`, '') AS pitch_name,
 		       b.player_id,
 		       lower(b.booking_range) AS start_time, upper(b.booking_range) AS end_time,
 		       b.status, b.total_price, b.created_at
@@ -1656,7 +1661,7 @@ func (r *bookingRepo) GetAllBookings(ctx context.Context, actor auth.Actor, boun
 	rows, err := r.db.Query(ctx, fmt.Sprintf(`
 		SELECT
 			b.id,
-			b.pitch_id,    COALESCE(p.name,      '') AS pitch_name,
+			b.pitch_id,    COALESCE(`+pitchDisplayNameExpr+`, '') AS pitch_name,
 			b.player_id,   COALESCE(u.full_name,  '') AS user_name,
 			               COALESCE(u.email,      '') AS user_email,
 			               COALESCE(u.phone,      '') AS user_phone,
