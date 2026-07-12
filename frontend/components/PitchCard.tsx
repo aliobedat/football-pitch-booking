@@ -61,7 +61,15 @@ function PitchSilhouette() {
 // Single <Link> wraps the whole card. CTA "احجز الآن" is a <span> — not a
 // nested <a>/<button> — zero nested interactive elements.
 
-export default function PitchCard({ pitch }: { pitch: Pitch }) {
+// WO-1C-PAYLOAD: the listing now feeds venue-aggregated rows through this same
+// card. pitchCount > 1 adds the «N ملاعب» chip; priceFrom renders «من {price}»
+// (price varies across the venue). Both absent → byte-identical to the classic
+// pitch card (collapse rule).
+export default function PitchCard({ pitch, pitchCount, priceFrom }: {
+  pitch: Pitch;
+  pitchCount?: number;
+  priceFrom?: boolean;
+}) {
   const [imgLoaded, setImgLoaded] = useState(false);
   const [imgError,  setImgError]  = useState(false);
 
@@ -76,9 +84,13 @@ export default function PitchCard({ pitch }: { pitch: Pitch }) {
   return (
     <Link
       // WO-VENUES Gate 1c: pitch links point at the venue URL (pre-selected).
-      // venue_slug is always present post-034; the /pitches/:id redirect
-      // covers any row without one (never a dead end).
-      href={pitch.venue_slug ? `/venues/${pitch.venue_slug}?pitch=${pitch.id}` : `/pitches/${pitch.id}`}
+      // WO-1C-PAYLOAD: a venue-aggregated row (pitchCount prop present) links
+      // to the bare venue URL — its `id` is the VENUE id, so no ?pitch= param
+      // (the venue page defaults sensibly). venue_slug is always present
+      // post-034; the /pitches/:id redirect covers any row without one.
+      href={pitchCount !== undefined
+        ? `/venues/${pitch.venue_slug}`
+        : pitch.venue_slug ? `/venues/${pitch.venue_slug}?pitch=${pitch.id}` : `/pitches/${pitch.id}`}
       className={[
         'group block rounded-2xl overflow-hidden',
         'bg-[#141715] border border-gray-800',
@@ -176,14 +188,24 @@ export default function PitchCard({ pitch }: { pitch: Pitch }) {
             </span>
           </div>
 
-          {/* Spec pills */}
+          {/* Spec pills — format/surface render only when known (uniform across
+              a venue's pitches, or a plain pitch row; mixed venues omit them). */}
           <div className="flex flex-wrap gap-1.5" aria-label="مواصفات الملعب">
-            <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-white/[0.05] border border-white/[0.09] text-white/50">
-              {pitch.size ? pitch.size.replace('x', '×') : pitch.format}
-            </span>
-            <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-white/[0.05] border border-white/[0.09] text-white/50">
-              {surfaceDisplay(pitch.surface)}
-            </span>
+            {pitchCount !== undefined && pitchCount > 1 && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold text-white/40 bg-white/[0.05] border border-white/[0.08]">
+                {pitchCount} ملاعب
+              </span>
+            )}
+            {(pitch.size || pitch.format) && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-white/[0.05] border border-white/[0.09] text-white/50">
+                {pitch.size ? pitch.size.replace('x', '×') : pitch.format}
+              </span>
+            )}
+            {pitch.surface && (
+              <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-white/[0.05] border border-white/[0.09] text-white/50">
+                {surfaceDisplay(pitch.surface)}
+              </span>
+            )}
             {pitch.isIndoor !== undefined && (
               <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-white/[0.05] border border-white/[0.09] text-white/50">
                 {pitch.isIndoor ? 'مغطّى' : 'مكشوف'}
@@ -207,6 +229,7 @@ export default function PitchCard({ pitch }: { pitch: Pitch }) {
           <div className="flex items-center justify-between">
             <div>
               <div className="flex items-baseline gap-1">
+                {priceFrom && <span className="text-[11px] font-semibold text-white/40">من</span>}
                 <span className="text-[22px] font-bold text-[#f0efe8] leading-none tracking-tight">
                   {pitch.pricePerHour}
                 </span>
