@@ -23,6 +23,12 @@ export type Pitch = {
   image_url?: string;
   maps_url?: string;
 
+  // ── WO-VENUES (Gate 1b payload, always present post-034; optional here so
+  //    older fixtures keep typechecking) ─────────────────────────────────────
+  venue_slug?: string;
+  venue_name?: string;
+  label?: string;
+
   // ── UI fields (future backend additions) ──────────────────────────────────
   city?: string;
   area?: string;

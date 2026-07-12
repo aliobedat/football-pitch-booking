@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
-import { CalendarDays, CheckCircle2 } from 'lucide-react';
+import { CalendarDays, CheckCircle2, Users } from 'lucide-react';
 import axios from 'axios';
 import api from '@/lib/api';
 import { useAuth, type User } from '@/context/AuthContext';
@@ -39,9 +39,24 @@ interface LocalRange {
   end:   number;
 }
 
+// PitchOption is one selectable pitch inside a multi-pitch venue (WO-VENUES
+// Gate 1c). subline is shown only when format/price differ across the venue.
+export interface PitchOption {
+  id:       number;
+  label:    string;
+  subline?: string;
+}
+
 interface Props {
   pitchId:      number;
   pricePerHour: number;
+  // Multi-pitch venue selector (Gate 1c): when >1 option is passed, segmented
+  // chips render above the date bar. Selection is controlled by the parent —
+  // the availability effect below already refetches on pitchId and clears the
+  // selected slot (setBaseHour(null)); date + صباحاً/مساءً stay sticky because
+  // they live in state the pitch switch never touches.
+  pitchOptions?: PitchOption[];
+  onPitchChange?: (id: number) => void;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -182,7 +197,7 @@ function formatTime12(totalMins: number): string {
 // Component
 // ─────────────────────────────────────────────────────────────────────────────
 
-export default function BookingForm({ pitchId, pricePerHour }: Props) {
+export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPitchChange }: Props) {
   const router = useRouter();
   const { user, login, refreshUser, isLoading: authLoading } = useAuth();
 
@@ -704,6 +719,41 @@ export default function BookingForm({ pitchId, pricePerHour }: Props) {
       </div>
 
       <div className="px-6 py-5 flex flex-col gap-6">
+
+        {/* ── Pitch selector — multi-pitch venues only (Gate 1c) ── */}
+        {pitchOptions && pitchOptions.length > 1 && onPitchChange && (
+          <div>
+            <p className="flex items-center gap-1.5 text-[10px] font-bold text-white/30 tracking-widest uppercase mb-3">
+              <Users size={11} className="text-emerald-500" aria-hidden />
+              الملعب
+            </p>
+            <div
+              className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+              role="group"
+              aria-label="اختيار الملعب"
+            >
+              {pitchOptions.map(opt => {
+                const selected = opt.id === pitchId;
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => { if (!selected) onPitchChange(opt.id); }}
+                    aria-pressed={selected}
+                    className={optionBtn(selected, false, 'flex-col gap-0.5 px-4 py-2.5 min-w-[88px] flex-shrink-0')}
+                  >
+                    <span className="text-[12px] leading-tight whitespace-nowrap">{opt.label}</span>
+                    {opt.subline && (
+                      <span className={`text-[9px] font-semibold whitespace-nowrap ${selected ? 'text-emerald-300/70' : 'text-white/30'}`}>
+                        {opt.subline}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* ── 7-day rolling strip + date picker ── */}
         <div>

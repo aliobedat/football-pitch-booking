@@ -1,21 +1,56 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+// Venue page (WO-VENUES Gate 1c-minimal) — the player-facing detail page keyed
+// by venue slug. COLLAPSE RULE: a single-pitch venue renders exactly the pitch
+// page experience (no selector, no venue vocabulary). Multi-pitch venues add a
+// segmented pitch selector inside the booking card, above the date bar; the
+// hero/info cards reflect the SELECTED pitch, the venue name stays the title.
+// Reuses the pitch page's components (PitchDiagram, PitchMap, ReviewSection,
+// BookingForm) — no forks.
+
+import { useState, useEffect, useMemo, Suspense } from 'react';
 import dynamic from 'next/dynamic';
 import Link from 'next/link';
-import { useParams, useRouter } from 'next/navigation';
+import { useParams, useSearchParams } from 'next/navigation';
 import api from '@/lib/api';
-import type { Pitch } from '@/lib/types';
 import Navbar from '@/components/Navbar';
 import PitchDiagram from '@/components/PitchDiagram';
-import BookingForm from './BookingForm';
+import BookingForm, { type PitchOption } from '@/app/pitches/[id]/BookingForm';
 import ReviewSection from '@/components/reviews/ReviewSection';
-import { MapPin, Star, Users, Zap, ArrowRight } from 'lucide-react';
+import { MapPin, Star, Users, ArrowRight } from 'lucide-react';
 
-// ── Lazy-load the map — Maps JS is client-only and heavy ─────────────────────
 const PitchMap = dynamic(() => import('@/components/PitchMap'), { ssr: false });
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Wire types — GET /venues/:slug (Gate 1b PublicVenue payload) ─────────────
+
+interface VenuePitch {
+  id:            number;
+  label:         string;
+  name:          string;
+  surface:       string;
+  format:        string;
+  pricePerHour:  number;
+  amenities:     string[];
+  pitchHue:      string;
+  rating:        number | null;
+  reviewsCount:  number;
+  image_url:     string;
+}
+
+interface VenueData {
+  id:              number;
+  name:            string;
+  slug:            string;
+  neighborhood:    string;
+  maps_url:        string;
+  lat:             number;
+  lng:             number;
+  description:     string;
+  cover_image_url: string;
+  rating:          number | null;
+  reviewsCount:    number;
+  pitches:         VenuePitch[];
+}
 
 const SURFACE_LABEL: Record<string, string> = {
   artificial_grass: 'عشبية صناعية',
@@ -25,39 +60,52 @@ const SURFACE_LABEL: Record<string, string> = {
 };
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
-//
-// WO-VENUES Gate 1c: /pitches/:id is now a LEGACY REDIRECT — old booking links
-// (WhatsApp history) land here, we fetch the pitch and replace() to its venue
-// page pre-selected (/venues/{venue_slug}?pitch={id}). Only when venue_slug is
-// missing or the redirect can't be derived does the original page render as a
-// fallback — never a dead end.
 
-export default function PitchDetailPage() {
-  const { id } = useParams<{ id: string }>();
-  const router = useRouter();
+function VenuePageContent() {
+  const { slug } = useParams<{ slug: string }>();
+  const searchParams = useSearchParams();
 
-  const [pitch,     setPitch]     = useState<Pitch | null>(null);
+  const [venue,     setVenue]     = useState<VenueData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error,     setError]     = useState<string | null>(null);
-  // Falls back to the generated PitchDiagram if the uploaded image fails to load.
+  const [selId,     setSelId]     = useState<number | null>(null);
   const [heroImgError, setHeroImgError] = useState(false);
 
   useEffect(() => {
-    api.get(`/pitches/${id}`)
+    api.get(`/venues/${slug}`)
       .then(res => {
-        const p: Pitch = res.data.data;
-        if (p.venue_slug) {
-          // Keep the spinner up through the client-side replace — the fallback
-          // page must never flash.
-          router.replace(`/venues/${p.venue_slug}?pitch=${p.id}`);
-          return;
-        }
-        setPitch(p);
-        setIsLoading(false);
+        const v: VenueData = res.data.data;
+        setVenue(v);
+        // Default selection: ?pitch= when present AND one of this venue's
+        // pitches; otherwise the first pitch.
+        const wanted = Number(searchParams.get('pitch'));
+        const valid  = v.pitches.find(p => p.id === wanted);
+        setSelId(valid ? valid.id : v.pitches[0]?.id ?? null);
       })
-      .catch(() => { setError('تعذّر تحميل بيانات الملعب'); setIsLoading(false); });
+      .catch(()  => setError('تعذّر تحميل بيانات الملعب'))
+      .finally(() => setIsLoading(false));
+    // searchParams is read once at load for the initial selection only —
+    // switching pitches never navigates.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [id]);
+  }, [slug]);
+
+  const pitch = useMemo(
+    () => venue?.pitches.find(p => p.id === selId) ?? venue?.pitches[0] ?? null,
+    [venue, selId],
+  );
+
+  // Selector options — sub-line only when format or price differ across pitches.
+  const pitchOptions = useMemo<PitchOption[]>(() => {
+    if (!venue) return [];
+    const differs =
+      new Set(venue.pitches.map(p => p.format)).size > 1 ||
+      new Set(venue.pitches.map(p => p.pricePerHour)).size > 1;
+    return venue.pitches.map(p => ({
+      id:    p.id,
+      label: p.label || p.name,
+      ...(differs ? { subline: `${p.format} · ${p.pricePerHour} د.أ` } : {}),
+    }));
+  }, [venue]);
 
   if (isLoading) {
     return (
@@ -67,7 +115,7 @@ export default function PitchDetailPage() {
     );
   }
 
-  if (error || !pitch) {
+  if (error || !venue || !pitch) {
     return (
       <div className="min-h-screen bg-[#0d0f0e] flex flex-col items-center justify-center gap-4">
         <p className="text-white/50 text-[15px]">{error ?? 'الملعب غير موجود'}</p>
@@ -79,7 +127,8 @@ export default function PitchDetailPage() {
     );
   }
 
-  const hasCoords = pitch.lat !== 0 || pitch.lng !== 0;
+  const heroImage = pitch.image_url || venue.cover_image_url;
+  const hasCoords = venue.lat !== 0 || venue.lng !== 0;
 
   return (
     <div dir="rtl" className="min-h-screen bg-[#0d0f0e]">
@@ -88,27 +137,18 @@ export default function PitchDetailPage() {
 
       {/* ── Hero Banner ───────────────────────────────────────────────────── */}
       <div className="relative w-full h-64 sm:h-80 overflow-hidden">
-        {pitch.image_url && !heroImgError ? (
+        {heroImage && !heroImgError ? (
           // eslint-disable-next-line @next/next/no-img-element
           <img
-            src={pitch.image_url}
-            alt={pitch.name}
+            src={heroImage}
+            alt={venue.name}
             className="absolute inset-0 w-full h-full object-cover"
             onError={() => setHeroImgError(true)}
           />
         ) : (
-          <PitchDiagram hue={pitch.pitchHue} featured={pitch.isFeatured} />
+          <PitchDiagram hue={pitch.pitchHue} featured={false} />
         )}
         <div className="absolute inset-0 bg-gradient-to-t from-[#0d0f0e] via-[#0d0f0e]/50 to-transparent" />
-
-        {pitch.isFeatured && (
-          <div className="absolute top-5 end-5 z-10">
-            <span className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[10px] font-bold tracking-wide bg-emerald-500/20 border border-emerald-500/30 text-emerald-400">
-              <Zap size={9} aria-hidden="true" />
-              ملعب مميّز
-            </span>
-          </div>
-        )}
 
         <div className="absolute bottom-0 inset-x-0 px-6 pb-7 max-w-7xl mx-auto">
           <div className="flex items-center gap-1.5 text-[11px] text-white/35 mb-2.5">
@@ -116,14 +156,14 @@ export default function PitchDetailPage() {
               الملاعب
             </Link>
             <ArrowRight size={10} className="rotate-180" aria-hidden="true" />
-            <span className="text-white/55">{pitch.name}</span>
+            <span className="text-white/55">{venue.name}</span>
           </div>
           <h1 className="text-3xl sm:text-[40px] font-bold text-[#f0efe8] tracking-tight leading-tight">
-            {pitch.name}
+            {venue.name}
           </h1>
           <div className="flex items-center gap-1.5 mt-2 text-white/40">
             <MapPin size={12} aria-hidden="true" />
-            <span className="text-[12px]">{pitch.neighborhood}، عمّان</span>
+            <span className="text-[12px]">{venue.neighborhood}، عمّان</span>
           </div>
         </div>
       </div>
@@ -135,10 +175,10 @@ export default function PitchDetailPage() {
           {/* ── Details column ── */}
           <section className="lg:col-span-2 flex flex-col gap-5" aria-label="تفاصيل الملعب">
 
-            {/* Stats grid */}
+            {/* Stats grid — per-pitch values follow the SELECTED pitch */}
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
 
-              {/* Rating card — null-safe */}
+              {/* Rating card — null-safe, per-pitch (venue aggregate is a followup) */}
               <div className="flex flex-col gap-1.5 p-4 rounded-xl bg-[#141715] border border-white/[0.07]">
                 <Star
                   size={13}
@@ -161,7 +201,7 @@ export default function PitchDetailPage() {
                 )}
               </div>
 
-              {/* Price */}
+              {/* Price — always the selected pitch's price, never a range */}
               <div className="flex flex-col gap-1.5 p-4 rounded-xl bg-[#141715] border border-white/[0.07]">
                 <span className="text-[10px] font-semibold text-emerald-500 uppercase tracking-wide">
                   السعر
@@ -196,7 +236,7 @@ export default function PitchDetailPage() {
               </div>
             </div>
 
-            {/* Amenities */}
+            {/* Amenities — per selected pitch */}
             {pitch.amenities.length > 0 && (
               <div className="p-5 rounded-xl bg-[#141715] border border-white/[0.07]">
                 <h2 className="text-[13px] font-bold text-[#f0efe8] mb-3.5">المرافق والخدمات</h2>
@@ -211,24 +251,24 @@ export default function PitchDetailPage() {
               </div>
             )}
 
-            {/* Description */}
-            {pitch.description && (
+            {/* Description — place-level */}
+            {venue.description && (
               <div className="p-5 rounded-xl bg-[#141715] border border-white/[0.07]">
                 <h2 className="text-[13px] font-bold text-[#f0efe8] mb-3">عن الملعب</h2>
-                <p className="text-[13px] text-white/50 leading-relaxed">{pitch.description}</p>
+                <p className="text-[13px] text-white/50 leading-relaxed">{venue.description}</p>
               </div>
             )}
 
-            {/* Location + interactive map */}
+            {/* Location + interactive map — place-level */}
             <div className="p-5 rounded-xl bg-[#141715] border border-white/[0.07]">
               <h2 className="text-[13px] font-bold text-[#f0efe8] mb-3.5">الموقع</h2>
               <div className="flex items-center gap-2 text-white/40 mb-4">
                 <MapPin size={13} className="text-emerald-500 shrink-0" aria-hidden="true" />
-                <span className="text-[12px]">{pitch.neighborhood}، عمّان، الأردن</span>
+                <span className="text-[12px]">{venue.neighborhood}، عمّان، الأردن</span>
               </div>
-              {pitch.maps_url && (
+              {venue.maps_url && (
                 <a
-                  href={pitch.maps_url}
+                  href={venue.maps_url}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="inline-flex items-center gap-1.5 mb-4 text-[12px] font-semibold text-emerald-400 hover:text-emerald-300 transition-colors duration-150"
@@ -237,16 +277,14 @@ export default function PitchDetailPage() {
                   افتح في خرائط Google
                 </a>
               )}
-              {/* Only render the map when both coordinates and an API key exist —
-                  otherwise we hide the container entirely (no empty placeholder). */}
               {hasCoords && process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY && (
                 <div className="h-56 rounded-xl overflow-hidden">
-                  <PitchMap lat={pitch.lat} lng={pitch.lng} zoom={15} />
+                  <PitchMap lat={venue.lat} lng={venue.lng} zoom={15} />
                 </div>
               )}
             </div>
 
-            {/* Verified reviews */}
+            {/* Verified reviews — per selected pitch (aggregate view: logged followup) */}
             <div className="p-5 rounded-xl bg-[#141715] border border-white/[0.07]">
               <ReviewSection pitchId={pitch.id} />
             </div>
@@ -254,7 +292,12 @@ export default function PitchDetailPage() {
 
           {/* ── Booking form column — sticky on desktop ── */}
           <aside className="lg:col-span-1 lg:sticky lg:top-24" aria-label="نموذج الحجز">
-            <BookingForm pitchId={pitch.id} pricePerHour={pitch.pricePerHour} />
+            <BookingForm
+              pitchId={pitch.id}
+              pricePerHour={pitch.pricePerHour}
+              pitchOptions={pitchOptions}
+              onPitchChange={setSelId}
+            />
           </aside>
 
         </div>
@@ -280,5 +323,18 @@ export default function PitchDetailPage() {
       </footer>
 
     </div>
+  );
+}
+
+// useSearchParams requires a Suspense boundary at prerender time.
+export default function VenuePage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-[#0d0f0e] flex items-center justify-center">
+        <div className="w-6 h-6 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
+      </div>
+    }>
+      <VenuePageContent />
+    </Suspense>
   );
 }
