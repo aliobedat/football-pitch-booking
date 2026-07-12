@@ -52,6 +52,7 @@ func newBlockEnv(t *testing.T) *blockEnv {
 		pool.Close()
 		t.Fatalf("ping: %v", err)
 	}
+	testutil.AssertSchemaBaseline(t, pool)
 
 	suffix := testutil.UniqueSuffix() % 1_000_000
 	mk := func(name, prefix, role string) int64 {

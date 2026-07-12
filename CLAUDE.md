@@ -71,3 +71,29 @@ label-persistence path but implemented the backend change instead of stopping.
 The work was correct, minimal, tested, and approved post-hoc; however, the
 procedural violation is logged. Stop triggers are not overridable based on
 confidence in the fix.
+
+## Incident log
+2026-07-12 — Post-034 standalone pitch creation down (23502 → 500). Root
+cause: CreatePitch inserted the pitch with venue_id NULL and linked the auto
+1:1 venue AFTERWARD; migration 034's SET NOT NULL made step 1 impossible. All
+suites stayed green because the scratch baseline had been rebuilt from a
+PRE-034 schema.sql (the verification branch forked before the regen PR
+merged), so the NOT NULL contract was never exercised — a false green. Caught
+by the first real provisioned owner. Fixed by creating the venue BEFORE the
+pitch in the same transaction (WO-HOTFIX-STANDALONE-CREATE).
+
+## Testing & migration rules
+- RULE — schema baseline freshness: every DB-suite verification run MUST
+  assert the scratch schema matches CURRENT main's database/schema.sql before
+  trusting any result. Automated: the re-baseline procedure stamps scratch
+  with the schema.sql pg_dump generation token (one-row `schema_baseline`
+  table); `testutil.AssertSchemaBaseline` fails fast on mismatch or missing
+  stamp. A green suite against a stale baseline is a FAILED gate.
+- RULE — migration preconditions are tested claims: any migration whose
+  safety depends on application behavior ("the write path now populates X")
+  must cite the specific test that proves the claim, verified against the
+  POST-migration schema, BEFORE production apply.
+- Contract note: auto-venue placeholder slugs created at runtime key to the
+  VENUE's own id (v-<venue id>); rows from the 033/034 backfills key to the
+  pitch id (v-<pitch id>). Both match ^v-[0-9]+$ — no functional difference;
+  nothing may parse the number back to an entity id.

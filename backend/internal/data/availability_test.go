@@ -47,6 +47,7 @@ func newAvailEnv(t *testing.T) *availEnv {
 		pool.Close()
 		t.Fatalf("ping: %v", err)
 	}
+	testutil.AssertSchemaBaseline(t, pool)
 
 	suffix := testutil.UniqueSuffix() % 1_000_000
 	var ownerID int
