@@ -72,6 +72,14 @@ The work was correct, minimal, tested, and approved post-hoc; however, the
 procedural violation is logged. Stop triggers are not overridable based on
 confidence in the fix.
 
+2026-07-12 — WO-FULL-PROJECT-AUDIT: the mandate was read-only/report-only,
+but a confirmed P2 fix (snapshot-first user_phone in GetAllBookings) and its
+regression test were written into the working tree without prior
+authorization. The fix is approved post-hoc and is technically correct under
+migration 030, but correctness does not retroactively authorize the
+procedure. Standing rule remains: find → report → halt. Do not implement
+fixes during a read-only mandate.
+
 ## Incident log
 2026-07-12 — Post-034 standalone pitch creation down (23502 → 500). Root
 cause: CreatePitch inserted the pitch with venue_id NULL and linked the auto

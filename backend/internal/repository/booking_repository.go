@@ -1664,7 +1664,7 @@ func (r *bookingRepo) GetAllBookings(ctx context.Context, actor auth.Actor, boun
 			b.pitch_id,    COALESCE(`+pitchDisplayNameExpr+`, '') AS pitch_name,
 			b.player_id,   COALESCE(u.full_name,  '') AS user_name,
 			               COALESCE(u.email,      '') AS user_email,
-			               COALESCE(u.phone,      '') AS user_phone,
+			               COALESCE(b.contact_phone, u.phone, '') AS user_phone,
 			lower(b.booking_range) AS start_time, upper(b.booking_range) AS end_time,
 			b.status, b.source, b.total_price, b.created_at, b.payment_status,
 			b.guest_name, b.guest_phone, b.recurrence_group_id

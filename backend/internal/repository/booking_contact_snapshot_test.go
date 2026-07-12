@@ -21,6 +21,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/models"
 	"github.com/ali/football-pitch-api/internal/testutil"
@@ -156,5 +157,58 @@ func TestContactSnapshot_PreMigrationRow_FallsBackToUsersPhone(t *testing.T) {
 	}
 	if contact.Phone != e.phone {
 		t.Errorf("fallback contact phone = %q, want users.phone %q", contact.Phone, e.phone)
+	}
+}
+
+// TestContactSnapshot_ListAgreesWithDetail proves the owner/admin listing
+// (GetAllBookings) resolves user_phone with the same snapshot-first COALESCE as
+// GetBookingContact: frozen snapshot wins over a later profile edit, and a
+// pre-030 row (NULL snapshot) falls back to the live users.phone.
+func TestContactSnapshot_ListAgreesWithDetail(t *testing.T) {
+	e := newContactEnv(t)
+	ctx := context.Background()
+	start := e.futureAt(160)
+
+	b, err := e.repo.CreateBooking(ctx, models.CreateBookingRequest{
+		PitchID: e.pitchID, PlayerID: e.playerID, StartTime: start, EndTime: start.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create booking: %v", err)
+	}
+
+	listPhone := func(label string) string {
+		t.Helper()
+		all, err := e.repo.GetAllBookings(ctx, auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner}, nil, BookingFilter{})
+		if err != nil {
+			t.Fatalf("%s: GetAllBookings: %v", label, err)
+		}
+		for _, ab := range all {
+			if int64(ab.ID) == b.ID {
+				return ab.UserPhone
+			}
+		}
+		t.Fatalf("%s: booking %d not in owner listing", label, b.ID)
+		return ""
+	}
+
+	// Snapshot wins: edit the profile phone after booking, list must keep the
+	// frozen value. The new number takes its own UniqueSuffix — mutating a digit
+	// of the fixture phone can collide with a sibling fixture in a full-suite
+	// run (the process-wide counter hands out adjacent suffixes → 23505).
+	newPhone := fmt.Sprintf("+96293%06d", testutil.UniqueSuffix()%1_000_000)
+	if _, err := e.pool.Exec(ctx, `UPDATE users SET phone = $1 WHERE id = $2`, newPhone, e.playerID); err != nil {
+		t.Fatalf("update player phone: %v", err)
+	}
+	if got := listPhone("post-edit"); got != e.phone {
+		t.Errorf("list user_phone = %q, want frozen snapshot %q (not the edited %q)", got, e.phone, newPhone)
+	}
+
+	// Pre-030 fallback: clear the snapshot, list must fall back to the live users.phone.
+	if _, err := e.pool.Exec(ctx,
+		`UPDATE bookings SET contact_name = NULL, contact_phone = NULL WHERE id = $1`, b.ID); err != nil {
+		t.Fatalf("clear snapshot: %v", err)
+	}
+	if got := listPhone("null-snapshot"); got != newPhone {
+		t.Errorf("fallback list user_phone = %q, want users.phone %q", got, newPhone)
 	}
 }
