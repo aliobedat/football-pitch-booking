@@ -934,3 +934,51 @@ func TestVenuesDB_PublicListAggregates(t *testing.T) {
 		t.Errorf("after soft-delete pitchCount = %v, want 0", row["pitchCount"])
 	}
 }
+
+// ── WO-FORMAT-6V6: six-a-side flows end-to-end ───────────────────────────────
+
+func TestVenuesDB_FormatSixASide(t *testing.T) {
+	e := newVnEnv(t)
+	suffix := testutil.UniqueSuffix() % 1_000_000
+	r := e.router(e.ownerA, "owner")
+
+	// (a) end-to-end create: a سداسي pitch persists and echoes its format.
+	sixSlug := fmt.Sprintf("six-%d", suffix)
+	vSix := e.createVenue(t, r, sixSlug)
+	body := map[string]any{
+		"name": "سداسي أ", "neighborhood": "عبدون", "surface": "artificial_grass",
+		"format": "سداسي", "price_per_hour": 28, "maps_url": vnMapsURL, "venue_id": vSix,
+	}
+	rec := bsDo(r, http.MethodPost, "/pitches", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create سداسي pitch: %d %s (is migration 035 applied to the scratch?)", rec.Code, rec.Body.String())
+	}
+	if got := decodeData(t, rec.Body.Bytes())["format"]; got != "سداسي" {
+		t.Errorf("created format = %v, want سداسي", got)
+	}
+
+	// (b) uniform سداسي venue: the listing's uniform format is سداسي and the
+	// formats set carries it (the client 6×6 chip any-matches this set).
+	row := publicListRow(t, r, sixSlug)
+	if row["format"] != "سداسي" {
+		t.Errorf("uniform سداسي venue format = %v, want سداسي", row["format"])
+	}
+	if got := formatsOf(row); len(got) != 1 || got[0] != "سداسي" {
+		t.Errorf("formats = %v, want [سداسي]", got)
+	}
+
+	// (c) mixed venue (خماسي + سداسي): format collapses to null, the set holds
+	// BOTH values — the any-match rule makes the venue visible under 5×5 AND 6×6.
+	body["name"], body["format"] = "خماسي ب", "خماسي"
+	if rec := bsDo(r, http.MethodPost, "/pitches", body); rec.Code != http.StatusCreated {
+		t.Fatalf("add خماسي sibling: %d %s", rec.Code, rec.Body.String())
+	}
+	row = publicListRow(t, r, sixSlug)
+	if v, has := row["format"]; has && v != nil {
+		t.Errorf("mixed format = %v, want null/absent", v)
+	}
+	got := formatsOf(row)
+	if len(got) != 2 || got[0] != "خماسي" || got[1] != "سداسي" {
+		t.Errorf("mixed formats = %v, want [خماسي سداسي]", got)
+	}
+}

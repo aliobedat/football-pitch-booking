@@ -33,7 +33,7 @@ export type Pitch = {
   city?: string;
   area?: string;
   imageUrl?: string | null;
-  size?: '5x5' | '7x7' | '11x11';
+  size?: '5x5' | '6x6' | '7x7' | '11x11';
   isIndoor?: boolean;
   hasLighting?: boolean;
   hasParking?: boolean;
