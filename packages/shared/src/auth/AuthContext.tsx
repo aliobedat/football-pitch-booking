@@ -61,9 +61,15 @@ export function createAuthContext(api: AxiosInstance, loginPath = '/login') {
 
     const logout = useCallback(async () => {
       try {
+        // Expects 204 — /auth/logout is refresh-cookie-authenticated and
+        // idempotent (WO-AUTH-GHOST-LOGIN), so it succeeds even after the
+        // access token expired. A failure here is unexpected and worth a log
+        // (the old silent catch hid the 401 that stranded live refresh
+        // cookies), but it must never trap the user in the session: state is
+        // cleared and the redirect happens regardless.
         await api.post('/auth/logout');
-      } catch {
-        // ignore — still clear local state below
+      } catch (err) {
+        console.warn('[auth] logout request failed; clearing local session anyway', err);
       } finally {
         setUser(null);
         if (typeof window !== 'undefined') window.location.href = loginPath;

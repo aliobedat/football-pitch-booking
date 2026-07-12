@@ -41,6 +41,13 @@ type UserRepository interface {
 	// RevokeAllUserRefreshTokens invalidates every active refresh token for a
 	// user — used on logout.
 	RevokeAllUserRefreshTokens(ctx context.Context, userID int) error
+
+	// RevokeRefreshTokenByHash invalidates the single refresh token behind the
+	// presented cookie (WO-AUTH-GHOST-LOGIN: logout is authenticated by the
+	// refresh cookie itself, so an EXPIRED session can still end itself).
+	// Unknown/already-revoked hashes are a silent no-op — logout is idempotent
+	// and must never become a token-validity oracle.
+	RevokeRefreshTokenByHash(ctx context.Context, tokenHash string) error
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -148,6 +155,22 @@ func (r *userRepo) RevokeAllUserRefreshTokens(ctx context.Context, userID int) e
 	`, userID)
 	if err != nil {
 		return fmt.Errorf("RevokeAllUserRefreshTokens: %w", err)
+	}
+	return nil
+}
+
+// RevokeRefreshTokenByHash invalidates one token by its hash. Zero rows
+// affected (unknown/expired/already revoked) is NOT an error — logout is
+// idempotent.
+func (r *userRepo) RevokeRefreshTokenByHash(ctx context.Context, tokenHash string) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE refresh_tokens
+		SET    revoked = TRUE
+		WHERE  token_hash = $1
+		  AND  revoked    = FALSE
+	`, tokenHash)
+	if err != nil {
+		return fmt.Errorf("RevokeRefreshTokenByHash: %w", err)
 	}
 	return nil
 }

@@ -136,6 +136,14 @@ func Register(
 		// forced rotation — the rotated tokens are httpOnly and the response is
 		// CORS-blocked. (Defense-in-depth trade-off, accepted.)
 		authRoutes.POST("/refresh", authHandler.Refresh)
+
+		// Logout is authenticated by the refresh COOKIE, not RequireAuth
+		// (WO-AUTH-GHOST-LOGIN): an expired access token must not stop a browser
+		// from ending its session — that stranded a live one-week refresh cookie
+		// and resurrected "logged-out" sessions. CSRF stays enforced (state-
+		// changing, cookie-authenticated); the handler is idempotent and always
+		// returns 204.
+		authRoutes.POST("/logout", middleware.RequireCSRF(), authHandler.Logout)
 	}
 
 	// ════════════════════════════════════════════════════════════════════════
@@ -152,9 +160,6 @@ func Register(
 	// NOT in the JWT — a rebind/revoke takes effect on the next request.
 	protected.Use(middleware.ResolveScope(staffRepo))
 	{
-		// Auth actions that require identity
-		protected.POST("/auth/logout", authHandler.Logout)
-
 		// Current-user profile — session rehydration for cookie-based auth.
 		protected.GET("/auth/me", phoneAuthHandler.GetCurrentUser)
 
