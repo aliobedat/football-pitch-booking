@@ -246,3 +246,90 @@ func TestSourceReaders_ReviewCannotReferenceBlock(t *testing.T) {
 		t.Fatalf("review referencing a block: err = %v, want ErrReviewBookingInvalid (composite FK rejects it)", err)
 	}
 }
+
+// ── WO-COMPOSITE-B2C: booking reads carry the composite display name ─────────
+
+func TestSourceReaders_CompositeBookingNames(t *testing.T) {
+	e := newReadersEnv(t)
+	ctx := context.Background()
+
+	// 1:1 venue (collapse): the player's booking shows the bare name — the
+	// venue is named after its lone pitch, so the collapse rule yields it.
+	first := e.seed("player", &e.playerID, time.Now().UTC().Add(48*time.Hour), time.Hour, "confirmed")
+	nameOfUser := func(bookingID int64) string {
+		t.Helper()
+		list, err := e.repo.GetUserBookings(ctx, e.playerID)
+		if err != nil {
+			t.Fatalf("GetUserBookings: %v", err)
+		}
+		for _, b := range list {
+			if b.ID == bookingID {
+				return b.PitchName
+			}
+		}
+		t.Fatalf("booking %d not in GetUserBookings", bookingID)
+		return ""
+	}
+	nameOfAdmin := func(bookingID int64) string {
+		t.Helper()
+		all, err := e.repo.GetAllBookings(ctx, auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner}, nil, BookingFilter{})
+		if err != nil {
+			t.Fatalf("GetAllBookings: %v", err)
+		}
+		for _, b := range all {
+			if b.ID == bookingID {
+				return b.PitchName
+			}
+		}
+		t.Fatalf("booking %d not in GetAllBookings", bookingID)
+		return ""
+	}
+	if got := nameOfUser(first); got != "RD Pitch" {
+		t.Errorf("1:1 GetUserBookings name = %q, want bare %q (collapse rule)", got, "RD Pitch")
+	}
+	if got := nameOfAdmin(first); got != "RD Pitch" {
+		t.Errorf("1:1 GetAllBookings name = %q, want bare %q (collapse rule)", got, "RD Pitch")
+	}
+
+	// Grow the venue to two pitches: display names become composite at read
+	// time — for the NEW pitch's booking AND retroactively for the first
+	// (the first pitch gets the auto «ملعب ١» label).
+	var venueID int64
+	if err := e.pool.QueryRow(ctx, `SELECT venue_id FROM pitches WHERE id = $1`, e.pitchID).Scan(&venueID); err != nil {
+		t.Fatalf("resolve venue: %v", err)
+	}
+	model := &data.PitchModel{DB: e.pool}
+	sibling, err := model.CreatePitch(ctx, data.CreatePitchRequest{
+		Name: "ملعب ٢", Neighborhood: "Amman", Surface: "artificial_grass",
+		Format: "خماسي", PricePerHour: 30, OwnerID: int(e.ownerID),
+		VenueID: &venueID, Label: "ملعب ٢",
+	})
+	if err != nil {
+		t.Fatalf("create sibling: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = e.pool.Exec(context.Background(), `DELETE FROM bookings WHERE pitch_id = $1`, sibling.ID)
+		_, _ = e.pool.Exec(context.Background(), `DELETE FROM pitches WHERE id = $1`, sibling.ID)
+	})
+
+	second := int64(0)
+	if err := e.pool.QueryRow(ctx, `
+		INSERT INTO bookings (pitch_id, player_id, booking_range, total_price, status, source)
+		VALUES ($1, $2, tstzrange($3::timestamptz, $4::timestamptz, '[)'), 30, 'confirmed', 'player')
+		RETURNING id
+	`, sibling.ID, e.playerID,
+		time.Now().UTC().Add(72*time.Hour), time.Now().UTC().Add(73*time.Hour)).Scan(&second); err != nil {
+		t.Fatalf("seed sibling booking: %v", err)
+	}
+
+	if got := nameOfUser(second); got != "RD Pitch — ملعب ٢" {
+		t.Errorf("multi GetUserBookings name = %q, want %q", got, "RD Pitch — ملعب ٢")
+	}
+	if got := nameOfAdmin(second); got != "RD Pitch — ملعب ٢" {
+		t.Errorf("multi GetAllBookings name = %q, want %q", got, "RD Pitch — ملعب ٢")
+	}
+	// The FIRST booking's display follows at read time (auto «ملعب ١»).
+	if got := nameOfUser(first); got != "RD Pitch — ملعب ١" {
+		t.Errorf("retro GetUserBookings name = %q, want %q", got, "RD Pitch — ملعب ١")
+	}
+}
