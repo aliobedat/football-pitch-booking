@@ -644,3 +644,80 @@ func TestVenuesDB_PitchLabelOnCreate(t *testing.T) {
 		t.Errorf("over-cap label = %d, want 400 (%s)", rec.Code, rec.Body.String())
 	}
 }
+
+// ── Gate 1d UX: the second pitch auto-labels the first as «ملعب ١» ───────────
+
+func TestVenuesDB_SecondPitchAutoLabelsFirst(t *testing.T) {
+	e := newVnEnv(t)
+	r := e.router(e.ownerA, "owner")
+
+	// standalone pitch (Arabic name → auto 1:1 venue, label NULL)
+	first := e.createPitch(t, r, "ملعب الحسين", nil)
+	firstID := int64(first["id"].(float64))
+	var venueID int64
+	if err := e.pool.QueryRow(context.Background(),
+		`SELECT venue_id FROM pitches WHERE id = $1`, firstID).Scan(&venueID); err != nil {
+		t.Fatalf("resolve venue: %v", err)
+	}
+
+	labelOf := func(id int64) string {
+		var s *string
+		if err := e.pool.QueryRow(context.Background(),
+			`SELECT label FROM pitches WHERE id = $1`, id).Scan(&s); err != nil {
+			t.Fatalf("read label: %v", err)
+		}
+		if s == nil {
+			return ""
+		}
+		return *s
+	}
+
+	// second pitch joins the venue → the unlabeled first becomes «ملعب ١»
+	body := map[string]any{
+		"name": "ملعب ٢", "neighborhood": "عبدون", "surface": "artificial_grass",
+		"format": "خماسي", "price_per_hour": 30, "maps_url": vnMapsURL,
+		"venue_id": venueID, "label": "ملعب ٢",
+	}
+	rec := bsDo(r, http.MethodPost, "/pitches", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("second pitch: %d %s", rec.Code, rec.Body.String())
+	}
+	secondID := int64(decodeData(t, rec.Body.Bytes())["id"].(float64))
+	if got := labelOf(firstID); got != "ملعب ١" {
+		t.Errorf("first pitch label = %q, want %q", got, "ملعب ١")
+	}
+
+	// third pitch: nobody is relabeled (count=2 guard + labels already set)
+	body["label"] = "ملعب ٣"
+	body["name"] = "ملعب ٣"
+	if rec := bsDo(r, http.MethodPost, "/pitches", body); rec.Code != http.StatusCreated {
+		t.Fatalf("third pitch: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := labelOf(firstID); got != "ملعب ١" {
+		t.Errorf("first label after third = %q, want unchanged %q", got, "ملعب ١")
+	}
+	if got := labelOf(secondID); got != "ملعب ٢" {
+		t.Errorf("second label after third = %q, want unchanged %q", got, "ملعب ٢")
+	}
+
+	// an owner-set label on the first pitch is never overwritten
+	suffix := testutil.UniqueSuffix() % 1_000_000
+	vCustom := e.createVenue(t, r, fmt.Sprintf("custom-%d", suffix))
+	body2 := map[string]any{
+		"name": "الملعب الرئيسي", "neighborhood": "عبدون", "surface": "artificial_grass",
+		"format": "خماسي", "price_per_hour": 30, "maps_url": vnMapsURL,
+		"venue_id": vCustom, "label": "الرئيسي",
+	}
+	rec = bsDo(r, http.MethodPost, "/pitches", body2)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("custom-labeled first: %d %s", rec.Code, rec.Body.String())
+	}
+	customFirstID := int64(decodeData(t, rec.Body.Bytes())["id"].(float64))
+	body2["label"] = "ملعب ٢"
+	if rec := bsDo(r, http.MethodPost, "/pitches", body2); rec.Code != http.StatusCreated {
+		t.Fatalf("custom second: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := labelOf(customFirstID); got != "الرئيسي" {
+		t.Errorf("owner-set label overwritten: %q, want %q", got, "الرئيسي")
+	}
+}

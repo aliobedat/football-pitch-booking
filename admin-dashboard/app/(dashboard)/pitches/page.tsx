@@ -31,15 +31,6 @@ interface OwnerPitch {
   label: string;
 }
 
-// OwnerVenue — the subset of GET /owner/venues used by the «المجمع» dropdown.
-interface OwnerVenue {
-  id: number;
-  name: string;
-  neighborhood: string;
-  maps_url: string;
-  pitchCount: number;
-}
-
 interface PitchForm {
   name: string;
   neighborhood: string;
@@ -88,30 +79,6 @@ function AddPitchForm({ editing, onSuccess, onCancel }: {
   const [error, setError] = useState<string | null>(null);
   const [mapsUrlError, setMapsUrlError] = useState<string | null>(null);
 
-  // «المجمع» (Gate 1d-minimal, create only): '' = «مستقل» (standalone — today's
-  // request, auto-1:1 venue). Selecting a venue sends venue_id, reveals the
-  // optional label field, and prefills neighborhood/maps_url (still editable).
-  const [venues, setVenues] = useState<OwnerVenue[]>([]);
-  const [venueId, setVenueId] = useState<string>('');
-  const [label, setLabel] = useState('');
-
-  useEffect(() => {
-    if (isEdit) return;
-    api.get('/owner/venues')
-      .then((res) => setVenues(res.data.data ?? []))
-      .catch(() => setVenues([])); // dropdown degrades to «مستقل» only
-  }, [isEdit]);
-
-  const onVenueChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const next = e.target.value;
-    setVenueId(next);
-    if (next === '') return; // back to standalone: keep whatever the user typed
-    const v = venues.find((x) => String(x.id) === next);
-    if (!v) return;
-    setMapsUrlError(null);
-    setForm((prev) => ({ ...prev, neighborhood: v.neighborhood, maps_url: v.maps_url }));
-  };
-
   const set = (field: keyof PitchForm) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) => {
       if (field === 'maps_url') setMapsUrlError(null);
@@ -143,12 +110,7 @@ function AddPitchForm({ editing, onSuccess, onCancel }: {
     }
     setSubmit(true);
     try {
-      const payload: Record<string, unknown> = { ...form, price_per_hour: Number(form.price_per_hour) };
-      // Standalone («مستقل»): request unchanged — no venue_id/label keys at all.
-      if (!isEdit && venueId !== '') {
-        payload.venue_id = Number(venueId);
-        if (label.trim()) payload.label = label.trim();
-      }
+      const payload = { ...form, price_per_hour: Number(form.price_per_hour) };
       const res = isEdit ? await api.patch(`/pitches/${editing!.id}`, payload) : await api.post('/pitches', payload);
       onSuccess(res.data.data as OwnerPitch);
     } catch (err: any) {
@@ -171,27 +133,6 @@ function AddPitchForm({ editing, onSuccess, onCancel }: {
         <button type="button" onClick={onCancel} className="text-white/25 hover:text-white/55" aria-label="إغلاق"><X size={16} /></button>
       </div>
       <form onSubmit={handleSubmit} className="p-6">
-        {!isEdit && venues.length > 0 && (
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 mb-5">
-            <div className="relative">
-              <label className={labelCls}>المجمع</label>
-              <select value={venueId} onChange={onVenueChange} className={`${inputCls} appearance-none pe-9`}>
-                <option value="">مستقل</option>
-                {venues.map((v) => (
-                  <option key={v.id} value={v.id}>{v.name}</option>
-                ))}
-              </select>
-              <ChevronDown size={13} className="absolute end-3 bottom-[13px] text-white/25 pointer-events-none" aria-hidden />
-            </div>
-            {venueId !== '' && (
-              <div>
-                <label className={labelCls}>تسمية الملعب</label>
-                <input type="text" value={label} onChange={(e) => setLabel(e.target.value)} placeholder="ملعب ١" className={inputCls} />
-                <p className="text-[11px] text-white/35 mt-1.5">اسم قصير يميّز الملعب داخل المجمع — اختياري.</p>
-              </div>
-            )}
-          </div>
-        )}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 mb-5">
           <div>
             <label className={labelCls}>اسم الملعب <span className="text-red-400/60">*</span></label>
@@ -253,12 +194,130 @@ function AddPitchForm({ editing, onSuccess, onCancel }: {
   );
 }
 
+// Arabic-Indic digits for default labels («ملعب ٢», «ملعب ٣», …).
+const AR_DIGITS = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+const toArDigits = (n: number) => String(n).split('').map((d) => AR_DIGITS[Number(d)] ?? d).join('');
+
+// AddSiblingForm — «إضافة ملعب آخر لهذا المكان» (Gate 1d UX correction).
+// The owner's mental model: "add another pitch to the place I already own."
+// Bound to the sibling pitch's venue; asks ONLY pitch-specific fields. Place
+// fields (neighborhood/maps_url/description) are inherited from the existing
+// pitch (same values the venue carries via the 1:1 backfill) — never re-asked.
+function AddSiblingForm({ sibling, groupCount, onSuccess, onCancel }: {
+  sibling: OwnerPitch;
+  groupCount: number;
+  onSuccess: () => void;
+  onCancel: () => void;
+}) {
+  const [label, setLabel] = useState(`ملعب ${toArDigits(groupCount + 1)}`);
+  const [surface, setSurface] = useState(sibling.surface);
+  const [format, setFormat] = useState(sibling.format);
+  const [price, setPrice] = useState('');
+  const [image, setImage] = useState<PitchImageValue>({ image_url: '', image_public_id: '' });
+  const [isSubmitting, setSubmit] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const placeName = sibling.venue_name || sibling.name;
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+    const cleanLabel = label.trim();
+    if (!cleanLabel) { setError('تسمية الملعب مطلوبة'); return; }
+    setSubmit(true);
+    try {
+      // Resolve the venue id from the already-live owner venues endpoint
+      // (the pitch payload carries the venue's slug/name, not its id).
+      const venuesRes = await api.get('/owner/venues');
+      const venue = (venuesRes.data.data ?? []).find((v: { slug: string }) => v.slug === sibling.venue_slug);
+      if (!venue) { setError('تعذّر تحديد المكان — حدّث الصفحة وحاول مجدداً'); setSubmit(false); return; }
+      await api.post('/pitches', {
+        name: cleanLabel,
+        label: cleanLabel,
+        venue_id: venue.id,
+        surface,
+        format,
+        price_per_hour: Number(price),
+        neighborhood: sibling.neighborhood,
+        maps_url: sibling.maps_url,
+        description: sibling.description ?? '',
+        image_url: image.image_url,
+        image_public_id: image.image_public_id,
+      });
+      onSuccess(); // parent refetches — server state is the truth
+    } catch (err: unknown) {
+      const data = (err as { response?: { data?: { message?: string } } })?.response?.data;
+      setError(data?.message ?? 'تعذّر إضافة الملعب، يرجى المحاولة مجدداً');
+      setSubmit(false);
+    }
+  };
+
+  return (
+    <div className="rounded-2xl bg-[#141715] border border-white/[0.10] mb-6 overflow-hidden">
+      <div className="px-6 py-4 border-b border-white/[0.06] flex items-center justify-between">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center flex-shrink-0">
+            <Plus size={13} className="text-emerald-400" aria-hidden />
+          </div>
+          <span className="text-[13px] font-semibold truncate">إضافة ملعب آخر إلى {placeName}</span>
+        </div>
+        <button type="button" onClick={onCancel} className="text-white/25 hover:text-white/55 flex-shrink-0" aria-label="إغلاق"><X size={16} /></button>
+      </div>
+      <form onSubmit={handleSubmit} className="p-6">
+        <p className="text-[11.5px] text-white/40 mb-5">الموقع والعنوان يؤخذان تلقائياً من {placeName} — لا حاجة لإدخالهما مجدداً.</p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-5 mb-5">
+          <div>
+            <label className={labelCls}>تسمية الملعب <span className="text-red-400/60">*</span></label>
+            <input type="text" value={label} onChange={(e) => setLabel(e.target.value)} required placeholder={`ملعب ${toArDigits(groupCount + 1)}`} className={inputCls} />
+          </div>
+          <div>
+            <label className={labelCls}>السعر بالساعة (دينار) <span className="text-red-400/60">*</span></label>
+            <div className="relative">
+              <input type="number" min="1" lang="en" inputMode="numeric" value={price} onChange={(e) => setPrice(e.target.value)} required placeholder="25" className={`${inputCls} pe-12`} />
+              <span className="absolute end-4 top-1/2 -translate-y-1/2 text-[11px] text-emerald-500 font-semibold pointer-events-none">د.أ</span>
+            </div>
+          </div>
+          <div className="relative">
+            <label className={labelCls}>نوع الأرضية <span className="text-red-400/60">*</span></label>
+            <select value={surface} onChange={(e) => setSurface(e.target.value)} className={`${inputCls} appearance-none pe-9`}>
+              <option value="artificial_grass">عشبية صناعية</option>
+              <option value="natural_grass">عشبية طبيعية</option>
+              <option value="futsal_court">ملعب فوتسال</option>
+            </select>
+            <ChevronDown size={13} className="absolute end-3 bottom-[13px] text-white/25 pointer-events-none" aria-hidden />
+          </div>
+          <div className="relative">
+            <label className={labelCls}>صيغة اللعب <span className="text-red-400/60">*</span></label>
+            <select value={format} onChange={(e) => setFormat(e.target.value)} className={`${inputCls} appearance-none pe-9`}>
+              <option value="خماسي">خماسي (5v5)</option>
+              <option value="سباعي">سباعي (7v7)</option>
+            </select>
+            <ChevronDown size={13} className="absolute end-3 bottom-[13px] text-white/25 pointer-events-none" aria-hidden />
+          </div>
+          <div className="sm:col-span-2">
+            <label className={labelCls}>صورة الملعب <span className="text-white/30 font-normal">(اختياري)</span></label>
+            <PitchImageDropzone value={image} onChange={setImage} />
+          </div>
+        </div>
+        {error && <p className="text-[12px] text-red-400 bg-red-500/[0.06] border border-red-500/15 rounded-xl px-4 py-3 mb-4">{error}</p>}
+        <div className="flex items-center justify-end gap-3">
+          <button type="button" onClick={onCancel} className="px-5 py-2.5 rounded-xl text-[12px] font-semibold text-white/40 hover:text-white/65 border border-white/[0.07] hover:border-white/[0.14] transition-all">إلغاء</button>
+          <button type="submit" disabled={isSubmitting} className="flex items-center gap-2 px-6 py-2.5 rounded-xl text-[12px] font-bold bg-[#0f4c3a] text-emerald-400 border border-emerald-500/20 hover:bg-[#1a6b52] hover:text-emerald-300 hover:border-emerald-500/40 disabled:opacity-50 transition-all">
+            {isSubmitting ? <><span className="w-3.5 h-3.5 rounded-full border-2 border-emerald-400/50 border-t-transparent animate-spin" aria-hidden />جاري الإضافة...</> : 'إضافة الملعب'}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 export default function PitchesPage() {
   const [pitches, setPitches] = useState<OwnerPitch[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [editTarget, setEditTarget] = useState<OwnerPitch | null>(null);
+  const [siblingTarget, setSiblingTarget] = useState<OwnerPitch | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<OwnerPitch | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -269,11 +328,27 @@ export default function PitchesPage() {
   // surfaces the activate/deactivate rollback that was previously silent.
   const [toast, setToast] = useState<string | null>(null);
 
-  useEffect(() => {
-    api.get('/owner/pitches')
+  const loadPitches = useCallback(() => {
+    return api.get('/owner/pitches')
       .then((res) => setPitches(res.data.data ?? []))
       .catch(() => setError('تعذّر تحميل الملاعب.'))
       .finally(() => setLoading(false));
+  }, []);
+
+  useEffect(() => { loadPitches(); }, [loadPitches]);
+
+  // Sibling added → REFETCH (the server also auto-labels the first pitch
+  // «ملعب ١», so hand-patched state would be stale).
+  const onSiblingAdded = useCallback(() => {
+    setSiblingTarget(null);
+    loadPitches();
+  }, [loadPitches]);
+
+  const openSiblingForm = useCallback((p: OwnerPitch) => {
+    setShowAdd(false);
+    setEditTarget(null);
+    setSiblingTarget(p);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }, []);
 
   const onAdded = useCallback((p: OwnerPitch) => { setPitches((prev) => [p, ...prev]); setShowAdd(false); }, []);
@@ -373,6 +448,15 @@ export default function PitchesPage() {
           <button type="button" onClick={() => { setShowAdd(false); setEditTarget(p); }} className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] font-semibold text-white/60 hover:text-white/90 transition-colors">
             <Pencil size={12} aria-hidden /> تعديل
           </button>
+          {!inGroup && p.venue_slug && (
+            <button
+              type="button"
+              onClick={() => openSiblingForm(p)}
+              className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/20 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-400/80 hover:text-emerald-300 hover:border-emerald-500/40 transition-colors"
+            >
+              <Plus size={12} aria-hidden /> إضافة ملعب آخر لهذا المكان
+            </button>
+          )}
           <button type="button" onClick={() => setHoursTarget(p)} className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-[11px] font-semibold text-white/60 hover:text-emerald-300 hover:border-emerald-500/30 transition-colors" title="أوقات العمل">
             <Clock size={12} aria-hidden /> الأوقات
           </button>
@@ -403,6 +487,14 @@ export default function PitchesPage() {
 
       {showAdd && <AddPitchForm onSuccess={onAdded} onCancel={() => setShowAdd(false)} />}
       {editTarget && <AddPitchForm editing={editTarget} onSuccess={onUpdated} onCancel={() => setEditTarget(null)} />}
+      {siblingTarget && (
+        <AddSiblingForm
+          sibling={siblingTarget}
+          groupCount={pitches.filter((x) => x.venue_slug && x.venue_slug === siblingTarget.venue_slug).length}
+          onSuccess={onSiblingAdded}
+          onCancel={() => setSiblingTarget(null)}
+        />
+      )}
 
       {loading ? (
         <div className="flex justify-center py-24"><Loader2 className="animate-spin text-white/30" /></div>
@@ -412,14 +504,23 @@ export default function PitchesPage() {
         <div className="rounded-2xl bg-[#141715] border border-white/[0.08] p-12 text-center text-[13px] text-white/35">لا ملاعب بعد.</div>
       ) : (
         cardBlocks.map((block) => (
-          <div key={block.key} className="flex flex-col gap-3">
+          <div key={block.key} className={`flex flex-col ${block.venueName ? 'gap-2 mt-2 first:mt-0' : 'gap-3'}`}>
             {block.venueName && (
-              <div className="flex items-center gap-2 px-1">
-                <MapPin size={13} className="text-emerald-400/70 flex-shrink-0" aria-hidden />
-                <h2 className="text-[13.5px] font-bold truncate">{block.venueName}</h2>
-                <span className="text-[10.5px] font-semibold text-white/40 bg-white/[0.05] border border-white/[0.08] rounded-full px-2 py-0.5 flex-shrink-0">
-                  {block.items.length} ملاعب
-                </span>
+              <div className="rounded-2xl bg-[#141715] border border-white/[0.08] px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3">
+                <div className="flex items-center gap-2 min-w-0">
+                  <MapPin size={13} className="text-emerald-400/70 flex-shrink-0" aria-hidden />
+                  <h2 className="text-[13.5px] font-bold truncate">{block.venueName}</h2>
+                  <span className="text-[10.5px] font-semibold text-white/40 bg-white/[0.05] border border-white/[0.08] rounded-full px-2 py-0.5 flex-shrink-0 whitespace-nowrap">
+                    {block.items.length} ملاعب
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => openSiblingForm(block.items[0])}
+                  className="w-full sm:w-auto sm:ms-auto inline-flex items-center justify-center gap-1 rounded-lg border border-emerald-500/20 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-400/80 hover:text-emerald-300 hover:border-emerald-500/40 transition-colors flex-shrink-0"
+                >
+                  <Plus size={12} aria-hidden /> إضافة ملعب آخر لهذا المكان
+                </button>
               </div>
             )}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
