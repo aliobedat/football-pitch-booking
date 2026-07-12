@@ -504,18 +504,20 @@ export default function PitchesPage() {
         <div className="rounded-2xl bg-[#141715] border border-white/[0.08] p-12 text-center text-[13px] text-white/35">لا ملاعب بعد.</div>
       ) : (
         cardBlocks.map((block) => (
-          <div key={block.key} className="flex flex-col gap-3">
+          <div key={block.key} className={`flex flex-col ${block.venueName ? 'gap-2 mt-2 first:mt-0' : 'gap-3'}`}>
             {block.venueName && (
-              <div className="flex items-center gap-2 px-1">
-                <MapPin size={13} className="text-emerald-400/70 flex-shrink-0" aria-hidden />
-                <h2 className="text-[13.5px] font-bold truncate">{block.venueName}</h2>
-                <span className="text-[10.5px] font-semibold text-white/40 bg-white/[0.05] border border-white/[0.08] rounded-full px-2 py-0.5 flex-shrink-0">
-                  {block.items.length} ملاعب
-                </span>
+              <div className="rounded-2xl bg-[#141715] border border-white/[0.08] px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3">
+                <div className="flex items-center gap-2 min-w-0">
+                  <MapPin size={13} className="text-emerald-400/70 flex-shrink-0" aria-hidden />
+                  <h2 className="text-[13.5px] font-bold truncate">{block.venueName}</h2>
+                  <span className="text-[10.5px] font-semibold text-white/40 bg-white/[0.05] border border-white/[0.08] rounded-full px-2 py-0.5 flex-shrink-0 whitespace-nowrap">
+                    {block.items.length} ملاعب
+                  </span>
+                </div>
                 <button
                   type="button"
                   onClick={() => openSiblingForm(block.items[0])}
-                  className="ms-auto inline-flex items-center gap-1 rounded-lg border border-emerald-500/20 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-400/80 hover:text-emerald-300 hover:border-emerald-500/40 transition-colors flex-shrink-0"
+                  className="w-full sm:w-auto sm:ms-auto inline-flex items-center justify-center gap-1 rounded-lg border border-emerald-500/20 px-2.5 py-1.5 text-[11px] font-semibold text-emerald-400/80 hover:text-emerald-300 hover:border-emerald-500/40 transition-colors flex-shrink-0"
                 >
                   <Plus size={12} aria-hidden /> إضافة ملعب آخر لهذا المكان
                 </button>
