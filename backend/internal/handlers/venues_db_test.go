@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -84,6 +85,7 @@ func (e *vnEnv) router(actorID int64, role string) *gin.Engine {
 	r.PATCH("/venues/:id", middleware.RequireRole("owner", "admin"), vh.UpdateVenue)
 	r.PATCH("/venues/:id/active", middleware.RequireRole("owner", "admin"), vh.ToggleVenueActive)
 	r.DELETE("/venues/:id", middleware.RequireRole("owner", "admin"), vh.DeleteVenue)
+	r.GET("/venues", vh.PublicListVenues)      // public B2C listing
 	r.GET("/venues/:id", vh.PublicVenueBySlug) // public (param = slug)
 	r.POST("/pitches", middleware.RequireRole("owner", "admin"), ph.CreatePitch)
 	r.PATCH("/pitches/:id/venue", middleware.RequireRole("owner", "admin"), ph.ReassignVenue)
@@ -779,5 +781,156 @@ func TestVenuesDB_StandaloneCreateMinimalOwner(t *testing.T) {
 	}
 	if fmt.Sprintf("v-%d", *venueID) != slug {
 		t.Errorf("placeholder %q not keyed to the venue's own id %d", slug, *venueID)
+	}
+}
+
+// ── WO-1C-PAYLOAD: public-listing card-parity aggregates ────────────────────
+
+// publicListRow finds one venue row in GET /venues by slug.
+func publicListRow(t *testing.T, r *gin.Engine, slug string) map[string]any {
+	t.Helper()
+	rec := bsDo(r, http.MethodGet, "/venues", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /venues: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	for _, row := range resp.Data {
+		if row["slug"] == slug {
+			return row
+		}
+	}
+	t.Fatalf("venue %q not in public list (%d rows)", slug, len(resp.Data))
+	return nil
+}
+
+func formatsOf(row map[string]any) []string {
+	raw, _ := row["formats"].([]any)
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		out = append(out, v.(string))
+	}
+	sort.Strings(out)
+	return out
+}
+
+func TestVenuesDB_PublicListAggregates(t *testing.T) {
+	e := newVnEnv(t)
+	suffix := testutil.UniqueSuffix() % 1_000_000
+	r := e.router(e.ownerA, "owner")
+	setImage := func(pitchID int64, url string) {
+		if _, err := e.pool.Exec(context.Background(),
+			`UPDATE pitches SET image_url = $2 WHERE id = $1`, pitchID, url); err != nil {
+			t.Fatalf("set image: %v", err)
+		}
+	}
+	priceOf := func(row map[string]any) float64 { return row["minPricePerHour"].(float64) }
+
+	// (a) UNIFORM two-pitch venue → ONE row; format/surface populated; formats
+	// singleton; price_varies false; image falls back to the FIRST pitch's
+	// (venue created via POST /venues → empty cover).
+	uniSlug := fmt.Sprintf("uni-%d", suffix)
+	vUni := e.createVenue(t, r, uniSlug)
+	p1 := e.createPitch(t, r, "Uni A", &vUni)
+	e.createPitch(t, r, "Uni B", &vUni) // same format/surface/price as createPitch defaults
+	setImage(int64(p1["id"].(float64)), "https://res.cloudinary.com/test/uni-first.jpg")
+	row := publicListRow(t, r, uniSlug)
+	if row["pitchCount"].(float64) != 2 {
+		t.Fatalf("uniform venue pitchCount = %v, want 2 (ONE row per venue)", row["pitchCount"])
+	}
+	if row["format"] != "خماسي" || row["surface"] != "artificial_grass" {
+		t.Errorf("uniform format/surface = %v/%v, want خماسي/artificial_grass", row["format"], row["surface"])
+	}
+	if got := formatsOf(row); len(got) != 1 || got[0] != "خماسي" {
+		t.Errorf("uniform formats = %v, want [خماسي]", got)
+	}
+	if row["price_varies"] == true {
+		t.Errorf("uniform price_varies = true, want false/absent")
+	}
+	if row["image_url"] != "https://res.cloudinary.com/test/uni-first.jpg" {
+		t.Errorf("image fallback = %v, want first pitch's image (cover unset)", row["image_url"])
+	}
+
+	// (b) MIXED venue → format/surface null (absent), both formats in the set,
+	// price_varies true, min price.
+	mixSlug := fmt.Sprintf("mix-%d", suffix)
+	vMix := e.createVenue(t, r, mixSlug)
+	body := map[string]any{
+		"name": "Mix A", "neighborhood": "عبدون", "surface": "artificial_grass",
+		"format": "خماسي", "price_per_hour": 20, "maps_url": vnMapsURL, "venue_id": vMix,
+	}
+	if rec := bsDo(r, http.MethodPost, "/pitches", body); rec.Code != 201 {
+		t.Fatalf("mix A: %d %s", rec.Code, rec.Body.String())
+	}
+	body["name"], body["format"], body["surface"], body["price_per_hour"] = "Mix B", "سباعي", "natural_grass", 35
+	if rec := bsDo(r, http.MethodPost, "/pitches", body); rec.Code != 201 {
+		t.Fatalf("mix B: %d %s", rec.Code, rec.Body.String())
+	}
+	row = publicListRow(t, r, mixSlug)
+	if _, has := row["format"]; has && row["format"] != nil {
+		t.Errorf("mixed format = %v, want null/absent", row["format"])
+	}
+	if _, has := row["surface"]; has && row["surface"] != nil {
+		t.Errorf("mixed surface = %v, want null/absent", row["surface"])
+	}
+	if got := formatsOf(row); len(got) != 2 {
+		t.Errorf("mixed formats = %v, want both values", got)
+	}
+	if row["price_varies"] != true {
+		t.Errorf("mixed price_varies = %v, want true", row["price_varies"])
+	}
+	if priceOf(row) != 20 {
+		t.Errorf("mixed minPricePerHour = %v, want 20", priceOf(row))
+	}
+
+	// (c) SINGLE-pitch venue carries its pitch's values verbatim (collapse
+	// contract) — auto-1:1 venue, image set on the pitch post-create.
+	solo := e.createPitch(t, r, fmt.Sprintf("Solo Arena %d", suffix), nil)
+	setImage(int64(solo["id"].(float64)), "https://res.cloudinary.com/test/solo.jpg")
+	soloSlug := solo["venue_slug"].(string)
+	row = publicListRow(t, r, soloSlug)
+	if row["format"] != "خماسي" || row["surface"] != "artificial_grass" ||
+		priceOf(row) != 30 || row["pitchCount"].(float64) != 1 {
+		t.Errorf("solo row = format %v surface %v price %v count %v, want verbatim pitch values",
+			row["format"], row["surface"], priceOf(row), row["pitchCount"])
+	}
+	// auto-1:1 venue copies the CREATE-time image (empty here) to the cover, so
+	// the fallback must surface the post-create pitch image.
+	if row["image_url"] != "https://res.cloudinary.com/test/solo.jpg" {
+		t.Errorf("solo image = %v, want the pitch's image via fallback", row["image_url"])
+	}
+
+	// (d) soft-deleted / inactive pitches excluded from every aggregate: the
+	// mixed venue's سباعي pitch goes inactive → venue becomes uniform خماسي.
+	if _, err := e.pool.Exec(context.Background(),
+		`UPDATE pitches SET is_active = false WHERE venue_id = $1 AND format = 'سباعي'`, vMix); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+	row = publicListRow(t, r, mixSlug)
+	// The five NEW aggregates exclude inactive pitches; the PRE-EXISTING
+	// pitchCount keeps its Gate 1b meaning (non-deleted, inactive INCLUDED) —
+	// changing it would be a non-additive semantic change.
+	if row["format"] != "خماسي" || row["price_varies"] == true {
+		t.Errorf("after deactivation: format %v price_varies %v, want خماسي/false (new aggregates exclude inactive)",
+			row["format"], row["price_varies"])
+	}
+	if row["pitchCount"].(float64) != 2 {
+		t.Errorf("pitchCount = %v, want 2 (pre-existing semantic: non-deleted incl. inactive)", row["pitchCount"])
+	}
+	// soft-delete the remaining pitch → empty aggregates (formats empty, no min).
+	if _, err := e.pool.Exec(context.Background(),
+		`UPDATE pitches SET deleted_at = now() WHERE venue_id = $1 AND deleted_at IS NULL`, vMix); err != nil {
+		t.Fatalf("soft-delete: %v", err)
+	}
+	row = publicListRow(t, r, mixSlug)
+	if got := formatsOf(row); len(got) != 0 {
+		t.Errorf("after soft-delete formats = %v, want empty", got)
+	}
+	if row["pitchCount"].(float64) != 0 {
+		t.Errorf("after soft-delete pitchCount = %v, want 0", row["pitchCount"])
 	}
 }

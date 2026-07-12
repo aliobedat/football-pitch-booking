@@ -177,6 +177,52 @@ function ErrorState({ onRetry }: { onRetry: () => void }) {
 
 // ─── Inner page (consumes LocationContext) ────────────────────────────────────
 
+// VenueRow — one GET /venues row (WO-1C-PAYLOAD): the venue identity plus the
+// card-parity aggregates over its ACTIVE pitches. format/surface are present
+// only when uniform; formats is the DISTINCT set the size chips any-match on.
+interface VenueRow {
+  id:              number;
+  name:            string;
+  slug:            string;
+  neighborhood:    string;
+  lat:             number;
+  lng:             number;
+  pitchCount:      number;
+  rating:          number | null;
+  reviewsCount:    number;
+  minPricePerHour?: number;
+  image_url?:      string;
+  format?:         string | null;
+  surface?:        string | null;
+  formats?:        string[];
+  price_varies?:   boolean;
+  distance_km?:    number;
+}
+
+// venueToCardPitch shapes a venue row for the shared PitchCard. Single-pitch
+// venues surface their lone pitch's values verbatim (collapse rule) — the
+// backend guarantees format/surface/min-price/image degrade to exactly the
+// pitch's own values when pitchCount == 1.
+function venueToCardPitch(v: VenueRow): Pitch {
+  return {
+    id: v.id,
+    name: v.name,
+    neighborhood: v.neighborhood,
+    surface: v.surface ?? '',
+    format: v.format ?? '',
+    pricePerHour: v.minPricePerHour ?? 0,
+    rating: v.rating,
+    reviewsCount: v.reviewsCount,
+    isFeatured: false,
+    amenities: [],
+    pitchHue: '',
+    lat: v.lat,
+    lng: v.lng,
+    image_url: v.image_url,
+    venue_slug: v.slug,
+  };
+}
+
 function PitchesContent() {
   const { isLoading: authLoading } = useAuth();
   const { coords, status: locStatus, request: requestLocation } = useLocation();
@@ -184,7 +230,7 @@ function PitchesContent() {
   // B2C is player-facing only: no role-based routing. An owner-role account
   // browsing here gets the normal player experience (backend stays the referee).
 
-  const [pitches,   setPitches]   = useState<Pitch[]>([]);
+  const [venues,    setVenues]    = useState<VenueRow[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error,     setError]     = useState<string | null>(null);
   const [fetchKey,  setFetchKey]  = useState(0);
@@ -232,8 +278,11 @@ function PitchesContent() {
       ? { params: { lat: coords!.lat, lng: coords!.lng } }
       : undefined;
 
-    api.get('/pitches', config)
-      .then(res => { if (!cancelled) setPitches(res.data.data ?? []); })
+    // WO-1C-PAYLOAD: one card per VENUE — aggregation is venue_id via the
+    // endpoint (same lat/lng wire contract; the venue list nearest-sorts by
+    // venue coordinates server-side).
+    api.get('/venues', config)
+      .then(res => { if (!cancelled) setVenues(res.data.data ?? []); })
       .catch(() => { if (!cancelled) setError('fetch_failed'); })
       .finally(() => { if (!cancelled) setIsLoading(false); });
 
@@ -289,27 +338,28 @@ function PitchesContent() {
 
   const retry = useCallback(() => setFetchKey(k => k + 1), []);
 
-  const filteredPitches = useMemo<Pitch[]>(() => {
+  const filteredVenues = useMemo<VenueRow[]>(() => {
     if (isLoading || error) return [];
     const q    = query.trim();
     const chip = FILTER_CHIPS.find(c => c.value === activeFilter);
 
-    const filtered = pitches.filter(pitch => {
+    const filtered = venues.filter(venue => {
       const matchesQuery =
         !q ||
-        pitch.name.includes(q) ||
-        pitch.neighborhood.includes(q);
+        venue.name.includes(q) ||
+        venue.neighborhood.includes(q);
 
       const matchesFilter = !chip || chip.type === 'all'
         ? true
         : chip.type === 'area'
-          ? pitch.neighborhood === activeFilter
+          ? venue.neighborhood === activeFilter
           : chip.type === 'size'
-            // Compare the backend `format` enum (خماسي/سباعي) via the chip→format map.
-            ? pitch.format === SIZE_TO_FORMAT[activeFilter]
-            // availability: the listing payload carries no availability data yet, so
-            // this is a no-op (matches all). Real "available at a time" is Path A.
-            : pitch.availabilityToday !== 'full';
+            // ANY-match over the venue's DISTINCT format set (ruling: a mixed
+            // venue matches when any of its active pitches has the format).
+            ? (venue.formats ?? []).includes(SIZE_TO_FORMAT[activeFilter] ?? '')
+            // availability: still a no-op (no availability data on the listing;
+            // see docs/followups/wo-1c-payload.md — future product decision).
+            : true;
 
       return matchesQuery && matchesFilter;
     });
@@ -320,14 +370,14 @@ function PitchesContent() {
     if (sortKey === 'distance') return filtered;
 
     return [...filtered].sort((a, b) => {
-      if (sortKey === 'price_asc')  return a.pricePerHour - b.pricePerHour;
-      if (sortKey === 'price_desc') return b.pricePerHour - a.pricePerHour;
+      if (sortKey === 'price_asc')  return (a.minPricePerHour ?? 0) - (b.minPricePerHour ?? 0);
+      if (sortKey === 'price_desc') return (b.minPricePerHour ?? 0) - (a.minPricePerHour ?? 0);
       // rating sort: nulls go last
       const ra = a.rating ?? -1;
       const rb = b.rating ?? -1;
       return rb - ra;
     });
-  }, [pitches, query, activeFilter, sortKey, isLoading, error]);
+  }, [venues, query, activeFilter, sortKey, isLoading, error]);
 
   const handleReset = useCallback(() => {
     setQuery('');
@@ -484,7 +534,7 @@ function PitchesContent() {
             <div className="h-3.5 w-28 bg-white/[0.05] rounded-full animate-pulse" />
           ) : !error ? (
             <p className="text-[11px] font-semibold tracking-wide text-white/30 uppercase">
-              {pitchCountLabel(filteredPitches.length)} متاح
+              {pitchCountLabel(filteredVenues.length)} متاح
             </p>
           ) : (
             <span />
@@ -507,8 +557,15 @@ function PitchesContent() {
             ? Array.from({ length: 6 }, (_, i) => <PitchCardSkeleton key={i} />)
             : error
               ? <ErrorState onRetry={retry} />
-              : filteredPitches.length > 0
-                ? filteredPitches.map(p => <PitchCard key={p.id} pitch={p} />)
+              : filteredVenues.length > 0
+                ? filteredVenues.map(v => (
+                    <PitchCard
+                      key={v.id}
+                      pitch={venueToCardPitch(v)}
+                      pitchCount={v.pitchCount}
+                      priceFrom={!!v.price_varies && v.pitchCount > 1}
+                    />
+                  ))
                 : <EmptyState onReset={handleReset} />
           }
         </div>

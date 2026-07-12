@@ -79,6 +79,15 @@ type Venue struct {
 	ReviewsCount       int      `json:"reviewsCount"` // live SUM
 	MinPricePerHour    *int     `json:"minPricePerHour,omitempty"`
 	DistanceKm         *float64 `json:"distance_km,omitempty"`
+
+	// ── WO-1C-PAYLOAD (additive, POPULATED ONLY BY PublicList — the B2C
+	//    listing): card-parity aggregates over the venue's ACTIVE, non-deleted
+	//    pitches. /venues/:slug and the owner list do not carry them. ─────────
+	ImageURL    string   `json:"image_url,omitempty"`   // cover, fallback: first pitch image
+	Format      *string  `json:"format,omitempty"`      // uniform across active pitches, else null
+	Surface     *string  `json:"surface,omitempty"`     // uniform across active pitches, else null
+	Formats     []string `json:"formats,omitempty"`     // DISTINCT set (client any-match filter)
+	PriceVaries bool     `json:"price_varies,omitempty"`
 }
 
 // VenuePitch is one pitch inside the public venue read — the play-specific
@@ -349,14 +358,40 @@ func (m *VenueModel) PublicBySlug(ctx context.Context, slug string) (*PublicVenu
 	return out, rows.Err()
 }
 
+// venueListExtraCols — WO-1C-PAYLOAD card-parity aggregates, appended to
+// venueCols ONLY on the public listing read. All subqueries scope to the
+// venue's ACTIVE, non-deleted pitches (correlated style per house convention).
+// format/surface are uniform-or-NULL (the HAVING makes the subquery return
+// zero rows — NULL — on a mixed venue); formats is the DISTINCT set for the
+// client's any-match filter; image falls back to the first pitch's image when
+// the cover is unset (a pitch image uploaded after creation never syncs to
+// the venue cover).
+const venueListExtraCols = `,
+	COALESCE(NULLIF(v.cover_image_url, ''),
+	         (SELECT p.image_url FROM pitches p
+	           WHERE p.venue_id = v.id AND p.deleted_at IS NULL AND p.is_active = true
+	           ORDER BY p.id LIMIT 1), ''),
+	(SELECT MIN(p.format::text) FROM pitches p
+	  WHERE p.venue_id = v.id AND p.deleted_at IS NULL AND p.is_active = true
+	  HAVING COUNT(DISTINCT p.format) = 1),
+	(SELECT MIN(p.surface::text) FROM pitches p
+	  WHERE p.venue_id = v.id AND p.deleted_at IS NULL AND p.is_active = true
+	  HAVING COUNT(DISTINCT p.surface) = 1),
+	(SELECT COALESCE(array_agg(DISTINCT p.format::text), '{}') FROM pitches p
+	  WHERE p.venue_id = v.id AND p.deleted_at IS NULL AND p.is_active = true),
+	(SELECT COUNT(DISTINCT p.price_per_hour) > 1 FROM pitches p
+	  WHERE p.venue_id = v.id AND p.deleted_at IS NULL AND p.is_active = true)
+`
+
 // PublicList — one card per active venue (with at least the venue itself
-// visible), for the B2C listing page.
+// visible), for the B2C listing page. Carries the WO-1C-PAYLOAD card-parity
+// aggregates on top of the canonical venue row.
 func (m *VenueModel) PublicList(ctx context.Context) ([]Venue, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
 	rows, err := m.DB.Query(ctx,
-		`SELECT `+venueCols+` FROM venues v
+		`SELECT `+venueCols+venueListExtraCols+` FROM venues v
 		  WHERE v.deleted_at IS NULL AND v.is_active = true
 		  ORDER BY v.id`)
 	if err != nil {
@@ -366,8 +401,11 @@ func (m *VenueModel) PublicList(ctx context.Context) ([]Venue, error) {
 
 	out := []Venue{}
 	for rows.Next() {
-		v, err := scanVenue(rows)
-		if err != nil {
+		var v Venue
+		if err := rows.Scan(&v.ID, &v.OwnerID, &v.Name, &v.Slug, &v.Neighborhood, &v.MapsURL,
+			&v.Latitude, &v.Longitude, &v.Description, &v.CoverImageURL, &v.CoverImagePublicID,
+			&v.IsActive, &v.PitchCount, &v.Rating, &v.ReviewsCount, &v.MinPricePerHour,
+			&v.ImageURL, &v.Format, &v.Surface, &v.Formats, &v.PriceVaries); err != nil {
 			return nil, fmt.Errorf("PublicListVenues: scan: %w", err)
 		}
 		v.OwnerID = 0

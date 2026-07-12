@@ -1,20 +1,26 @@
-# WO-1c payload followups — deferred by ruling (Gate 1c-minimal, 2026-07-12)
+# WO-1c payload followups (Gate 1c-minimal, 2026-07-12)
 
-Ruling: option (a) — the redirect hop is accepted for now; the listing stays
-on GET /pitches and availability-search rows keep linking /pitches/{id}
-(which now client-redirects to /venues/{slug}?pitch={id}). Everything below
-is the additive backend payload work needed to close the gap later.
+Ruling: option (a) — the redirect hop was accepted; the listing switch then
+shipped separately as WO-1C-PAYLOAD Phase 1 (five additive fields on
+GET /venues + one-card-per-venue listing). Remaining items below.
 
-## 1. Listing switch → GET /venues (items blocked in 1c)
-- **surface/format on single-pitch venue rows:** venue cards can't render the
-  spec pills («خماسي» / «عشب صناعي») today's pitch cards show, and the 5×5/7×7
-  filter chips filter on `format`. Minimal shape: include the lone pitch's
-  `surface`/`format` on pitchCount==1 rows (or a small pitch summary array).
-- **availabilityToday on GET /venues:** the pitch listing's availability badge
-  has no venue-level equivalent.
-- **Then:** switch app/pitches/page.tsx to GET /venues — one card per venue,
-  link /venues/{slug}, «N ملاعب» chip on multi-pitch cards, «من {min} د.أ»
-  only when prices differ.
+## 1. Listing switch → GET /venues — ✅ DONE (WO-1C-PAYLOAD Phase 1)
+Shipped: image_url (cover → first-pitch fallback), format/surface
+(uniform-or-null), formats (DISTINCT set, client any-match), price_varies;
+listing renders one card per venue via the endpoint (no dedup/CSS hiding).
+Note: the pre-existing `pitchCount` keeps its Gate 1b meaning (non-deleted,
+inactive INCLUDED) — the «N ملاعب» chip therefore counts inactive pitches
+while the venue page shows only active ones. Cosmetic edge; an additive
+`active_pitch_count` closes it if it ever matters.
+
+- **availabilityToday on GET /venues — DROPPED by ruling (2026-07-12), future
+  product decision.** Cost note from the Phase 0 recon: a faithful venue-level
+  "any pitch available today" drags the operating-hours resolver + booked-range
+  math into the listing path as a correlated per-pitch computation (tens of
+  indexed GIST probes at 25–100 venues — feasible but the listing's only
+  expensive query), all to power a badge/chip the pitch listing itself never
+  rendered (the field was never populated; the «متاح الآن» chip is a no-op).
+  Decide the product semantics first; only then spend the query budget.
 
 ## 2. Search rows → direct venue links
 - **venue_slug on GET /pitches/availability rows:** rows carry only
