@@ -50,6 +50,7 @@ func newScopingEnv(t *testing.T) *scopingEnv {
 		pool.Close()
 		t.Fatalf("ping: %v", err)
 	}
+	testutil.AssertSchemaBaseline(t, pool)
 
 	suffix := testutil.UniqueSuffix() % 1_000_000
 	model := &PitchModel{DB: pool}

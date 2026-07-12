@@ -657,41 +657,17 @@ func (m *PitchModel) CreatePitch(ctx context.Context, req CreatePitchRequest) (*
 	}
 	hue := pitchHues[ownerID%len(pitchHues)]
 
-	var pitchID int
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO pitches
-			(owner_id, name, neighborhood, surface, format, price_per_hour,
-			 rating, review_count, is_featured, pitch_hue, amenities,
-			 latitude, longitude, image_url, image_public_id, description, maps_url, venue_id, label)
-		VALUES ($1, $2, $3, $4, $5, $6, 0, 0, false, $7, '{}', 0, 0, $8, $9, $10, $11, $12, NULLIF($13, ''))
-		RETURNING id
-	`,
-		ownerID, req.Name, req.Neighborhood, req.Surface, req.Format,
-		req.PricePerHour, hue, req.ImageURL, req.ImagePublicID, req.Description, req.MapsURL,
-		req.VenueID, req.Label,
-	).Scan(&pitchID); err != nil {
-		return nil, fmt.Errorf("CreatePitch: insert: %w", err)
-	}
-
-	// Gate 1d UX: the moment a venue gains its SECOND pitch, backfill the lone
-	// pre-existing pitch's label as «ملعب ١» — but only if the owner never set
-	// one (label IS NULL guard; an existing label is never overwritten, and
-	// venues already at 2+ pitches are left alone via the count = 2 guard,
-	// which counts the row just inserted).
-	if req.VenueID != nil {
-		if _, err := tx.Exec(ctx, `
-			UPDATE pitches SET label = 'ملعب ١', updated_at = now()
-			WHERE venue_id = $1 AND deleted_at IS NULL AND label IS NULL AND id <> $2
-			  AND (SELECT COUNT(*) FROM pitches WHERE venue_id = $1 AND deleted_at IS NULL) = 2
-		`, req.VenueID, pitchID); err != nil {
-			return nil, fmt.Errorf("CreatePitch: label first sibling: %w", err)
-		}
-	}
-
-	// No venue given → auto-create the 1:1 venue in the SAME transaction
+	// Resolve the pitch's venue BEFORE inserting the pitch — pitches.venue_id is
+	// NOT NULL since migration 034, so the old insert-then-link order 23502s.
+	// No venue given → auto-create the 1:1 venue first, in the SAME transaction
 	// (033-backfill semantics: place fields copied, slug ASCII-slugified with a
-	// 'v-<id>' fallback on non-ASCII names or any collision).
-	if req.VenueID == nil {
+	// 'v-<venue id>' placeholder fallback on non-ASCII names or any collision —
+	// same ^v-[0-9]+$ shape as the 033/034 backfills, now keyed to the venue's
+	// own id since the pitch id does not exist yet).
+	var venueID int64
+	if req.VenueID != nil {
+		venueID = *req.VenueID
+	} else {
 		slug := asciiSlugify(req.Name)
 		if slug != "" {
 			var taken bool
@@ -703,22 +679,71 @@ func (m *PitchModel) CreatePitch(ctx context.Context, req CreatePitchRequest) (*
 				slug = ""
 			}
 		}
+		insertVenue := func(slugExpr string, args ...any) error {
+			base := []any{ownerID, req.Name, req.Neighborhood, req.MapsURL,
+				req.Description, req.ImageURL, req.ImagePublicID}
+			return tx.QueryRow(ctx, fmt.Sprintf(`
+				INSERT INTO venues (id, owner_id, name, slug, neighborhood, maps_url, latitude, longitude,
+				                    description, cover_image_url, cover_image_public_id)
+				SELECT nv.id, $1, $2, %s, $3, $4, 0, 0, NULLIF($5,''), NULLIF($6,''), NULLIF($7,'')
+				FROM (SELECT nextval(pg_get_serial_sequence('venues','id')) AS id) nv
+				RETURNING id`, slugExpr), append(base, args...)...).Scan(&venueID)
+		}
+		if slug != "" {
+			// Slugified name; a TOCTOU collision with a concurrent create (23505)
+			// falls back to the always-unique placeholder — one retry, then error.
+			// The attempt runs under a savepoint: a unique-violation aborts the
+			// surrounding transaction otherwise (25P02 on the retry).
+			if _, err := tx.Exec(ctx, `SAVEPOINT auto_venue_slug`); err != nil {
+				return nil, fmt.Errorf("CreatePitch: savepoint: %w", err)
+			}
+			if err := insertVenue(`$8`, slug); err != nil {
+				if !isSlugUniqueViolation(err) {
+					return nil, fmt.Errorf("CreatePitch: auto venue: %w", err)
+				}
+				if _, rbErr := tx.Exec(ctx, `ROLLBACK TO SAVEPOINT auto_venue_slug`); rbErr != nil {
+					return nil, fmt.Errorf("CreatePitch: rollback savepoint: %w", rbErr)
+				}
+				slug = ""
+			}
+		}
 		if slug == "" {
-			slug = fmt.Sprintf("v-%d", pitchID)
+			// Placeholder from the venue's own id, minted and used in one statement.
+			if err := insertVenue(`'v-' || nv.id`); err != nil {
+				return nil, fmt.Errorf("CreatePitch: auto venue (placeholder): %w", err)
+			}
 		}
-		var venueID int64
-		if err := tx.QueryRow(ctx, `
-			INSERT INTO venues (owner_id, name, slug, neighborhood, maps_url, latitude, longitude,
-			                    description, cover_image_url, cover_image_public_id)
-			VALUES ($1, $2, $3, $4, $5, 0, 0, NULLIF($6,''), NULLIF($7,''), NULLIF($8,''))
-			RETURNING id
-		`, ownerID, req.Name, slug, req.Neighborhood, req.MapsURL,
-			req.Description, req.ImageURL, req.ImagePublicID).Scan(&venueID); err != nil {
-			return nil, fmt.Errorf("CreatePitch: auto venue: %w", err)
-		}
-		if _, err := tx.Exec(ctx,
-			`UPDATE pitches SET venue_id = $1 WHERE id = $2`, venueID, pitchID); err != nil {
-			return nil, fmt.Errorf("CreatePitch: link venue: %w", err)
+	}
+
+	var pitchID int
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO pitches
+			(owner_id, name, neighborhood, surface, format, price_per_hour,
+			 rating, review_count, is_featured, pitch_hue, amenities,
+			 latitude, longitude, image_url, image_public_id, description, maps_url, venue_id, label)
+		VALUES ($1, $2, $3, $4, $5, $6, 0, 0, false, $7, '{}', 0, 0, $8, $9, $10, $11, $12, NULLIF($13, ''))
+		RETURNING id
+	`,
+		ownerID, req.Name, req.Neighborhood, req.Surface, req.Format,
+		req.PricePerHour, hue, req.ImageURL, req.ImagePublicID, req.Description, req.MapsURL,
+		venueID, req.Label,
+	).Scan(&pitchID); err != nil {
+		return nil, fmt.Errorf("CreatePitch: insert: %w", err)
+	}
+
+	// Gate 1d UX: the moment a venue gains its SECOND pitch, backfill the lone
+	// pre-existing pitch's label as «ملعب ١» — but only if the owner never set
+	// one (label IS NULL guard; an existing label is never overwritten, and
+	// venues already at 2+ pitches are left alone via the count = 2 guard,
+	// which counts the row just inserted). Only reachable on the explicit-venue
+	// path: a just-auto-created 1:1 venue has no pre-existing sibling.
+	if req.VenueID != nil {
+		if _, err := tx.Exec(ctx, `
+			UPDATE pitches SET label = 'ملعب ١', updated_at = now()
+			WHERE venue_id = $1 AND deleted_at IS NULL AND label IS NULL AND id <> $2
+			  AND (SELECT COUNT(*) FROM pitches WHERE venue_id = $1 AND deleted_at IS NULL) = 2
+		`, req.VenueID, pitchID); err != nil {
+			return nil, fmt.Errorf("CreatePitch: label first sibling: %w", err)
 		}
 	}
 

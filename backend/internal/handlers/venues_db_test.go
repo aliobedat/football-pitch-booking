@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +49,7 @@ func newVnEnv(t *testing.T) *vnEnv {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	testutil.AssertSchemaBaseline(t, pool)
 
 	e := &vnEnv{pool: pool}
 	suffix := testutil.UniqueSuffix() % 1_000_000
@@ -317,17 +319,25 @@ func TestVenuesDB_CreatePitchAutoVenue(t *testing.T) {
 	if p["venue_slug"] != wantSlug || p["venue_name"] != name {
 		t.Errorf("auto venue = slug %v name %v, want %s / %s", p["venue_slug"], p["venue_name"], wantSlug, name)
 	}
-	// (b) Arabic name → v-<pitch id>
-	p2 := e.createPitch(t, r, "ملعب تلقائي", nil)
-	wantFallback := fmt.Sprintf("v-%d", int(p2["id"].(float64)))
-	if p2["venue_slug"] != wantFallback {
-		t.Errorf("arabic auto slug = %v, want %s", p2["venue_slug"], wantFallback)
+	// The placeholder is keyed to the VENUE's own id since the hotfix reorder
+	// (venue is created before the pitch, so no pitch id exists yet).
+	venuePlaceholder := func(pitchPayload map[string]any) string {
+		var vID int64
+		if err := e.pool.QueryRow(context.Background(),
+			`SELECT venue_id FROM pitches WHERE id = $1`, int64(pitchPayload["id"].(float64))).Scan(&vID); err != nil {
+			t.Fatalf("resolve venue id: %v", err)
+		}
+		return fmt.Sprintf("v-%d", vID)
 	}
-	// (c) ASCII collision → v-<pitch id> fallback
+	// (b) Arabic name → v-<venue id> placeholder
+	p2 := e.createPitch(t, r, "ملعب تلقائي", nil)
+	if want := venuePlaceholder(p2); p2["venue_slug"] != want {
+		t.Errorf("arabic auto slug = %v, want %s", p2["venue_slug"], want)
+	}
+	// (c) ASCII collision → v-<venue id> fallback
 	p3 := e.createPitch(t, r, name, nil) // same name as (a)
-	wantFallback3 := fmt.Sprintf("v-%d", int(p3["id"].(float64)))
-	if p3["venue_slug"] != wantFallback3 {
-		t.Errorf("collision fallback = %v, want %s", p3["venue_slug"], wantFallback3)
+	if want := venuePlaceholder(p3); p3["venue_slug"] != want {
+		t.Errorf("collision fallback = %v, want %s", p3["venue_slug"], want)
 	}
 	// (d) explicit OWN venue_id honoured
 	v := e.createVenue(t, r, fmt.Sprintf("explicit-%d", suffix))
@@ -719,5 +729,55 @@ func TestVenuesDB_SecondPitchAutoLabelsFirst(t *testing.T) {
 	}
 	if got := labelOf(customFirstID); got != "الرئيسي" {
 		t.Errorf("owner-set label overwritten: %q, want %q", got, "الرئيسي")
+	}
+}
+
+// ── HOTFIX regression: standalone create by a minimal provisioned owner ─────
+// Mirrors the production incident (2026-07-12): a runbook-provisioned owner
+// (full_name + phone + role ONLY — every other column at its default), Arabic
+// pitch name, valid maps link, no coordinates. Must 201 under the post-034
+// NOT NULL contract with the auto 1:1 venue linked and a v-<id> placeholder.
+func TestVenuesDB_StandaloneCreateMinimalOwner(t *testing.T) {
+	e := newVnEnv(t)
+	suffix := testutil.UniqueSuffix() % 1_000_000
+
+	// Minimal owner row, exactly the provisioning runbook's INSERT.
+	var ownerID int64
+	if err := e.pool.QueryRow(context.Background(),
+		`INSERT INTO users (full_name, phone, role) VALUES ('مالك تجريبي', $1, 'owner') RETURNING id`,
+		fmt.Sprintf("+96297%06d", suffix)).Scan(&ownerID); err != nil {
+		t.Fatalf("seed minimal owner: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = e.pool.Exec(context.Background(), `DELETE FROM pitches WHERE owner_id = $1`, ownerID)
+		_, _ = e.pool.Exec(context.Background(), `DELETE FROM venues WHERE owner_id = $1`, ownerID)
+		_, _ = e.pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, ownerID)
+	})
+
+	r := e.router(ownerID, "owner")
+	rec := bsDo(r, http.MethodPost, "/pitches", map[string]any{
+		"name": "ملعب عمان الجديد", "neighborhood": "عمان", "surface": "artificial_grass",
+		"format": "خماسي", "price_per_hour": 25, "maps_url": vnMapsURL,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("standalone create = %d, want 201 (%s)", rec.Code, rec.Body.String())
+	}
+	pitchID := int64(decodeData(t, rec.Body.Bytes())["id"].(float64))
+
+	var venueID *int64
+	var slug string
+	if err := e.pool.QueryRow(context.Background(), `
+		SELECT p.venue_id, v.slug FROM pitches p JOIN venues v ON v.id = p.venue_id WHERE p.id = $1
+	`, pitchID).Scan(&venueID, &slug); err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if venueID == nil {
+		t.Fatalf("venue_id is NULL — auto 1:1 venue not linked")
+	}
+	if !regexp.MustCompile(`^v-[0-9]+$`).MatchString(slug) {
+		t.Errorf("auto venue slug = %q, want ^v-[0-9]+$ placeholder (Arabic name is not slugifiable)", slug)
+	}
+	if fmt.Sprintf("v-%d", *venueID) != slug {
+		t.Errorf("placeholder %q not keyed to the venue's own id %d", slug, *venueID)
 	}
 }

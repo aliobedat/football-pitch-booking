@@ -201,6 +201,7 @@ func (h *PitchHandler) CreatePitch(c *gin.Context) {
 			})
 			return
 		}
+		c.Error(err) // surface the underlying failure (was silently swallowed)
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "internal_server_error",
 			"message": "حدث خطأ أثناء إنشاء الملعب",

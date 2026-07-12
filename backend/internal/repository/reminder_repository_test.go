@@ -51,6 +51,7 @@ func newReminderTestEnv(t *testing.T) *reminderTestEnv {
 		pool.Close()
 		t.Fatalf("ping: %v", err)
 	}
+	testutil.AssertSchemaBaseline(t, pool)
 
 	// Unique marker so parallel/leftover runs never collide.
 	suffix := testutil.UniqueSuffix() % 1_000_000

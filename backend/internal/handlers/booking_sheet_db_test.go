@@ -49,6 +49,7 @@ func newBSEnv(t *testing.T) *bsEnv {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(pool.Close)
+	testutil.AssertSchemaBaseline(t, pool)
 	e := &bsEnv{pool: pool}
 	e.ownerA = e.mkUser(t, "owner")
 	e.ownerB = e.mkUser(t, "owner")
