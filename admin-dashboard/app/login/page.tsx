@@ -1,7 +1,6 @@
 'use client';
 
 import { useState, useEffect, type FormEvent } from 'react';
-import { useRouter } from 'next/navigation';
 import axios from 'axios';
 import { isDashboardRole, type User } from '@malaab/shared/auth';
 import { useAuth } from '@/context/AuthContext';
@@ -34,7 +33,6 @@ function mapError(err: unknown): string {
 }
 
 export default function AdminLoginPage() {
-  const router = useRouter();
   const { user, isLoading, login } = useAuth();
 
   const [phone, setPhone] = useState('');
@@ -47,11 +45,16 @@ export default function AdminLoginPage() {
 
   // Route a resolved session: dashboard roles into the app; a player is held at
   // the door with the rejection screen (never redirected straight into admin).
+  // Full-document navigation (WO-AUTH-GHOST-LOGIN): a client-side
+  // router.replace here could serve the Next client cache's stale
+  // "/ → /login" resolution from the expiry bounce, leaving the user stuck on
+  // the login screen with a live session. window.location bypasses the client
+  // cache and re-runs the edge guard — the same pattern AuthContext.logout uses.
   useEffect(() => {
     if (isLoading || !user) return;
-    if (isDashboardRole(user.role)) router.replace('/');
+    if (isDashboardRole(user.role)) window.location.replace('/');
     else setRejected(true);
-  }, [user, isLoading, router]);
+  }, [user, isLoading]);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -67,7 +70,9 @@ export default function AdminLoginPage() {
       // session into the admin context, so admin access is never granted.
       if (isDashboardRole(u.role)) {
         login(u);
-        router.push('/');
+        // Full-document navigation — see the effect above; router.push('/')
+        // was the "clicking Login does nothing" half of the ghost-login bug.
+        window.location.replace('/');
       } else {
         setRejected(true);
       }

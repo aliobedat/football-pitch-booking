@@ -94,24 +94,30 @@ func (h *AuthHandler) Refresh(c *gin.Context) {
 // POST /api/v1/auth/logout
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Logout revokes all refresh tokens for the authenticated user and clears the
-// session cookies. The access token will expire naturally — implement a token
-// denylist if immediate access-token invalidation is required.
+// Logout ends the browser's session (WO-AUTH-GHOST-LOGIN ruling): it is
+// authenticated by the REFRESH cookie itself — not RequireAuth — so an
+// EXPIRED session can still end itself (previously an expired access token
+// made logout 401, leaving a live one-week refresh cookie behind: the ghost
+// session). It revokes the presented refresh token server-side, clears every
+// session cookie, and returns 204 ALWAYS — absent, garbage, or already-revoked
+// tokens get the same 204 (idempotent; never a token-validity oracle). CSRF
+// is still enforced by the route's RequireCSRF middleware.
 func (h *AuthHandler) Logout(c *gin.Context) {
-	userID := c.GetInt("malaab.user_id")
-
-	if err := h.userRepo.RevokeAllUserRefreshTokens(c.Request.Context(), userID); err != nil {
-		c.Error(err)
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": "internal_error", "message": "logout failed",
-		})
-		return
+	if rawRefresh, err := c.Cookie(cookieRefresh); err == nil && rawRefresh != "" {
+		if err := h.userRepo.RevokeRefreshTokenByHash(
+			c.Request.Context(), auth.HashRefreshToken(rawRefresh),
+		); err != nil {
+			// Log for triage but still clear the browser — a transient DB error
+			// must not trap the user in a session they asked to end. The token
+			// dies at expires_at regardless.
+			c.Error(err)
+		}
 	}
 
 	// Expire the session cookies so the browser is left clean.
 	clearSessionCookies(c, h.cfg)
 
-	c.JSON(http.StatusOK, gin.H{"message": "logged out successfully"})
+	c.Status(http.StatusNoContent)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

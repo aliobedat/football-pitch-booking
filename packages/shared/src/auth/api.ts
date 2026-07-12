@@ -33,7 +33,17 @@ function isAuthEndpoint(url?: string): boolean {
   return (
     url.includes('/auth/refresh') ||
     url.includes('/auth/request-otp') ||
-    url.includes('/auth/verify-otp')
+    url.includes('/auth/verify-otp') ||
+    // WO-AUTH-GHOST-LOGIN: a failed password login must surface its 401 —
+    // without this entry the interceptor silently refreshed the session and
+    // RE-POSTED the credentials, resurrecting "logged-out" sessions.
+    url.includes('/auth/password-login') ||
+    // booking-session returns a neutral 403 (never 401), so this entry is
+    // defensive — listed for symmetry so no future status change re-opens
+    // the refresh-on-login hole.
+    url.includes('/auth/booking-session') ||
+    // logout ends the session; refreshing it first would be self-defeating.
+    url.includes('/auth/logout')
   );
 }
 
