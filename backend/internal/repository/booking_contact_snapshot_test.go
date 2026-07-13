@@ -16,6 +16,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -126,6 +127,85 @@ func TestContactSnapshot_FrozenAtCreate_SurvivesProfileEdit(t *testing.T) {
 	}
 	if contact.Phone != e.phone {
 		t.Errorf("contact phone = %q, want frozen snapshot %q (not the edited %q)", contact.Phone, e.phone, newPhone)
+	}
+}
+
+// TestContactSnapshot_PlayerNameLocationAndCompositePitch (T2 + {{1}}/{{3}}
+// sourcing) proves GetBookingContact resolves the confirmation fields from real
+// rows: player name from the users profile, location from the venue neighbourhood,
+// and the pitch display name via the shared pitchDisplayNameExpr — bare for a
+// single-pitch venue (collapse rule), "venue — label" once the venue is multi-pitch.
+func TestContactSnapshot_PlayerNameLocationAndCompositePitch(t *testing.T) {
+	e := newContactEnv(t)
+	ctx := context.Background()
+
+	// (1) Single-pitch venue → collapse to a bare name; player name + location resolve.
+	start1 := e.futureAt(150)
+	b1, err := e.repo.CreateBooking(ctx, models.CreateBookingRequest{
+		PitchID: e.pitchID, PlayerID: e.playerID, StartTime: start1, EndTime: start1.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create booking 1: %v", err)
+	}
+	c1, err := e.repo.GetBookingContact(ctx, b1.ID)
+	if err != nil {
+		t.Fatalf("GetBookingContact 1: %v", err)
+	}
+	if c1.PlayerName != "CS Player" {
+		t.Errorf("PlayerName = %q, want %q (users.full_name)", c1.PlayerName, "CS Player")
+	}
+	if c1.Location != "Amman" {
+		t.Errorf("Location = %q, want %q (venue neighbourhood)", c1.Location, "Amman")
+	}
+	if strings.Contains(c1.PitchName, " — ") {
+		t.Errorf("single-pitch venue must collapse to a bare name; got composite %q", c1.PitchName)
+	}
+
+	// (2) Make the venue MULTI-pitch: move a second pitch (same owner, invariant
+	// preserved) under this venue and label the booked pitch. Now the display name
+	// must take the composite "venue — label" form.
+	var venueID int64
+	if err := e.pool.QueryRow(ctx, `SELECT venue_id FROM pitches WHERE id=$1`, e.pitchID).Scan(&venueID); err != nil {
+		t.Fatalf("read venue_id: %v", err)
+	}
+	var venueName string
+	if err := e.pool.QueryRow(ctx, `SELECT name FROM venues WHERE id=$1`, venueID).Scan(&venueName); err != nil {
+		t.Fatalf("read venue name: %v", err)
+	}
+	p2, err := (&data.PitchModel{DB: e.pool}).CreatePitch(ctx, data.CreatePitchRequest{
+		Name: "CS Pitch Sibling", Neighborhood: "Amman", Surface: "artificial_grass",
+		Format: "خماسي", PricePerHour: 30, OwnerID: int(e.ownerID),
+	})
+	if err != nil {
+		t.Fatalf("seed sibling pitch: %v", err)
+	}
+	t.Cleanup(func() {
+		cctx, ccancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer ccancel()
+		_, _ = e.pool.Exec(cctx, `DELETE FROM bookings WHERE pitch_id = $1`, p2.ID)
+		_, _ = e.pool.Exec(cctx, `DELETE FROM pitch_audit_log WHERE pitch_id = $1`, p2.ID)
+		_, _ = e.pool.Exec(cctx, `DELETE FROM pitches WHERE id = $1`, p2.ID)
+	})
+	if _, err := e.pool.Exec(ctx, `UPDATE pitches SET venue_id=$1 WHERE id=$2`, venueID, p2.ID); err != nil {
+		t.Fatalf("reassign sibling to venue: %v", err)
+	}
+	if _, err := e.pool.Exec(ctx, `UPDATE pitches SET label='Court 1' WHERE id=$1`, e.pitchID); err != nil {
+		t.Fatalf("label booked pitch: %v", err)
+	}
+
+	start2 := e.futureAt(200)
+	b2, err := e.repo.CreateBooking(ctx, models.CreateBookingRequest{
+		PitchID: e.pitchID, PlayerID: e.playerID, StartTime: start2, EndTime: start2.Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create booking 2: %v", err)
+	}
+	c2, err := e.repo.GetBookingContact(ctx, b2.ID)
+	if err != nil {
+		t.Fatalf("GetBookingContact 2: %v", err)
+	}
+	if want := venueName + " — Court 1"; c2.PitchName != want {
+		t.Errorf("multi-pitch venue must render composite; PitchName = %q, want %q", c2.PitchName, want)
 	}
 }
 

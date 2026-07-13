@@ -24,10 +24,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ali/football-pitch-api/internal/config"
+	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
 // Errors surfaced by the Infobip adapter. Callers/log sites match these with
@@ -59,6 +61,20 @@ const (
 	// mirroring the Meta adapter's copy-code button. Verify against your approved
 	// Infobip template before go-live (see manual ops steps).
 	infobipOTPButtonType = "URL"
+
+	// booking_confirmation_ar is the approved Arabic UTILITY template for the player
+	// booking confirmation (8 body placeholders). Its name and language are a FIXED
+	// approved contract — pinned here, not env-driven — like the OTP body is fixed by
+	// Meta. INFOBIP_BOOKING_CONFIRMED_TEMPLATE remains defined in config but is
+	// intentionally unused for this kind. (The template id is not needed: Infobip
+	// keys the payload on templateName, so no id is embedded.)
+	infobipBookingConfirmationTemplate = "booking_confirmation_ar"
+	infobipBookingConfirmationLang     = "ar"
+
+	// Asia/Amman civil-time layouts for the confirmation placeholders (owner ruling
+	// R6c: Western digits, English month, 24-hour clock).
+	ammanDateLayout  = "Mon 02 Jan 2006" // {{4}} → "Wed 15 Jul 2026"
+	ammanClockLayout = "15:04"           // {{5}}/{{6}} → "20:00"
 )
 
 // InfobipWhatsAppChannel delivers through the Infobip WhatsApp API. It satisfies
@@ -206,15 +222,24 @@ func (i *InfobipWhatsAppChannel) buildRequest(msg OutboundMessage) (infobipTempl
 		}), nil
 
 	case BookingConfirmedPayload:
-		name := i.cfg.Templates.BookingConfirmed
-		if name == "" {
-			return infobipTemplateRequest{}, fmt.Errorf("%w: %s", ErrInfobipNoTemplate, KindBookingConfirmed)
-		}
+		// FIXED approved contract: booking_confirmation_ar (Arabic, 8 body
+		// placeholders). Name + language are pinned (see const block), NOT read from
+		// INFOBIP_BOOKING_CONFIRMED_TEMPLATE. Placeholder ORDER matches the approved
+		// template exactly:
+		//   {{1}} player  {{2}} pitch  {{3}} location  {{4}} date
+		//   {{5}} start   {{6}} end    {{7}} amount     {{8}} reference
 		return i.wrap(to, infobipTemplateContent{
-			TemplateName: name,
-			Language:     lang,
+			TemplateName: infobipBookingConfirmationTemplate,
+			Language:     infobipBookingConfirmationLang,
 			TemplateData: infobipTemplateData{Body: infobipTemplateBody{Placeholders: []string{
-				p.PitchName, fmtBookingTime(p.StartTime), fmtBookingTime(p.EndTime),
+				p.PlayerName,
+				p.PitchName,
+				p.Location,
+				fmtAmmanDate(p.StartTime),
+				fmtAmmanClock(p.StartTime),
+				fmtAmmanClock(p.EndTime),
+				fmtAmountNumber(p.Amount),
+				bookingReference(p.BookingID),
 			}}},
 		}), nil
 
@@ -265,6 +290,28 @@ func (i *InfobipWhatsAppChannel) wrap(to string, content infobipTemplateContent)
 func failedInfobip(err error) (DeliveryResult, error) {
 	return DeliveryResult{Status: DeliveryFailed, Err: err}, err
 }
+
+// fmtAmmanDate renders a booking date in Asia/Amman civil time ("Wed 15 Jul 2026").
+// The stored instant is UTC; a player in Jordan must read their LOCAL date.
+func fmtAmmanDate(t time.Time) string { return timeutil.InAmman(t).Format(ammanDateLayout) }
+
+// fmtAmmanClock renders the wall-clock time (24h HH:MM, e.g. "20:00") in Asia/Amman.
+func fmtAmmanClock(t time.Time) string { return timeutil.InAmman(t).Format(ammanClockLayout) }
+
+// fmtAmountNumber renders a money amount as a BARE number — no currency symbol (the
+// template renders د.أ itself) — with trailing zeros trimmed: 15 → "15", 15.5 →
+// "15.5", 12.75 → "12.75". Formatting at the DB scale (numeric(10,3)) first, then
+// trimming, avoids binary-float artefacts. This is the booking TOTAL price (R3),
+// never amount_paid — a confirmation is not a receipt.
+func fmtAmountNumber(v float64) string {
+	s := strconv.FormatFloat(v, 'f', 3, 64)
+	s = strings.TrimRight(s, "0")
+	return strings.TrimRight(s, ".")
+}
+
+// bookingReference composes the human-friendly reference MRM-<id> at format time.
+// It is NEVER stored (no column, no sequence) — the booking id IS the reference.
+func bookingReference(id int64) string { return "MRM-" + strconv.FormatInt(id, 10) }
 
 // ── Infobip WhatsApp template wire types (local to this adapter) ─────────────
 // These mirror the Infobip JSON contract and exist ONLY inside this adapter.

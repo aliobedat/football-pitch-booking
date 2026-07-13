@@ -1,13 +1,20 @@
 package booking
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/ali/football-pitch-api/internal/config"
 	"github.com/ali/football-pitch-api/internal/models"
 	"github.com/ali/football-pitch-api/internal/notification"
 	"github.com/ali/football-pitch-api/internal/repository"
@@ -98,9 +105,22 @@ func (f *fakeNotifier) Send(_ context.Context, msg notification.OutboundMessage)
 // ─────────────────────────────────────────────────────────────────────────────
 
 const (
-	testPhone     = "+962790000000"
-	testPitchName = "Pitch A"
+	testPhone      = "+962790000000"
+	testPlayerName = "Sami"
+	testPitchName  = "Pitch A"
+	testLocation   = "Amman"
 )
+
+// fullContact is the resolved contact for a player booking with every field the
+// Arabic confirmation needs. Tests that must actually dispatch use this.
+func fullContact() *repository.BookingContact {
+	return &repository.BookingContact{
+		Phone:      testPhone,
+		PlayerName: testPlayerName,
+		PitchName:  testPitchName,
+		Location:   testLocation,
+	}
+}
 
 func sampleBooking() *models.Booking {
 	start := time.Date(2026, 6, 10, 18, 0, 0, 0, time.UTC)
@@ -196,7 +216,7 @@ func TestCreate_DispatchesBookingConfirmed(t *testing.T) {
 	b := sampleBooking()
 	store := &fakeStore{
 		booking: b,
-		contact: &repository.BookingContact{Phone: testPhone, PitchName: testPitchName},
+		contact: fullContact(),
 	}
 	notifier := &fakeNotifier{}
 	svc := newService(store, notifier)
@@ -226,9 +246,127 @@ func TestCreate_DispatchesBookingConfirmed(t *testing.T) {
 	if !ok {
 		t.Fatalf("payload type = %T, want BookingConfirmedPayload", msg.Payload)
 	}
-	if payload.BookingID != b.ID || payload.PitchName != testPitchName ||
-		!payload.StartTime.Equal(b.StartTime) || !payload.EndTime.Equal(b.EndTime) {
-		t.Errorf("payload = %+v, does not match booking %+v / pitch %q", payload, b, testPitchName)
+	// Every field the Arabic template renders must be sourced correctly: contact
+	// fields from GetBookingContact, times from the booking, amount = TOTAL price
+	// (not amount_paid), and BookingID (→ MRM-<id> reference at format time).
+	if payload.BookingID != b.ID ||
+		payload.PlayerName != testPlayerName ||
+		payload.PitchName != testPitchName ||
+		payload.Location != testLocation ||
+		!payload.StartTime.Equal(b.StartTime) || !payload.EndTime.Equal(b.EndTime) ||
+		payload.Amount != b.TotalPrice {
+		t.Errorf("payload = %+v, does not match booking %+v / contact %+v", payload, b, fullContact())
+	}
+}
+
+// T10 (integrated, R1 pin — the highest-value test): one player booking, routed
+// through a real NotificationService to the Infobip adapter, produces EXACTLY ONE
+// provider POST and that message uses booking_confirmation_ar — never the legacy
+// template. A test asserting only "the new template fired" would pass even if both
+// fired; this counts the sends so a duplicate (old + new) would fail.
+func TestCreate_ExactlyOneConfirmationAR_NoLegacy(t *testing.T) {
+	var posts int32
+	var lastTemplate atomic.Value
+	lastTemplate.Store("")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&posts, 1)
+		var req struct {
+			Messages []struct {
+				Content struct {
+					TemplateName string `json:"templateName"`
+				} `json:"content"`
+			} `json:"messages"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &req)
+		if len(req.Messages) > 0 {
+			lastTemplate.Store(req.Messages[0].Content.TemplateName)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"messages":[{"messageId":"m1","status":{"groupName":"PENDING","name":"PENDING_ENROUTE"}}]}`)
+	}))
+	defer srv.Close()
+
+	// Legacy template name is configured but must be ignored for the confirmation.
+	infoCfg := config.InfobipConfig{
+		BaseURL: srv.URL, APIKey: "k", Sender: "447860099299",
+		Templates: config.InfobipTemplates{Language: "en", BookingConfirmed: "malaeb_booking_confirmed"},
+	}
+	ch, err := notification.NewInfobipWhatsAppChannel(infoCfg, notification.WithInfobipHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("build infobip channel: %v", err)
+	}
+	notifier := notification.NewService(
+		notification.ChannelWhatsApp,
+		notification.WithChannel(notification.ChannelWhatsApp, ch),
+		notification.WithRoutingPolicy(
+			map[notification.MessageKind]notification.ChannelName{notification.KindBookingConfirmed: notification.ChannelWhatsApp},
+			notification.ChannelWhatsApp,
+		),
+	)
+	store := &fakeStore{booking: sampleBooking(), contact: fullContact()}
+	svc := newService(store, notifier)
+
+	if _, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, PlayerID: 3}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if got := atomic.LoadInt32(&posts); got != 1 {
+		t.Fatalf("provider received %d sends, want EXACTLY 1 (old + new must never both fire)", got)
+	}
+	if got := lastTemplate.Load().(string); got != "booking_confirmation_ar" {
+		t.Fatalf("confirmation used template %q, want booking_confirmation_ar (legacy must not fire)", got)
+	}
+}
+
+// T7': when the player name resolves EMPTY, the confirmation is SILENTLY suppressed
+// (no blank-name greeting) — but the skip MUST be logged so a missing confirmation
+// is diagnosable. The log line carries only the booking id and kind (no PII: no
+// phone, no name).
+func TestCreate_EmptyPlayerNameSkipsAndLogs(t *testing.T) {
+	b := sampleBooking()
+	store := &fakeStore{
+		booking: b,
+		contact: &repository.BookingContact{Phone: testPhone, PlayerName: "", PitchName: testPitchName, Location: testLocation},
+	}
+	notifier := &fakeNotifier{}
+	var logbuf bytes.Buffer
+	svc := NewService(store, notifier, WithLogger(log.New(&logbuf, "", 0)))
+
+	if _, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, PlayerID: 3}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(notifier.sent) != 0 {
+		t.Fatalf("empty player name must suppress the send; got %d messages", len(notifier.sent))
+	}
+	logged := logbuf.String()
+	if !strings.Contains(logged, "no player name") {
+		t.Errorf("skip must be logged for diagnosability; log = %q", logged)
+	}
+	// No PII in the log line.
+	if strings.Contains(logged, testPhone) || strings.Contains(logged, testPlayerName) {
+		t.Errorf("skip log must not contain PII (phone/name); log = %q", logged)
+	}
+}
+
+// T8 (Create path): a non-player booking (e.g. academy) that somehow reaches Create
+// dispatches NO player message — the source gate short-circuits before the contact
+// lookup. (Blocks/manual on the cancel path are covered above.)
+func TestCreate_NonPlayerSourceNoDispatch(t *testing.T) {
+	ab := sampleBooking()
+	ab.Source = models.SourceAcademy
+	ab.PlayerID = nil
+	store := &fakeStore{booking: ab, contact: fullContact()}
+	notifier := &fakeNotifier{}
+	svc := newService(store, notifier)
+
+	if _, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if store.contactCalls != 0 {
+		t.Errorf("non-player source must short-circuit before contact lookup; contactCalls = %d", store.contactCalls)
+	}
+	if len(notifier.sent) != 0 {
+		t.Errorf("non-player source must dispatch nothing; got %d messages", len(notifier.sent))
 	}
 }
 
@@ -238,7 +376,7 @@ func TestCreate_Idempotent_FreshDispatches(t *testing.T) {
 	b := sampleBooking()
 	store := &fakeStore{
 		booking:            b,
-		contact:            &repository.BookingContact{Phone: testPhone, PitchName: testPitchName},
+		contact:            fullContact(),
 		idempotentReplayed: false,
 	}
 	notifier := &fakeNotifier{}
@@ -268,7 +406,7 @@ func TestCreate_Idempotent_ReplaySuppressesNotification(t *testing.T) {
 	b := sampleBooking()
 	store := &fakeStore{
 		booking:            b,
-		contact:            &repository.BookingContact{Phone: testPhone, PitchName: testPitchName},
+		contact:            fullContact(),
 		idempotentReplayed: true,
 	}
 	notifier := &fakeNotifier{}
@@ -341,7 +479,7 @@ func TestCancel_DispatchesBookingCancelledWithReason(t *testing.T) {
 	b.Status = models.StatusCancelled
 	store := &fakeStore{
 		booking: b,
-		contact: &repository.BookingContact{Phone: testPhone, PitchName: testPitchName},
+		contact: fullContact(),
 	}
 	notifier := &fakeNotifier{}
 	svc := newService(store, notifier)
@@ -403,7 +541,7 @@ func TestCancel_DefaultsReasonFromActorRole(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			store := &fakeStore{
 				booking: sampleBooking(),
-				contact: &repository.BookingContact{Phone: testPhone, PitchName: testPitchName},
+				contact: fullContact(),
 			}
 			notifier := &fakeNotifier{}
 			svc := newService(store, notifier)
@@ -480,7 +618,7 @@ func TestCreate_NotifierFailureDoesNotFailBooking(t *testing.T) {
 	b := sampleBooking()
 	store := &fakeStore{
 		booking: b,
-		contact: &repository.BookingContact{Phone: testPhone, PitchName: testPitchName},
+		contact: fullContact(),
 	}
 	notifier := &fakeNotifier{err: errors.New("provider unreachable")}
 	svc := newService(store, notifier)
@@ -546,7 +684,7 @@ func TestService_DispatchesThroughRealNotificationService(t *testing.T) {
 	b := sampleBooking()
 	store := &fakeStore{
 		booking: b,
-		contact: &repository.BookingContact{Phone: testPhone, PitchName: testPitchName},
+		contact: fullContact(),
 	}
 
 	fake := notification.NewFakeChannel(notification.FakeSilent())

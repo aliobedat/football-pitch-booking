@@ -64,12 +64,20 @@ type OTPPayload struct {
 // Kind reports the message kind this payload belongs to.
 func (OTPPayload) Kind() MessageKind { return KindOTP }
 
-// BookingConfirmedPayload describes a confirmed booking for the player.
+// BookingConfirmedPayload describes a confirmed booking for the player. It
+// carries every field the approved Arabic Utility template booking_confirmation_ar
+// renders (player name, composite pitch name, location, date/time, amount) plus
+// the BookingID, from which the human-friendly reference (MRM-<id>) is composed at
+// format time — never stored. Amount is the booking TOTAL price (not amount_paid);
+// a confirmation is not a receipt.
 type BookingConfirmedPayload struct {
-	BookingID int64
-	PitchName string
-	StartTime time.Time
-	EndTime   time.Time
+	BookingID  int64
+	PlayerName string
+	PitchName  string
+	Location   string
+	StartTime  time.Time
+	EndTime    time.Time
+	Amount     float64
 }
 
 // Kind reports the message kind this payload belongs to.
