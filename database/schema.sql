@@ -1,12 +1,12 @@
 -- ═══════════════════════════════════════════════════════════════════════════
 -- Malaeb — CANONICAL SCHEMA BASELINE (scratch/test DBs)
 --
--- Regenerated 2026-07-11 from the LIVE production schema (schema-only, no
--- data) after migration 034 (WO-VENUES: pitches.venue_id SET NOT NULL):
+-- Regenerated 2026-07-14 from the LIVE production schema (schema-only, no
+-- data) after migration 035 (WO-FORMAT-6V6: add سداسي to pitch_format enum):
 --
 --     pg_dump --schema-only --no-owner --no-privileges "$DATABASE_URL"
 --
--- This file IS the full current schema: migrations 002–034 (and the historical
+-- This file IS the full current schema: migrations 002–035 (and the historical
 -- out-of-band ALTERs, venues 033/034) are already baked in. Do NOT replay
 -- backend/migrations/* on a scratch built from this file — they remain in the
 -- repo as history and as the manual-apply path for PRODUCTION only.
@@ -24,7 +24,7 @@
 -- PostgreSQL database dump
 --
 
-\restrict x12zybDh4u4a71ZN7p42F14eVcdJWH7ynOVR7fAaqaDloagiRX7sFDj38u8BAMh
+\restrict 6Xwk5bcrIabNIb7ddkuY3tVliyJCXeMQRpHNow95w5T42ObAAAQawjq4yusUyiE
 
 -- Dumped from database version 17.10 (21f7c76)
 -- Dumped by pg_dump version 18.4
@@ -85,6 +85,7 @@ CREATE TYPE public.payment_status AS ENUM (
 
 CREATE TYPE public.pitch_format AS ENUM (
     'خماسي',
+    'سداسي',
     'سباعي'
 );
 
@@ -1470,5 +1471,5 @@ ALTER TABLE ONLY public.venues
 -- PostgreSQL database dump complete
 --
 
-\unrestrict x12zybDh4u4a71ZN7p42F14eVcdJWH7ynOVR7fAaqaDloagiRX7sFDj38u8BAMh
+\unrestrict 6Xwk5bcrIabNIb7ddkuY3tVliyJCXeMQRpHNow95w5T42ObAAAQawjq4yusUyiE
 
