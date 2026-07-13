@@ -297,7 +297,7 @@ func Load() *Config {
 		// player flow is never blocked by a misread flag.
 		BookingOTPRequired: getEnv("BOOKING_OTP_REQUIRED", "false") == "true",
 		// Optional. Empty = host-only cookies (dev/localhost). In production set to
-		// the parent domain with a leading dot (e.g. ".malaebjo.com") so cookies set
+		// the parent domain with a leading dot (e.g. ".marmajo.com") so cookies set
 		// by the API host are readable across sibling subdomains (first-party,
 		// cross-subdomain). No panic — empty is a valid, safe default.
 		CookieDomain: getEnv("COOKIE_DOMAIN", ""),

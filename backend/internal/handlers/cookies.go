@@ -66,7 +66,7 @@ func issueSessionCookies(c *gin.Context, cfg *config.Config, accessToken, rawRef
 	sameSite, secure := cookieSecurity(cfg)
 	accessMaxAge := int(cfg.JWT.AccessExpiry.Seconds())
 	refreshMaxAge := int(cfg.JWT.RefreshExpiry.Seconds())
-	// Empty in dev (host-only); ".malaebjo.com" in prod (cross-subdomain). All
+	// Empty in dev (host-only); ".marmajo.com" in prod (cross-subdomain). All
 	// five cookies share this so the set is consistent across subdomains.
 	cookieDomain := cfg.CookieDomain
 
