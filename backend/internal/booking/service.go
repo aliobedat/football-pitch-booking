@@ -161,11 +161,21 @@ func (s *Service) dispatch(ctx context.Context, b *models.Booking, kind notifica
 	var payload notification.Payload
 	switch kind {
 	case notification.KindBookingConfirmed:
+		// The Arabic confirmation greets the player by name ({{1}}). A row with no
+		// resolvable name (no contact_name snapshot and no users.full_name) must NOT
+		// send a blank-name greeting — skip the confirmation entirely (owner ruling).
+		if contact.PlayerName == "" {
+			s.logger.Printf("[booking] notify: booking %d has no player name on file, skipping %s", b.ID, kind)
+			return
+		}
 		payload = notification.BookingConfirmedPayload{
-			BookingID: b.ID,
-			PitchName: contact.PitchName,
-			StartTime: b.StartTime,
-			EndTime:   b.EndTime,
+			BookingID:  b.ID,
+			PlayerName: contact.PlayerName,
+			PitchName:  contact.PitchName,
+			Location:   contact.Location,
+			StartTime:  b.StartTime,
+			EndTime:    b.EndTime,
+			Amount:     b.TotalPrice,
 		}
 	case notification.KindBookingCancelled:
 		payload = notification.BookingCancelledPayload{

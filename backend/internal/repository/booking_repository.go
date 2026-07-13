@@ -74,10 +74,14 @@ type CancelBookingParams struct {
 }
 
 // BookingContact holds the data required to notify the player about a booking
-// event: their E.164 phone (the message recipient) and the pitch name.
+// event: their E.164 phone (the message recipient), player name, the composite
+// pitch display name, and the venue location — every recipient-facing field the
+// booking-confirmation template renders.
 type BookingContact struct {
-	Phone     string
-	PitchName string
+	Phone      string
+	PlayerName string
+	PitchName  string
+	Location   string
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1914,13 +1918,21 @@ func (r *bookingRepo) GetBookingContact(
 	// fall back to the live users phone for pre-030 rows that were never snapshotted
 	// (contact_phone IS NULL). The users join is LEFT so a snapshot-only row still
 	// resolves. contact_phone is stored as NULL (never '') so COALESCE is clean.
+	//
+	// PlayerName is snapshot-first too (COALESCE(contact_name, full_name)), mirroring
+	// the phone snapshot precedent. Location is the venue neighbourhood; venue_id is
+	// NOT NULL post-034, so the LEFT JOIN resolves for every live pitch.
 	err := r.db.QueryRow(ctx, `
-		SELECT COALESCE(b.contact_phone, u.phone, ''), COALESCE(`+pitchDisplayNameExpr+`, '')
+		SELECT COALESCE(b.contact_phone, u.phone, ''),
+		       COALESCE(b.contact_name, u.full_name, ''),
+		       COALESCE(`+pitchDisplayNameExpr+`, ''),
+		       COALESCE(v.neighborhood, '')
 		FROM bookings b
 		JOIN pitches p ON p.id = b.pitch_id
+		LEFT JOIN venues v ON v.id = p.venue_id
 		LEFT JOIN users u ON u.id = b.player_id
 		WHERE b.id = $1
-	`, bookingID).Scan(&c.Phone, &c.PitchName)
+	`, bookingID).Scan(&c.Phone, &c.PlayerName, &c.PitchName, &c.Location)
 
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

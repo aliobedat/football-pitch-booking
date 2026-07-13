@@ -119,16 +119,26 @@ func TestInfobip_BuildsOTPRequest(t *testing.T) {
 	}
 }
 
-// 2. Booking utility payload → correct request body (ordered placeholders, no button).
-func TestInfobip_BuildsBookingRequest(t *testing.T) {
+// T1 (adapter): booking confirmation → the approved Arabic template with 8 body
+// placeholders in the correct ORDER and VALUES, language "ar", no buttons.
+// 17:00–18:00 UTC on 2026-07-15 is 20:00–21:00 Asia/Amman (UTC+3, no DST).
+func TestInfobip_BuildsBookingConfirmationAR(t *testing.T) {
 	ch, cap := newInfobipTestServer(t, http.StatusOK, infobipOKResp)
 
-	start := time.Date(2026, 6, 24, 18, 0, 0, 0, time.UTC)
-	end := time.Date(2026, 6, 24, 19, 0, 0, 0, time.UTC)
+	start := time.Date(2026, 7, 15, 17, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 7, 15, 18, 0, 0, 0, time.UTC)
 	msg := OutboundMessage{
 		Recipient: "+962790000000",
 		Kind:      KindBookingConfirmed,
-		Payload:   BookingConfirmedPayload{BookingID: 7, PitchName: "Pitch A", StartTime: start, EndTime: end},
+		Payload: BookingConfirmedPayload{
+			BookingID:  7,
+			PlayerName: "Sami",
+			PitchName:  "Al Waha — Court 1",
+			Location:   "Amman",
+			StartTime:  start,
+			EndTime:    end,
+			Amount:     15.5,
+		},
 	}
 	if _, err := ch.Send(context.Background(), msg); err != nil {
 		t.Fatalf("send: %v", err)
@@ -136,21 +146,92 @@ func TestInfobip_BuildsBookingRequest(t *testing.T) {
 
 	req := cap.decode(t)
 	c := req.Messages[0].Content
-	if c.TemplateName != "malaeb_booking_confirmed" {
-		t.Errorf("templateName = %q", c.TemplateName)
+	if c.TemplateName != "booking_confirmation_ar" {
+		t.Errorf("templateName = %q, want booking_confirmation_ar", c.TemplateName)
+	}
+	if c.Language != "ar" {
+		t.Errorf("language = %q, want ar", c.Language)
 	}
 	if len(c.TemplateData.Buttons) != 0 {
 		t.Errorf("utility template must carry no buttons; got %+v", c.TemplateData.Buttons)
 	}
-	want := []string{"Pitch A", fmtBookingTime(start), fmtBookingTime(end)}
+	want := []string{
+		"Sami",              // {{1}} player
+		"Al Waha — Court 1", // {{2}} pitch (composite passed through verbatim)
+		"Amman",             // {{3}} location
+		"Wed 15 Jul 2026",   // {{4}} date (R6c)
+		"20:00",             // {{5}} start (R6c, Asia/Amman 24h)
+		"21:00",             // {{6}} end
+		"15.5",              // {{7}} amount, number only
+		"MRM-7",             // {{8}} reference
+	}
 	got := c.TemplateData.Body.Placeholders
-	if len(got) != len(want) {
-		t.Fatalf("placeholders = %v, want %v", got, want)
+	if len(got) != 8 {
+		t.Fatalf("placeholders = %v (len %d), want 8", got, len(got))
 	}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("placeholder[%d] = %q, want %q", i, got[i], want[i])
 		}
+	}
+}
+
+// T10 (adapter half): the confirmation template is the FIXED booking_confirmation_ar
+// — NOT the legacy INFOBIP_BOOKING_CONFIRMED_TEMPLATE. Even with the legacy name
+// configured, the adapter must ignore it for this kind. Pins that the old template
+// can never fire.
+func TestInfobip_ConfirmationIgnoresLegacyTemplate(t *testing.T) {
+	ch, cap := newInfobipTestServer(t, http.StatusOK, infobipOKResp) // cfg.Templates.BookingConfirmed = "malaeb_booking_confirmed"
+
+	msg := OutboundMessage{
+		Recipient: "+962790000000",
+		Kind:      KindBookingConfirmed,
+		Payload: BookingConfirmedPayload{
+			BookingID: 1, PlayerName: "A", PitchName: "P", Location: "L",
+			StartTime: time.Now(), EndTime: time.Now().Add(time.Hour), Amount: 10,
+		},
+	}
+	if _, err := ch.Send(context.Background(), msg); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	if got := cap.decode(t).Messages[0].Content.TemplateName; got == "malaeb_booking_confirmed" {
+		t.Fatalf("confirmation used the LEGACY template %q — the old confirmation must never fire", got)
+	}
+}
+
+// T3: amount is a BARE number (no currency symbol) with trailing zeros trimmed.
+func TestFmtAmountNumber(t *testing.T) {
+	cases := []struct {
+		in   float64
+		want string
+	}{
+		{15, "15"},
+		{15.5, "15.5"},
+		{12.75, "12.75"},
+		{12.750, "12.75"},
+		{100, "100"},
+		{0, "0"},
+	}
+	for _, c := range cases {
+		got := fmtAmountNumber(c.in)
+		if got != c.want {
+			t.Errorf("fmtAmountNumber(%v) = %q, want %q", c.in, got, c.want)
+		}
+		// The template renders the currency itself — the number must be bare.
+		if strings.ContainsAny(got, "دأ") || strings.Contains(got, "JOD") {
+			t.Errorf("fmtAmountNumber(%v) must not carry a currency symbol; got %q", c.in, got)
+		}
+	}
+}
+
+// T4: reference is MRM-<id> composed from the booking id — a small integer, never
+// a raw UUID.
+func TestBookingReference(t *testing.T) {
+	if got := bookingReference(42); got != "MRM-42" {
+		t.Errorf("bookingReference(42) = %q, want MRM-42", got)
+	}
+	if got := bookingReference(1); got != "MRM-1" {
+		t.Errorf("bookingReference(1) = %q, want MRM-1", got)
 	}
 }
 
