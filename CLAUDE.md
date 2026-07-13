@@ -64,6 +64,75 @@ Malaeb is a SaaS for booking sports fields. Two actors:
 - Respect the interfaces defined in PART 1. Do not change a shared contract without
   flagging it explicitly.
 
+## Production domain topology (marmajo.com — WO-OLD-DOMAIN-SWEEP, 2026-07-13)
+The canonical production domain is now marmajo.com (migrated from the former
+malaebjo.com). Verified topology:
+- B2C:               https://marmajo.com
+- WWW:               https://www.marmajo.com → 308 redirect → https://marmajo.com
+- Admin:             https://admin.marmajo.com
+- API:               https://api.marmajo.com
+- Frontend API base: https://api.marmajo.com/api/v1
+- Railway COOKIE_DOMAIN:        .marmajo.com
+- Railway CORS_ALLOWED_ORIGINS: https://marmajo.com,https://admin.marmajo.com
+
+The old malaebjo.com domains were NOT deleted. They remain temporarily attached
+as rollback / transition surfaces only, pending redirect validation and final
+retirement (see Open transition items). They are no longer canonical. Existing
+users must re-authenticate on marmajo.com because cookies scoped to
+`.malaebjo.com` cannot migrate to `.marmajo.com`.
+
+Email routing: Cloudflare Email Routing is enabled for marmajo.com;
+`privacy@marmajo.com` is active and routes to a verified private destination
+inbox (address intentionally not recorded here); a real inbound test email was
+received successfully (2026-07-13).
+
+Privacy page: `/privacy` (`frontend/app/privacy/page.tsx`) is now tracked in the
+repository, displays `privacy@marmajo.com`, and passed TypeScript + Next
+production-build verification. Introduced by PR #54.
+
+### Domain-sweep rulings (durable)
+- Runtime public domains MUST be derived from environment variables — never
+  hardcoded (COOKIE_DOMAIN, CORS_ALLOWED_ORIGINS, NEXT_PUBLIC_API_URL,
+  NEXT_PUBLIC_B2C_URL, NEXT_PUBLIC_ADMIN_URL).
+- `malaab_*` cookie names remain FROZEN despite the domain migration. The domain
+  changed; the cookie names did not.
+- Historical incident / follow-up records MUST NOT be rewritten merely to swap an
+  old domain for the new one (e.g. the dated `.malaebjo.com` reference in
+  `docs/followups/auth-refresh-replay-wipe.md` is retained verbatim).
+- Go module paths, repository names, Cloudinary identifiers, and
+  provider/template identifiers (WhatsApp/Infobip/Twilio/Meta) are NOT part of
+  domain cleanup — do not rename them under a domain-sweep mandate.
+- Email addresses MUST NOT be published in source before their routing has passed
+  a real inbound test.
+- A generic redirect MUST NOT be applied casually to an API domain
+  (api.malaebjo.com): POST, credential/cookie, and CSRF behavior must be reviewed
+  first.
+
+### Open transition items (NOT done — external, owner-owned)
+- Validate and configure path-preserving redirects for the old browser-facing
+  malaebjo.com domains.
+- Decide retirement timing for api.malaebjo.com (do not casually redirect it).
+- Update Meta Business / verified-domain information to marmajo.com.
+- Update Infobip sender website, callbacks, or webhooks if applicable.
+- Inspect Cloudinary console allowed-origin restrictions, if any.
+- Regenerate any external PDF or operational guide that still embeds an old
+  public URL (e.g. an owner-provisioning guide with malaebjo.com/venues/{slug}).
+
+## Merged work log
+2026-07-13 — PR #53 (WO-AUTH-GHOST-LOGIN), merged to main: fixed the
+phantom/ghost authenticated state — a wrong-password login no longer produces a
+logged-in UI; logout remains effective after a refresh; refresh and logout
+behavior fail closed.
+
+2026-07-13 — PR #54 (WO-OLD-DOMAIN-SWEEP), merged to main. Merge commit
+52593e360c345ff43f5de97b26a388a33ad94cb1. Added
+`frontend/app/privacy/page.tsx`; changed the privacy contact to
+`privacy@marmajo.com`; updated two backend cookie-domain example comments
+(`.malaebjo.com` → `.marmajo.com`). No cookie names or runtime auth behavior
+changed. Post-merge repository search leaves only the intentionally retained
+dated historical malaebjo.com reference in
+`docs/followups/auth-refresh-replay-wipe.md`.
+
 ## Discipline log
 2026-07-12 — Gate 1d-minimal: the WO listed any backend change as out of scope
 with an explicit stop-and-report trigger. CC found a genuine missing
