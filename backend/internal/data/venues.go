@@ -83,10 +83,10 @@ type Venue struct {
 	// ── WO-1C-PAYLOAD (additive, POPULATED ONLY BY PublicList — the B2C
 	//    listing): card-parity aggregates over the venue's ACTIVE, non-deleted
 	//    pitches. /venues/:slug and the owner list do not carry them. ─────────
-	ImageURL    string   `json:"image_url,omitempty"`   // cover, fallback: first pitch image
-	Format      *string  `json:"format,omitempty"`      // uniform across active pitches, else null
-	Surface     *string  `json:"surface,omitempty"`     // uniform across active pitches, else null
-	Formats     []string `json:"formats,omitempty"`     // DISTINCT set (client any-match filter)
+	ImageURL    string   `json:"image_url,omitempty"` // cover, fallback: first pitch image
+	Format      *string  `json:"format,omitempty"`    // uniform across active pitches, else null
+	Surface     *string  `json:"surface,omitempty"`   // uniform across active pitches, else null
+	Formats     []string `json:"formats,omitempty"`   // DISTINCT set (client any-match filter)
 	PriceVaries bool     `json:"price_varies,omitempty"`
 }
 
@@ -383,9 +383,13 @@ const venueListExtraCols = `,
 	  WHERE p.venue_id = v.id AND p.deleted_at IS NULL AND p.is_active = true)
 `
 
-// PublicList — one card per active venue (with at least the venue itself
-// visible), for the B2C listing page. Carries the WO-1C-PAYLOAD card-parity
-// aggregates on top of the canonical venue row.
+// PublicList — one card per active venue that is actually BOOKABLE, for the B2C
+// listing page. A venue is bookable only when it has at least one active,
+// non-deleted pitch (WO-PLAYER-PUBLIC-DEAD-ENDS): without that EXISTS guard a
+// venue with zero live pitches still surfaced a card that dead-ended on
+// /venues/:slug ("الملعب غير موجود"). Same pitch predicate the card aggregates
+// use (p.deleted_at IS NULL AND p.is_active = true). Carries the WO-1C-PAYLOAD
+// card-parity aggregates on top of the canonical venue row.
 func (m *VenueModel) PublicList(ctx context.Context) ([]Venue, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -393,6 +397,8 @@ func (m *VenueModel) PublicList(ctx context.Context) ([]Venue, error) {
 	rows, err := m.DB.Query(ctx,
 		`SELECT `+venueCols+venueListExtraCols+` FROM venues v
 		  WHERE v.deleted_at IS NULL AND v.is_active = true
+		    AND EXISTS (SELECT 1 FROM pitches p
+		                 WHERE p.venue_id = v.id AND p.deleted_at IS NULL AND p.is_active = true)
 		  ORDER BY v.id`)
 	if err != nil {
 		return nil, fmt.Errorf("PublicListVenues: %w", err)
