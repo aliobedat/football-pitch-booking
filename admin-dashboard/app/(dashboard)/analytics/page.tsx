@@ -14,7 +14,7 @@ import {
 } from 'recharts';
 import { BarChart3, Loader2 } from 'lucide-react';
 import api from '@/lib/api';
-import { formatCurrency, formatNumber, formatDate } from '@/lib/format';
+import { jod3, formatNumber, formatDate } from '@/lib/format';
 import FinancialsSection from '@/components/FinancialsSection';
 
 type Granularity = 'day' | 'week' | 'month';
@@ -124,7 +124,7 @@ export default function AnalyticsPage() {
             contentStyle={TOOLTIP_STYLE}
             labelFormatter={(l: string) => fmtBucket(l)}
             formatter={(v: number, name) => [
-              `${formatCurrency(v, { minimumFractionDigits: 2 })} د.أ`,
+              `${jod3(v)} د.أ`,
               name === 'collected' ? 'محصّل' : 'متوقّع',
             ]}
           />

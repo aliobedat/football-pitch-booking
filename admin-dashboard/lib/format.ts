@@ -49,6 +49,16 @@ export function formatCurrency(
   });
 }
 
+/**
+ * Format a JOD amount with strict 3-decimal (fils) precision, e.g. 175 → "175.000",
+ * 615.7 → "615.700", 0 → "0.000". This is the canonical precision Reports and
+ * BookingSheet already use; route every fils-precision JOD display through here so
+ * Overview and Analytics match. Presentation-only — the value is never rounded or
+ * mutated. The currency symbol (د.أ) is appended by the caller's markup.
+ */
+export const jod3 = (value: number): string =>
+  formatCurrency(value, { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+
 /** Format an ISO date string as an Arabic date with Latin digits. */
 export function formatDate(
   iso: string,

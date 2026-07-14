@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Wallet, Receipt, Plus, Pencil, Trash2, Loader2, X } from 'lucide-react';
 import api from '@/lib/api';
-import { formatCurrency, formatNumber, formatDate } from '@/lib/format';
+import { jod3, formatDate } from '@/lib/format';
 
 type Granularity = 'day' | 'week' | 'month';
 
@@ -34,7 +34,7 @@ const CAT_AR: Record<string, string> = {
 const ammanToday = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Amman' }).format(new Date());
 const isoToDay = (iso: string) => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Amman' }).format(new Date(iso));
 
-const JOD = (v: number) => <>{formatCurrency(v, { minimumFractionDigits: 2 })}<span className="text-[11px] text-emerald-500/70 ms-1">د.أ</span></>;
+const JOD = (v: number) => <>{jod3(v)}<span className="text-[11px] text-emerald-500/70 ms-1">د.أ</span></>;
 
 interface FormState {
   id: number | null; category: string; amount: string; occurred_on: string;
@@ -131,7 +131,7 @@ export default function FinancialsSection({ granularity }: { granularity: Granul
   };
 
   const remove = async (e: Expense) => {
-    if (!confirm(`حذف هذا المصروف (${CAT_AR[e.category]} — ${formatCurrency(e.amount, { minimumFractionDigits: 2 })} د.أ)؟`)) return;
+    if (!confirm(`حذف هذا المصروف (${CAT_AR[e.category]} — ${jod3(e.amount)} د.أ)؟`)) return;
     try { await api.delete(`/owner/expenses/${e.id}`); await refresh(); } catch { /* keep state on failure */ }
   };
 
@@ -165,7 +165,7 @@ export default function FinancialsSection({ granularity }: { granularity: Granul
             {summary.by_category.map(c => (
               <span key={c.category} className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/[0.03] border border-white/[0.07] text-[11px] text-white/60">
                 {CAT_AR[c.category] ?? c.category}
-                <span className="font-mono text-amber-300/80">{formatCurrency(c.total, { minimumFractionDigits: 2 })}</span>
+                <span className="font-mono text-amber-300/80">{jod3(c.total)}</span>
               </span>
             ))}
           </div>
@@ -236,7 +236,7 @@ export default function FinancialsSection({ granularity }: { granularity: Granul
                   {CAT_AR[e.category] ?? e.category}
                 </span>
                 <span className="text-[13px] font-bold text-amber-300/90 font-mono min-w-[90px]" dir="ltr">
-                  {formatCurrency(e.amount, { minimumFractionDigits: 2 })}
+                  {jod3(e.amount)}
                 </span>
                 <span className="text-[11px] text-white/45 min-w-[90px]">{formatDate(e.occurred_at)}</span>
                 <span className="text-[11px] text-white/40 flex-1 truncate">
@@ -266,7 +266,7 @@ function Leg({ label, value, tone }: { label: string; value: number; tone: strin
   return (
     <div className="flex flex-col">
       <span className="text-[10px] text-white/35">{label}</span>
-      <span className={`text-[18px] font-bold leading-none ${tone}`}>{formatNumber(value, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+      <span className={`text-[18px] font-bold leading-none ${tone}`}>{jod3(value)}</span>
     </div>
   );
 }

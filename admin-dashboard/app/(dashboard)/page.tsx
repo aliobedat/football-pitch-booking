@@ -9,7 +9,7 @@
 import { useEffect, useState } from 'react';
 import { CalendarCheck2, Wallet, TrendingUp, TrendingDown, CalendarClock, Banknote } from 'lucide-react';
 import api from '@/lib/api';
-import { formatCurrency, formatNumber } from '@/lib/format';
+import { jod3, formatNumber } from '@/lib/format';
 
 interface KPIs {
   today_revenue:          number;
@@ -44,7 +44,7 @@ function KpiTile({
           <span className="text-[28px] font-bold tracking-tight leading-none text-[#f0efe8]">
             {kind === 'currency' ? (
               <>
-                {formatCurrency(value, { minimumFractionDigits: 2 })}
+                {jod3(value)}
                 <span className="text-[12px] text-emerald-500/80 font-semibold ms-1.5">د.أ</span>
               </>
             ) : (
