@@ -921,17 +921,123 @@ func TestVenuesDB_PublicListAggregates(t *testing.T) {
 	if row["pitchCount"].(float64) != 2 {
 		t.Errorf("pitchCount = %v, want 2 (pre-existing semantic: non-deleted incl. inactive)", row["pitchCount"])
 	}
-	// soft-delete the remaining pitch → empty aggregates (formats empty, no min).
+	// soft-delete every remaining pitch → the venue has ZERO bookable pitches and
+	// (WO-PLAYER-PUBLIC-DEAD-ENDS) drops OUT of the public listing entirely, rather
+	// than surfacing a dead-end card with empty aggregates.
 	if _, err := e.pool.Exec(context.Background(),
 		`UPDATE pitches SET deleted_at = now() WHERE venue_id = $1 AND deleted_at IS NULL`, vMix); err != nil {
 		t.Fatalf("soft-delete: %v", err)
 	}
-	row = publicListRow(t, r, mixSlug)
-	if got := formatsOf(row); len(got) != 0 {
-		t.Errorf("after soft-delete formats = %v, want empty", got)
+	if set, _ := publicListSlugSet(t, r); set[mixSlug] {
+		t.Errorf("venue %q still in public list after all pitches soft-deleted, want EXCLUDED", mixSlug)
 	}
-	if row["pitchCount"].(float64) != 0 {
-		t.Errorf("after soft-delete pitchCount = %v, want 0", row["pitchCount"])
+}
+
+// ── WO-PLAYER-PUBLIC-DEAD-ENDS: public listing hides non-bookable venues ─────
+
+// publicListSlugSet returns the slug set + ordered id list of GET /venues.
+func publicListSlugSet(t *testing.T, r *gin.Engine) (map[string]bool, []float64) {
+	t.Helper()
+	rec := bsDo(r, http.MethodGet, "/venues", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /venues: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	set := map[string]bool{}
+	ids := make([]float64, 0, len(resp.Data))
+	for _, row := range resp.Data {
+		set[row["slug"].(string)] = true
+		ids = append(ids, row["id"].(float64))
+	}
+	return set, ids
+}
+
+// A venue surfaces in the public listing ONLY when it has at least one active,
+// non-deleted pitch. Zero-pitch / all-inactive / all-deleted venues are the
+// dead-end cards the audit found (opened /venues/:slug → "الملعب غير موجود").
+func TestVenuesDB_PublicListRequiresBookablePitch(t *testing.T) {
+	e := newVnEnv(t)
+	suffix := testutil.UniqueSuffix() % 1_000_000
+	r := e.router(e.ownerA, "owner")
+	ctx := context.Background()
+
+	// (1) one active pitch → listed
+	oneSlug := fmt.Sprintf("ddl-one-%d", suffix)
+	vOne := e.createVenue(t, r, oneSlug)
+	e.createPitch(t, r, "One Active", &vOne)
+
+	// (2) multiple active pitches → listed exactly once
+	manySlug := fmt.Sprintf("ddl-many-%d", suffix)
+	vMany := e.createVenue(t, r, manySlug)
+	e.createPitch(t, r, "Many A", &vMany)
+	e.createPitch(t, r, "Many B", &vMany)
+
+	// (3) zero pitches → excluded (venue is active + non-deleted, but empty)
+	zeroSlug := fmt.Sprintf("ddl-zero-%d", suffix)
+	e.createVenue(t, r, zeroSlug)
+
+	// (4) only inactive pitches → excluded
+	inactiveSlug := fmt.Sprintf("ddl-inactive-%d", suffix)
+	vInactive := e.createVenue(t, r, inactiveSlug)
+	pInactive := e.createPitch(t, r, "Only Inactive", &vInactive)
+	if _, err := e.pool.Exec(ctx, `UPDATE pitches SET is_active=false WHERE id=$1`,
+		int64(pInactive["id"].(float64))); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+
+	// (5) only soft-deleted pitches → excluded
+	deletedSlug := fmt.Sprintf("ddl-deleted-%d", suffix)
+	vDeleted := e.createVenue(t, r, deletedSlug)
+	pDeleted := e.createPitch(t, r, "Only Deleted", &vDeleted)
+	if _, err := e.pool.Exec(ctx, `UPDATE pitches SET deleted_at=now() WHERE id=$1`,
+		int64(pDeleted["id"].(float64))); err != nil {
+		t.Fatalf("soft-delete: %v", err)
+	}
+
+	set, ids := publicListSlugSet(t, r)
+
+	// bookable venues present
+	for _, want := range []string{oneSlug, manySlug} {
+		if !set[want] {
+			t.Errorf("venue %q missing from public list, want present (has an active pitch)", want)
+		}
+	}
+	// non-bookable venues excluded
+	for _, gone := range []string{zeroSlug, inactiveSlug, deletedSlug} {
+		if set[gone] {
+			t.Errorf("venue %q present in public list, want EXCLUDED (no bookable pitch)", gone)
+		}
+	}
+	// multi-pitch venue appears exactly once
+	occurrences := 0
+	rec := bsDo(r, http.MethodGet, "/venues", nil)
+	var resp struct {
+		Data []map[string]any `json:"data"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	for _, row := range resp.Data {
+		if row["slug"] == manySlug {
+			occurrences++
+			if row["pitchCount"].(float64) != 2 {
+				t.Errorf("multi-pitch venue pitchCount = %v, want 2", row["pitchCount"])
+			}
+		}
+	}
+	if occurrences != 1 {
+		t.Errorf("multi-pitch venue appears %d times, want exactly 1", occurrences)
+	}
+
+	// (6) ordering preserved: ids returned ascending (ORDER BY v.id unchanged)
+	for i := 1; i < len(ids); i++ {
+		if ids[i] < ids[i-1] {
+			t.Errorf("public list not ordered by id ascending at %d: %v", i, ids)
+			break
+		}
 	}
 }
 
