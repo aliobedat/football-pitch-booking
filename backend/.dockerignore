@@ -1,0 +1,39 @@
+# VCS
+.git
+.gitignore
+
+# Env / secrets — never in the build context
+.env
+.env.*
+*.env
+**/.env
+**/.env.*
+*.pem
+*.key
+
+# Docker files themselves
+Dockerfile
+.dockerignore
+
+# Local build outputs and binaries
+bin/
+*.exe
+
+# Test / coverage artifacts
+*.out
+*.test
+coverage*
+
+# Tmp / caches
+tmp/
+.cache/
+
+# Node (frontend is a separate service)
+node_modules/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+.claude/
