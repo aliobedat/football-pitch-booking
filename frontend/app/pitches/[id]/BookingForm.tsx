@@ -709,7 +709,7 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
     <div className="rounded-2xl bg-[#141715] border border-white/[0.07] overflow-hidden">
 
       {/* ── Header ── */}
-      <div className="px-6 pt-6 pb-5 border-b border-white/[0.05]">
+      <div className="px-5 pt-5 pb-4 border-b border-white/[0.05]">
         <p className="text-[10px] font-bold tracking-widest text-emerald-500 uppercase mb-1.5">
           احجز الملعب
         </p>
@@ -718,7 +718,7 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
         </h2>
       </div>
 
-      <div className="px-6 py-5 flex flex-col gap-6">
+      <div className="px-5 py-5 flex flex-col gap-5">
 
         {/* ── Pitch selector — multi-pitch venues only (Gate 1c) ── */}
         {pitchOptions && pitchOptions.length > 1 && onPitchChange && (
