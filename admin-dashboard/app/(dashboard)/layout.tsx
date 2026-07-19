@@ -34,10 +34,11 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
       router.replace('/login');
       return;
     }
-    // Staff are confined to جدول اليوم (/schedule) + الحجوزات (/bookings) in V1.
-    // Any other route — the overview, pitches, or a finance deep-link — bounces
+    // Staff are confined to جدول اليوم (/schedule) ONLY (WO-STAFF-BOOKINGS-
+    // LOCKOUT: الحجوزات removed from the staff role). Any other route — the
+    // bookings page, the overview, pitches, or a finance deep-link — bounces
     // here. Runs BEFORE the finance check so a staff user lands on /schedule.
-    if (user.role === 'staff' && pathname !== '/schedule' && pathname !== '/bookings') {
+    if (user.role === 'staff' && pathname !== '/schedule') {
       router.replace('/schedule');
       return;
     }

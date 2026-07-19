@@ -435,11 +435,11 @@ func Register(
 			bookingHandler.GetGroupUpcoming,
 		)
 
-		// Owner/admin: list all bookings across all users and pitches. Staff are
-		// also permitted but scoped in SQL to their bound pitch(es) (ResolveScope
-		// 403s unprovisioned staff before this handler).
+		// Owner/admin ONLY: list all bookings across all users and pitches.
+		// Staff are barred (403) — WO-STAFF-BOOKINGS-LOCKOUT: the Bookings page
+		// is removed from the staff role; their surface is /schedule.
 		protected.GET("/admin/bookings",
-			middleware.RequireRole("staff", "owner", "admin"),
+			middleware.RequireRole("owner", "admin"),
 			bookingHandler.GetAllBookings,
 		)
 
