@@ -76,6 +76,9 @@ func newXTEnv(t *testing.T) *xtEnv {
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
+	// Schema-baseline freshness gate (CLAUDE.md): a green run against a stale
+	// scratch schema is a FAILED gate — fail fast before seeding anything.
+	testutil.AssertSchemaBaseline(t, pool)
 
 	jwtManager := auth.NewJWTManager("integration-test-secret-key-min-32-chars-long", 15*time.Minute, 168*time.Hour)
 	e := &xtEnv{pool: pool, jwt: jwtManager}
@@ -163,6 +166,9 @@ func newXTEnv(t *testing.T) *xtEnv {
 	grp.Use(middleware.ResolveScope(staffRepo))
 	grp.PATCH("/bookings/:id/attendance", middleware.RequireRole("staff", "owner", "admin"), h.PatchAttendance)
 	grp.PATCH("/bookings/:id/payment", middleware.RequireRole("staff", "owner", "admin"), h.PatchPayment)
+	// Staff Day View surface — registered so the bookings-lockout suite can prove
+	// blocking staff on /admin/bookings does not regress their /schedule access.
+	grp.GET("/schedule", middleware.RequireRole("staff", "owner", "admin"), h.GetDailySchedule)
 	e.router = r
 
 	t.Cleanup(func() {
