@@ -17,7 +17,7 @@ import Navbar from '@/components/Navbar';
 import PitchDiagram from '@/components/PitchDiagram';
 import BookingForm, { type PitchOption } from '@/app/pitches/[id]/BookingForm';
 import ReviewSection from '@/components/reviews/ReviewSection';
-import { MapPin, Star, Users, ArrowRight } from 'lucide-react';
+import { MapPin, ArrowRight, ChevronDown } from 'lucide-react';
 
 const PitchMap = dynamic(() => import('@/components/PitchMap'), { ssr: false });
 
@@ -58,6 +58,44 @@ const SURFACE_LABEL: Record<string, string> = {
   natural_grass:    'عشبية طبيعية',
   futsal_court:     'ملعب فوتسال',
 };
+
+// ─── Accordion row (layout-only wrapper) ──────────────────────────────────────
+// Collapsed-by-default disclosure for the lower informational sections. Pure
+// presentation + one local boolean — content is the SAME JSX that previously
+// rendered inline and stays MOUNTED while collapsed (CSS-hidden only), so
+// children keep their pre-refactor lifecycle: ReviewSection and PitchMap still
+// mount and fetch at page load exactly as before.
+
+function AccordionRow({ title, preview, children }: {
+  title:    string;
+  preview:  string;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className="rounded-xl bg-[#141715] border border-white/[0.07] overflow-hidden">
+      <button
+        type="button"
+        onClick={() => setOpen(v => !v)}
+        aria-expanded={open}
+        className="w-full flex items-center gap-3 px-5 py-4 text-start cursor-pointer hover:bg-white/[0.02] transition-colors duration-150"
+      >
+        <div className="flex-1 min-w-0">
+          <h2 className="text-[13px] font-bold text-[#f0efe8]">{title}</h2>
+          {!open && (
+            <p className="text-[11px] text-white/30 mt-0.5 truncate">{preview}</p>
+          )}
+        </div>
+        <ChevronDown
+          size={16}
+          aria-hidden="true"
+          className={`shrink-0 text-white/30 transition-transform duration-200 ${open ? 'rotate-180' : ''}`}
+        />
+      </button>
+      <div className={open ? 'px-5 pb-5' : 'hidden'}>{children}</div>
+    </div>
+  );
+}
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 
@@ -169,99 +207,82 @@ function VenuePageContent() {
       </div>
 
       {/* ── Main Content ─────────────────────────────────────────────────── */}
-      <main className="max-w-7xl mx-auto px-6 pt-8 pb-20">
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 items-start">
+      <main className="max-w-7xl mx-auto px-6 pt-5 pb-20">
 
-          {/* ── Details column ── */}
-          <section className="lg:col-span-2 flex flex-col gap-5" aria-label="تفاصيل الملعب">
+        {/* ── Compact info chips — replace the old 4-card stats grid. Values
+            follow the SELECTED pitch (same dynamic sources as before); each
+            chip stays one-line internally, the row wraps on narrow screens. ── */}
+        <div className="flex flex-wrap gap-2 mb-6">
+          {/* Price — stronger green highlight */}
+          <span className="whitespace-nowrap px-3 py-1.5 rounded-full text-[12px] font-bold text-emerald-300 bg-emerald-500/15 border border-emerald-500/30">
+            {pitch.pricePerHour} د.أ/الساعة
+          </span>
+          {/* Format */}
+          <span className="whitespace-nowrap px-3 py-1.5 rounded-full text-[12px] font-medium text-white/60 bg-white/[0.04] border border-white/[0.08]">
+            {pitch.format}
+          </span>
+          {/* Surface */}
+          <span className="whitespace-nowrap px-3 py-1.5 rounded-full text-[12px] font-medium text-white/60 bg-white/[0.04] border border-white/[0.08]">
+            {SURFACE_LABEL[pitch.surface] ?? pitch.surface}
+          </span>
+          {/* Rating — null-safe, per-pitch (venue aggregate is a followup) */}
+          <span className="whitespace-nowrap px-3 py-1.5 rounded-full text-[12px] font-medium text-amber-400/90 bg-white/[0.04] border border-white/[0.08]">
+            {pitch.rating !== null
+              ? `★ ${pitch.rating.toFixed(1)} · ${pitch.reviewsCount} تقييم`
+              : '★ جديد'}
+          </span>
+        </div>
 
-            {/* Stats grid — per-pitch values follow the SELECTED pitch */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {/* Mobile: booking card first (directly after the chips), accordions
+            below. Desktop (lg+): unchanged two-column split — accordions in the
+            wide column, booking sticky in the side column — via order utilities. */}
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 lg:gap-8 items-start">
 
-              {/* Rating card — null-safe, per-pitch (venue aggregate is a followup) */}
-              <div className="flex flex-col gap-1.5 p-4 rounded-xl bg-[#141715] border border-white/[0.07]">
-                <Star
-                  size={13}
-                  className={pitch.rating !== null ? 'text-amber-400' : 'text-white/20'}
-                  fill={pitch.rating !== null ? 'currentColor' : 'none'}
-                  aria-hidden="true"
-                />
-                {pitch.rating !== null ? (
-                  <>
-                    <span className="text-[22px] font-bold text-[#f0efe8] leading-none">
-                      {pitch.rating.toFixed(1)}
-                    </span>
-                    <span className="text-[10px] text-white/30">{pitch.reviewsCount} تقييم</span>
-                  </>
-                ) : (
-                  <>
-                    <span className="text-[15px] font-bold text-white/30 leading-none">جديد</span>
-                    <span className="text-[10px] text-white/20">لا تقييمات بعد</span>
-                  </>
+          {/* ── Booking form — first on mobile, sticky side column on desktop ── */}
+          <aside className="order-1 lg:order-2 lg:col-span-1 lg:sticky lg:top-24 w-full min-w-0" aria-label="نموذج الحجز">
+            <BookingForm
+              pitchId={pitch.id}
+              pricePerHour={pitch.pricePerHour}
+              pitchOptions={pitchOptions}
+              onPitchChange={setSelId}
+            />
+          </aside>
+
+          {/* ── Lower informational sections — collapsed accordions ── */}
+          <section className="order-2 lg:order-1 lg:col-span-2 flex flex-col gap-3 w-full min-w-0" aria-label="تفاصيل الملعب">
+
+            {/* About — place-level description + per-pitch amenities (moved in,
+                content unchanged). Rendered only when there is anything to show. */}
+            {(venue.description || pitch.amenities.length > 0) && (
+              <AccordionRow
+                title="عن الملعب"
+                preview={venue.description || 'المرافق والخدمات'}
+              >
+                {venue.description && (
+                  <p className="text-[13px] text-white/50 leading-relaxed">{venue.description}</p>
                 )}
-              </div>
-
-              {/* Price — always the selected pitch's price, never a range */}
-              <div className="flex flex-col gap-1.5 p-4 rounded-xl bg-[#141715] border border-white/[0.07]">
-                <span className="text-[10px] font-semibold text-emerald-500 uppercase tracking-wide">
-                  السعر
-                </span>
-                <div className="flex items-baseline gap-1">
-                  <span className="text-[22px] font-bold text-[#f0efe8] leading-none">
-                    {pitch.pricePerHour}
-                  </span>
-                  <span className="text-[11px] font-semibold text-emerald-500">د.أ</span>
-                </div>
-                <span className="text-[10px] text-white/30">للساعة الواحدة</span>
-              </div>
-
-              {/* Format */}
-              <div className="flex flex-col gap-1.5 p-4 rounded-xl bg-[#141715] border border-white/[0.07]">
-                <Users size={13} className="text-emerald-500" aria-hidden="true" />
-                <span className="text-[19px] font-bold text-[#f0efe8] leading-none">
-                  {pitch.format}
-                </span>
-                <span className="text-[10px] text-white/30">نوع اللعب</span>
-              </div>
-
-              {/* Surface */}
-              <div className="flex flex-col gap-1.5 p-4 rounded-xl bg-[#141715] border border-white/[0.07]">
-                <span className="text-[10px] font-semibold text-emerald-500 uppercase tracking-wide">
-                  الأرضية
-                </span>
-                <span className="text-[13px] font-bold text-[#f0efe8] leading-snug">
-                  {SURFACE_LABEL[pitch.surface] ?? pitch.surface}
-                </span>
-                <span className="text-[10px] text-white/30">نوع السطح</span>
-              </div>
-            </div>
-
-            {/* Amenities — per selected pitch */}
-            {pitch.amenities.length > 0 && (
-              <div className="p-5 rounded-xl bg-[#141715] border border-white/[0.07]">
-                <h2 className="text-[13px] font-bold text-[#f0efe8] mb-3.5">المرافق والخدمات</h2>
-                <div className="flex flex-wrap gap-2">
-                  {pitch.amenities.map(a => (
-                    <span key={a}
-                      className="px-3 py-1.5 rounded-full text-[11px] font-medium text-emerald-400 bg-emerald-500/[0.07] border border-emerald-500/20">
-                      {a}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            )}
-
-            {/* Description — place-level */}
-            {venue.description && (
-              <div className="p-5 rounded-xl bg-[#141715] border border-white/[0.07]">
-                <h2 className="text-[13px] font-bold text-[#f0efe8] mb-3">عن الملعب</h2>
-                <p className="text-[13px] text-white/50 leading-relaxed">{venue.description}</p>
-              </div>
+                {/* Amenities — per selected pitch */}
+                {pitch.amenities.length > 0 && (
+                  <div className={venue.description ? 'mt-4' : ''}>
+                    <h3 className="text-[12px] font-bold text-[#f0efe8] mb-2.5">المرافق والخدمات</h3>
+                    <div className="flex flex-wrap gap-2">
+                      {pitch.amenities.map(a => (
+                        <span key={a}
+                          className="px-3 py-1.5 rounded-full text-[11px] font-medium text-emerald-400 bg-emerald-500/[0.07] border border-emerald-500/20">
+                          {a}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </AccordionRow>
             )}
 
             {/* Location + interactive map — place-level */}
-            <div className="p-5 rounded-xl bg-[#141715] border border-white/[0.07]">
-              <h2 className="text-[13px] font-bold text-[#f0efe8] mb-3.5">الموقع</h2>
+            <AccordionRow
+              title="الموقع"
+              preview={`${venue.neighborhood}، عمّان`}
+            >
               <div className="flex items-center gap-2 text-white/40 mb-4">
                 <MapPin size={13} className="text-emerald-500 shrink-0" aria-hidden="true" />
                 <span className="text-[12px]">{venue.neighborhood}، عمّان، الأردن</span>
@@ -282,23 +303,18 @@ function VenuePageContent() {
                   <PitchMap lat={venue.lat} lng={venue.lng} zoom={15} />
                 </div>
               )}
-            </div>
+            </AccordionRow>
 
             {/* Verified reviews — per selected pitch (aggregate view: logged followup) */}
-            <div className="p-5 rounded-xl bg-[#141715] border border-white/[0.07]">
+            <AccordionRow
+              title="التقييمات"
+              preview={pitch.rating !== null
+                ? `★ ${pitch.rating.toFixed(1)} · ${pitch.reviewsCount} تقييم`
+                : 'لا تقييمات بعد'}
+            >
               <ReviewSection pitchId={pitch.id} />
-            </div>
+            </AccordionRow>
           </section>
-
-          {/* ── Booking form column — sticky on desktop ── */}
-          <aside className="lg:col-span-1 lg:sticky lg:top-24" aria-label="نموذج الحجز">
-            <BookingForm
-              pitchId={pitch.id}
-              pricePerHour={pitch.pricePerHour}
-              pitchOptions={pitchOptions}
-              onPitchChange={setSelId}
-            />
-          </aside>
 
         </div>
       </main>
