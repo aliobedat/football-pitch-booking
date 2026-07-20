@@ -66,6 +66,27 @@ func TestValidateSchedule(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "sole 00:00->00:00 window is accepted (explicit 24-hour representation)",
+			windows: []OperatingWindow{win(wed, "00:00", "00:00")},
+			wantErr: false,
+		},
+		{
+			name: "00:00->00:00 combined with another window on the same weekday is rejected",
+			windows: []OperatingWindow{
+				win(wed, "00:00", "00:00"),
+				win(wed, "10:00", "12:00"),
+			},
+			wantErr: true,
+		},
+		{
+			name: "00:00->00:00 on one weekday does not affect a different weekday's own 24h window",
+			windows: []OperatingWindow{
+				win(sun, "00:00", "00:00"),
+				win(mon, "00:00", "00:00"),
+			},
+			wantErr: false,
+		},
+		{
 			name:    "lone cross-midnight window is valid",
 			windows: []OperatingWindow{win(thu, "16:00", "02:00")},
 			wantErr: false,
@@ -158,6 +179,7 @@ func TestCrossesMidnight(t *testing.T) {
 		{"cross-midnight window", win(thu, "16:00", "02:00"), true},
 		{"close just before midnight", win(mon, "16:00", "23:59"), false},
 		{"close at 00:00 spills (00:00 <= open)", win(mon, "16:00", "00:00"), true},
+		{"sole 24-hour window (00:00->00:00) is NOT a cross-midnight spill", win(mon, "00:00", "00:00"), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

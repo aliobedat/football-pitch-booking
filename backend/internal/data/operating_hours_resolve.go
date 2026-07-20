@@ -40,9 +40,11 @@ type ConcreteInterval struct {
 // anchorWindow resolves window w against the Amman calendar day whose local
 // midnight is dayStart, returning the concrete UTC interval. open is placed on the
 // anchor day; close is placed on the SAME day for a normal window, or the NEXT day
-// when the window crosses midnight (close <= open). time.Date normalises the +1
-// across month/year ends, and the .UTC() conversion yields the correct absolute
-// instant regardless of the Amman UTC offset in effect on that date.
+// when the window crosses midnight (close <= open), OR exactly 24h later for the
+// explicit full-day window (00:00->00:00) — never on the SAME instant as open,
+// which would produce a zero-length interval. time.Date normalises the +1 across
+// month/year ends, and the .UTC() conversion yields the correct absolute instant
+// regardless of the Amman UTC offset in effect on that date.
 func anchorWindow(w OperatingWindow, dayStart time.Time) (ConcreteInterval, error) {
 	o, err := parseHHMM(w.OpenTime)
 	if err != nil {
@@ -56,8 +58,11 @@ func anchorWindow(w OperatingWindow, dayStart time.Time) (ConcreteInterval, erro
 	y, m, d := dayStart.Date()
 
 	open := time.Date(y, m, d, o/60, o%60, 0, 0, loc)
+	if o == c { // full-day window: exactly the next local midnight, 24h later
+		return ConcreteInterval{Start: open.UTC(), End: open.AddDate(0, 0, 1).UTC()}, nil
+	}
 	endDay := d
-	if c <= o { // crosses midnight → close lands on the following calendar day
+	if c < o { // crosses midnight → close lands on the following calendar day
 		endDay = d + 1
 	}
 	close := time.Date(y, m, endDay, c/60, c%60, 0, 0, loc)

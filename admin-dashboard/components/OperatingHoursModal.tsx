@@ -61,8 +61,25 @@ function intervalsOverlap(a: { start: number; end: number }, b: { start: number;
 }
 
 function crossesMidnight(w: Window): boolean {
-  return hhmmToMin(w.close) <= hhmmToMin(w.open);
+  const o = hhmmToMin(w.open);
+  const c = hhmmToMin(w.close);
+  if (o === c) return false; // full-day (00:00->00:00) is not a spill
+  return c <= o;
 }
+
+// isFullDayWindow reports whether w is the explicit 24-hour representation:
+// open === close === "00:00". Mirrors the server's OperatingWindow.IsFullDay.
+function isFullDayWindow(w: Window): boolean {
+  return hhmmToMin(w.open) === 0 && hhmmToMin(w.close) === 0;
+}
+
+// A day is in "24 hours" mode iff it has exactly one window and that window is
+// the full-day representation.
+function isFullDay24(day: Window[]): boolean {
+  return day.length === 1 && isFullDayWindow(day[0]);
+}
+
+const FULL_DAY_WINDOW: Window = { open: '00:00', close: '00:00' };
 
 // validateGrid mirrors the server's ValidateSchedule. Returns an Arabic error
 // string for the first problem found, or null when the whole week is valid.
@@ -71,7 +88,10 @@ function validateGrid(grid: Grid): string | null {
   for (let d = 0; d < 7; d++) {
     for (const w of grid[d]) {
       if (hhmmToMin(w.open) === hhmmToMin(w.close)) {
-        return `يوم ${AR_DAYS[d]}: وقت البداية والنهاية متطابقان`;
+        if (!(isFullDayWindow(w) && grid[d].length === 1)) {
+          return `يوم ${AR_DAYS[d]}: وقت البداية والنهاية متطابقان`;
+        }
+        continue; // sole 00:00->00:00 window: valid 24h day, skip overlap projection
       }
       flat.push({ weekday: d, w });
     }
@@ -153,6 +173,20 @@ export default function OperatingHoursModal({
   const toggleClosed = (d: number) => {
     setGrid(prev => prev.map((day, i) =>
       i === d ? (day.length > 0 ? [] : [{ ...DEFAULT_WINDOW }]) : day));
+    setSaveError(null);
+  };
+  // "24-hour" toggle: enabling replaces the day with the sole 00:00->00:00
+  // window; disabling seeds a normal editable default window (never leaves the
+  // day empty/closed, and never leaves the 00:00->00:00 sentinel behind).
+  const toggleFullDay24 = (d: number) => {
+    setGrid(prev => prev.map((day, i) =>
+      i === d ? (isFullDay24(day) ? [{ ...DEFAULT_WINDOW }] : [{ ...FULL_DAY_WINDOW }]) : day));
+    setSaveError(null);
+  };
+  // Bulk action: set every weekday to the explicit 24-hour representation (one
+  // 00:00->00:00 window each), not an empty schedule.
+  const applyFullDay24ToAll = () => {
+    setGrid(() => Array.from({ length: 7 }, () => [{ ...FULL_DAY_WINDOW }]));
     setSaveError(null);
   };
   // Copy this day's windows to every other day.
@@ -239,9 +273,21 @@ export default function OperatingHoursModal({
                 </div>
               )}
 
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={applyFullDay24ToAll}
+                  className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-sky-300 hover:text-sky-200 bg-sky-500/[0.08] hover:bg-sky-500/[0.14] border border-sky-500/25 rounded-lg px-3 py-1.5 transition-colors duration-150"
+                >
+                  <Clock size={12} aria-hidden />
+                  تطبيق 24 ساعة على كل الأيام
+                </button>
+              </div>
+
               {AR_DAYS.map((dayName, d) => {
                 const windows = grid[d];
                 const isOpen = windows.length > 0;
+                const is24h = isFullDay24(windows);
                 return (
                   <div key={d} className="rounded-xl border border-white/[0.07] bg-[#0f1110] overflow-hidden">
                     <div className="flex items-center justify-between px-4 py-3">
@@ -269,9 +315,36 @@ export default function OperatingHoursModal({
                         <span className={`text-[11px] font-semibold ${isOpen ? 'text-emerald-400' : 'text-white/35'}`}>
                           {isOpen ? 'مفتوح' : 'مغلق'}
                         </span>
+
+                        {isOpen && (
+                          <>
+                            {/* 24-hour toggle: visually distinct (sky) from the emerald "مفتوح"/"مغلق" switch. */}
+                            <button
+                              type="button"
+                              role="switch"
+                              aria-checked={is24h}
+                              onClick={() => toggleFullDay24(d)}
+                              dir="ltr"
+                              className={[
+                                'relative inline-flex h-5 w-9 flex-shrink-0 items-center rounded-full px-0.5 transition-colors duration-200 ms-2',
+                                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40',
+                                is24h ? 'bg-sky-500/80' : 'bg-white/[0.15]',
+                              ].join(' ')}
+                              aria-label={is24h ? `إلغاء 24 ساعة ليوم ${dayName}` : `تفعيل 24 ساعة ليوم ${dayName}`}
+                            >
+                              <span className={[
+                                'h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-200',
+                                is24h ? 'translate-x-[16px]' : 'translate-x-0',
+                              ].join(' ')} />
+                            </button>
+                            <span className={`text-[11px] font-semibold ${is24h ? 'text-sky-300' : 'text-white/35'}`}>
+                              مفتوح 24 ساعة
+                            </span>
+                          </>
+                        )}
                       </div>
 
-                      {isOpen && (
+                      {isOpen && !is24h && (
                         <div className="flex items-center gap-2">
                           <button
                             type="button"
@@ -294,7 +367,7 @@ export default function OperatingHoursModal({
                       )}
                     </div>
 
-                    {isOpen && (
+                    {isOpen && !is24h && (
                       <div className="px-4 pb-3 flex flex-col gap-2">
                         {windows.map((w, idx) => (
                           <div key={idx} className="flex items-center gap-2">

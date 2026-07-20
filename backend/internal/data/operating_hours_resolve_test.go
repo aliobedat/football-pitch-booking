@@ -164,6 +164,91 @@ func TestResolveCandidateAnchoring(t *testing.T) {
 	}
 }
 
+// TestFullDayWindow proves the sole 00:00->00:00 window resolves to exactly the
+// complete civil day (local midnight to next local midnight, 24h, no gap), and
+// that bookings entirely inside or ending exactly at next midnight are contained.
+func TestFullDayWindow(t *testing.T) {
+	windows := []OperatingWindow{win(wed, "00:00", "00:00")}
+	// 2026-06-10 is a Wednesday.
+	wednesday := am(2026, 6, 10, 0, 0)
+	if got := int(wednesday.Weekday()); got != wed {
+		t.Fatalf("anchor date 2026-06-10 is weekday %d, expected Wednesday(%d)", got, wed)
+	}
+
+	resolved, err := ResolveWindowsForDate(windows, wednesday)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(resolved) != 1 {
+		t.Fatalf("expected 1 resolved interval, got %d", len(resolved))
+	}
+
+	wantStart := time.Date(2026, 6, 9, 21, 0, 0, 0, time.UTC) // Wed 00:00 Amman (UTC+3) = Tue 21:00 UTC
+	wantEnd := time.Date(2026, 6, 10, 21, 0, 0, 0, time.UTC)  // Thu 00:00 Amman = Wed 21:00 UTC
+	if !resolved[0].Start.Equal(wantStart) {
+		t.Errorf("start = %s, want %s", resolved[0].Start, wantStart)
+	}
+	if !resolved[0].End.Equal(wantEnd) {
+		t.Errorf("end = %s, want %s", resolved[0].End, wantEnd)
+	}
+	if d := resolved[0].End.Sub(resolved[0].Start); d != 24*time.Hour {
+		t.Fatalf("full-day interval duration = %s, want 24h", d)
+	}
+
+	// A booking entirely inside the day is contained.
+	if !containedOnDate(t, windows, am(2026, 6, 10, 10, 0), am(2026, 6, 10, 11, 0)) {
+		t.Fatal("slot entirely inside the full-day window must be contained")
+	}
+	// A booking ending exactly at next midnight is contained (half-open [start,end)).
+	if !containedOnDate(t, windows, am(2026, 6, 10, 23, 0), am(2026, 6, 11, 0, 0)) {
+		t.Fatal("slot ending exactly at next midnight must be contained")
+	}
+	// A booking starting exactly at midnight is contained.
+	if !containedOnDate(t, windows, am(2026, 6, 10, 0, 0), am(2026, 6, 10, 1, 0)) {
+		t.Fatal("slot starting exactly at midnight must be contained")
+	}
+	// A booking spilling past the next midnight is NOT contained by this day's window alone.
+	if containedOnDate(t, windows, am(2026, 6, 10, 23, 30), am(2026, 6, 11, 0, 30)) {
+		t.Fatal("slot spilling past next midnight must not be contained by a single full-day window")
+	}
+}
+
+// TestMixedWeekWithFullDay covers a week where Sunday is 24h, Monday has normal
+// hours, and Tuesday is closed — proving all three states coexist correctly.
+func TestMixedWeekWithFullDay(t *testing.T) {
+	windows := []OperatingWindow{
+		win(sun, "00:00", "00:00"),
+		win(mon, "09:00", "17:00"),
+		// Tuesday: no window at all -> closed.
+	}
+	if err := ValidateSchedule(windows); err != nil {
+		t.Fatalf("expected valid mixed schedule, got: %v", err)
+	}
+
+	sunday := am(2026, 6, 14, 0, 0)
+
+	// Sunday: open all day (24h window).
+	if !containedOnDate(t, windows, am(2026, 6, 14, 3, 0), am(2026, 6, 14, 4, 0)) {
+		t.Fatal("Sunday 24h window should contain an early-morning slot")
+	}
+	if !containedOnDate(t, windows, am(2026, 6, 14, 23, 0), sunday.AddDate(0, 0, 1)) {
+		t.Fatal("Sunday 24h window should contain a slot ending exactly at next midnight")
+	}
+
+	// Monday: normal hours, closed outside 09:00-17:00.
+	if !containedOnDate(t, windows, am(2026, 6, 15, 10, 0), am(2026, 6, 15, 11, 0)) {
+		t.Fatal("Monday 09:00-17:00 window should contain a mid-morning slot")
+	}
+	if containedOnDate(t, windows, am(2026, 6, 15, 18, 0), am(2026, 6, 15, 19, 0)) {
+		t.Fatal("Monday should be closed outside its configured window")
+	}
+
+	// Tuesday: fully closed (no window at all, even though other days are configured).
+	if containedOnDate(t, windows, am(2026, 6, 16, 10, 0), am(2026, 6, 16, 11, 0)) {
+		t.Fatal("Tuesday has zero windows and must be fully closed, not open 24h")
+	}
+}
+
 // TestResolveEmpty documents the resolver/gate contract: an empty window slice
 // resolves to no intervals, so SlotContained is false. The fail-open (open 24/7)
 // case is NOT here — it lives in ResolveOpenWindows via hasSchedule, because the

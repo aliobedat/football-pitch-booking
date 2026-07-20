@@ -47,8 +47,10 @@ type OperatingWindow struct {
 }
 
 // CrossesMidnight reports whether this window spills past midnight into the next
-// weekday. close <= open means it does (close == open is rejected by validation,
-// so in a validated window close < open ⟺ cross-midnight).
+// weekday. close <= open means it does (close == open is rejected by validation
+// except for the sole-window 24-hour case, which is NOT a cross-midnight spill —
+// it is a single self-contained full civil day. Callers that need to distinguish
+// the two should check IsFullDay first).
 func (w OperatingWindow) CrossesMidnight() (bool, error) {
 	o, err := parseHHMM(w.OpenTime)
 	if err != nil {
@@ -58,7 +60,25 @@ func (w OperatingWindow) CrossesMidnight() (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	if o == c {
+		return false, nil // full-day window (00:00->00:00), not a spill
+	}
 	return c <= o, nil
+}
+
+// IsFullDay reports whether this window is the explicit 24-hour representation:
+// open_time == close_time == "00:00". This is the ONLY equal-time pair
+// ValidateSchedule accepts, and only when it is the sole window for its weekday.
+func (w OperatingWindow) IsFullDay() (bool, error) {
+	o, err := parseHHMM(w.OpenTime)
+	if err != nil {
+		return false, err
+	}
+	c, err := parseHHMM(w.CloseTime)
+	if err != nil {
+		return false, err
+	}
+	return o == 0 && c == 0, nil
 }
 
 // parseHHMM parses an "HH:MM" 24-hour string into minutes-since-midnight [0,1440).
@@ -93,8 +113,11 @@ func (w OperatingWindow) toWeekInterval() (weekInterval, error) {
 		return weekInterval{}, err
 	}
 	start := w.Weekday*24*60 + o
+	if o == c { // full-day (00:00->00:00): exactly 1440 minutes, no more/less
+		return weekInterval{start: start, end: start + 24*60}, nil
+	}
 	end := w.Weekday*24*60 + c
-	if c <= o { // cross-midnight: close is on the following day
+	if c < o { // cross-midnight: close is on the following day
 		end += 24 * 60
 	}
 	return weekInterval{start: start, end: end}, nil
@@ -119,14 +142,26 @@ func (a weekInterval) overlaps(b weekInterval) bool {
 // ValidateSchedule fail-closes on a malformed weekly schedule. It rejects:
 //   - a weekday outside 0..6,
 //   - a time not parseable as HH:MM,
-//   - open_time == close_time (a zero-length / ambiguous full-day window),
+//   - open_time == close_time, UNLESS it is "00:00"/"00:00" (the explicit
+//     24-hour-open representation) AND it is the ONLY window for that weekday.
+//     A non-midnight equal-time pair, or a 00:00->00:00 window combined with any
+//     other window on the same weekday, is still rejected.
 //   - any two windows that overlap — INCLUDING cross-midnight spillover into the
 //     next day and the Saturday→Sunday week wrap (e.g. Thu 16:00→02:00 overlaps
 //     Fri 01:00→05:00). Adjacent windows (…→18:00 then 18:00→…) are legal.
 //
 // An empty schedule is valid: zero windows means the pitch is OPEN 24/7
-// (fail-open on unconfigured data — see the PR's Phase 0 decision).
+// (fail-open on unconfigured data — see the PR's Phase 0 decision). A weekday
+// with zero windows (while OTHER weekdays have configured windows) means that
+// day is CLOSED — this is a distinct state from the 24-hour representation.
 func ValidateSchedule(windows []OperatingWindow) error {
+	perWeekday := make(map[int]int, 7)
+	for _, w := range windows {
+		if w.Weekday >= 0 && w.Weekday <= 6 {
+			perWeekday[w.Weekday]++
+		}
+	}
+
 	intervals := make([]weekInterval, 0, len(windows))
 	for i, w := range windows {
 		if w.Weekday < 0 || w.Weekday > 6 {
@@ -141,8 +176,14 @@ func ValidateSchedule(windows []OperatingWindow) error {
 			return err
 		}
 		if o == c {
-			return fmt.Errorf("%w: window %d on weekday %d has equal open and close time (%s)",
-				ErrInvalidOperatingHours, i, w.Weekday, w.OpenTime)
+			if o != 0 {
+				return fmt.Errorf("%w: window %d on weekday %d has equal open and close time (%s)",
+					ErrInvalidOperatingHours, i, w.Weekday, w.OpenTime)
+			}
+			if perWeekday[w.Weekday] != 1 {
+				return fmt.Errorf("%w: window %d on weekday %d is a 24-hour window (00:00->00:00) but is not the sole window for that day",
+					ErrInvalidOperatingHours, i, w.Weekday)
+			}
 		}
 		iv, err := w.toWeekInterval()
 		if err != nil {
