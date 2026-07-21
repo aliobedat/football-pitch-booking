@@ -52,7 +52,7 @@ func (s *SmsChannel) Send(_ context.Context, msg OutboundMessage) (DeliveryResul
 	s.mu.Unlock()
 
 	if !s.silent {
-		log.Printf("[NOTIFY:SMS] (simulated) kind=%s recipient=%s provider_id=%s", msg.Kind, msg.Recipient, id)
+		log.Printf("[NOTIFY:SMS] (simulated) kind=%s recipient=%s provider_id=%s", msg.Kind, maskPhone(msg.Recipient), id)
 	}
 
 	return DeliveryResult{Status: DeliverySent, ProviderMessageID: id}, nil

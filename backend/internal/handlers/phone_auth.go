@@ -466,6 +466,13 @@ func (h *PhoneAuthHandler) writeRequestOTPError(c *gin.Context, err error) {
 		c.JSON(http.StatusTooManyRequests, gin.H{
 			"error": "resend_too_soon", "message": "a code was just sent, please wait before requesting another",
 		})
+	case errors.Is(err, otp.ErrRateLimiterBusy):
+		// Advisory-lock timeout: neutral, retryable 429 revealing nothing about
+		// the underlying lock/database contention.
+		c.Header("Retry-After", "1")
+		c.JSON(http.StatusTooManyRequests, gin.H{
+			"error": "rate_limited", "message": "too many requests, please try again later",
+		})
 	case errors.Is(err, otp.ErrInvalidPhone):
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
 			"error": "invalid_phone", "message": "a valid phone number is required",

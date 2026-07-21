@@ -35,6 +35,11 @@ var (
 	ErrTooManyAttempts = errors.New("otp: too many incorrect attempts")
 	// ErrCodeMismatch means the supplied code did not match the stored digest.
 	ErrCodeMismatch = errors.New("otp: incorrect code")
+	// ErrRateLimiterBusy means the rate limiter's per-bucket advisory lock could
+	// not be acquired before its lock_timeout — another request for the same
+	// bucket is mid-check. This is a distinct, fail-closed outcome: no event is
+	// recorded and the caller must not proceed to generate or dispatch a code.
+	ErrRateLimiterBusy = errors.New("otp: rate limiter busy, try again shortly")
 )
 
 // RateLimitError is returned by Request when a quota or the resend cooldown is

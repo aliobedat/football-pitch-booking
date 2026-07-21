@@ -51,12 +51,13 @@ func (f *FakeChannel) Send(_ context.Context, msg OutboundMessage) (DeliveryResu
 	f.mu.Unlock()
 
 	if !f.silent {
-		log.Printf("[NOTIFY:FAKE] kind=%s recipient=%s provider_id=%s", msg.Kind, msg.Recipient, id)
+		log.Printf("[NOTIFY:FAKE] kind=%s recipient=%s provider_id=%s", msg.Kind, maskPhone(msg.Recipient), id)
 		// Dev affordance: this adapter only runs locally (NOTIFICATION_CHANNEL
-		// unset/FAKE), so echo the OTP code to the console — there is no real
-		// channel to deliver it, and a developer needs it to complete login.
-		if otp, ok := msg.Payload.(OTPPayload); ok {
-			log.Printf("[NOTIFY:FAKE] >>> OTP for %s is %s (valid %ds) <<<", msg.Recipient, otp.Code, otp.ExpiresInSeconds)
+		// unset/FAKE). The OTP code itself is never logged, in any environment —
+		// a developer completing local login must read it from the fake
+		// channel's in-memory Sent()/Last() store, not the console.
+		if _, ok := msg.Payload.(OTPPayload); ok {
+			log.Printf("[NOTIFY:FAKE] OTP delivery invoked for %s; code redacted", maskPhone(msg.Recipient))
 		}
 	}
 

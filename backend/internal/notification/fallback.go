@@ -61,7 +61,7 @@ func (f *FallbackChannel) Send(ctx context.Context, msg OutboundMessage) (Delive
 		f.onFall(msg, primaryErr)
 	} else {
 		log.Printf("[NOTIFY:FALLBACK] primary delivery failed (kind=%s recipient=%s): %v — falling back",
-			msg.Kind, msg.Recipient, primaryErr)
+			msg.Kind, maskPhone(msg.Recipient), primaryErr)
 	}
 
 	return f.fallback.Send(ctx, msg)

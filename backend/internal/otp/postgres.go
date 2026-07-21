@@ -18,8 +18,18 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// advisoryLockTimeout bounds how long Allow waits to acquire the per-bucket
+// advisory lock before giving up. It must be short: this lock only ever
+// serializes concurrent callers of the SAME bucket key (or, rarely, two
+// different keys that collide under hashtextextended), so a legitimate holder
+// releases it in the time of one DELETE+COUNT+INSERT — a few milliseconds. A
+// value embedded directly in SQL text because SET LOCAL does not accept a bind
+// parameter for its value; it is a fixed Go constant, never user input.
+const advisoryLockTimeout = "250ms"
 
 // PostgresStore satisfies Store and RateLimiter against a pgx connection pool.
 type PostgresStore struct {
@@ -120,8 +130,23 @@ func (p *PostgresStore) MarkPhoneVerified(ctx context.Context, phone string) err
 // Allow implements a sliding-window rate limiter in a single transaction: it
 // prunes events older than the window, counts what remains for the bucket, and
 // — only while under max — records the new event. Pruning and counting share
-// the (bucket_key, created_at) index. The whole check runs in one tx so a burst
-// of concurrent requests cannot each read a stale count and over-admit.
+// the (bucket_key, created_at) index.
+//
+// READ COMMITTED alone does not make DELETE+COUNT+INSERT atomic across
+// concurrent callers of the same bucket: two transactions can each read a
+// count under max and both insert, over-admitting past the limit (proven by a
+// dedicated concurrency experiment — see the WO-SECURITY-V1 Gate 0B report).
+// To close that race, the whole check-and-record sequence is additionally
+// serialized per bucket_key with a transaction-scoped Postgres advisory lock
+// (pg_advisory_xact_lock), keyed on a 64-bit hash of bucket_key so unrelated
+// buckets essentially never contend and, in the rare case two different keys
+// collide under the hash, they are merely serialized against each other —
+// never incorrectly admitted. The lock is scoped to this transaction and is
+// released automatically on commit or rollback; no unlock call is needed. A
+// short lock_timeout bounds how long a caller waits for a contended bucket —
+// if it expires (SQLSTATE 55P03) this fails closed: no event is recorded and
+// ErrRateLimiterBusy is returned so the caller never proceeds to generate or
+// dispatch a code.
 func (p *PostgresStore) Allow(ctx context.Context, key string, max int, window time.Duration, now time.Time) (bool, error) {
 	cutoff := now.Add(-window)
 
@@ -130,6 +155,21 @@ func (p *PostgresStore) Allow(ctx context.Context, key string, max int, window t
 		return false, fmt.Errorf("otp/postgres: rate-limit begin: %w", err)
 	}
 	defer tx.Rollback(ctx) //nolint:errcheck
+
+	if _, err = tx.Exec(ctx, `SET LOCAL lock_timeout = '`+advisoryLockTimeout+`'`); err != nil {
+		return false, fmt.Errorf("otp/postgres: rate-limit set lock_timeout: %w", err)
+	}
+
+	if _, err = tx.Exec(ctx,
+		`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+		key,
+	); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "55P03" {
+			return false, fmt.Errorf("otp/postgres: rate-limit lock timeout: %w", ErrRateLimiterBusy)
+		}
+		return false, fmt.Errorf("otp/postgres: rate-limit acquire lock: %w", err)
+	}
 
 	if _, err = tx.Exec(ctx,
 		`DELETE FROM otp_rate_events WHERE bucket_key = $1 AND created_at <= $2`,

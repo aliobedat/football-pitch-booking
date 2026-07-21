@@ -228,11 +228,13 @@ func (s *Service) Request(ctx context.Context, phone string) error {
 		return fmt.Errorf("otp: store code: %w", err)
 	}
 
-	// LOCAL-DEV bypass: skip the real provider entirely and print the code so a
-	// developer can complete login without spending Twilio credits. Gated on
-	// config.IsDev() (fail-closed), so this branch is unreachable in production.
+	// LOCAL-DEV bypass: skip the real provider entirely so a developer can
+	// complete login without spending Twilio credits. Gated on config.IsDev()
+	// (fail-closed), so this branch is unreachable in production. The plaintext
+	// code is never logged, in any environment — a developer reads it from the
+	// dev-only response/store surface the bypass is wired to, not the console.
 	if s.devBypass {
-		log.Printf("🎯 [LOCAL DEV] OTP for %s is: %s", phone, code)
+		log.Printf("🎯 [LOCAL DEV] OTP delivery bypassed for %s; code redacted", maskPhoneLocal(phone))
 		return nil
 	}
 
@@ -364,6 +366,19 @@ func generateNumericCode(r io.Reader, length int) (string, error) {
 		return "", err
 	}
 	return fmt.Sprintf("%0*d", length, n), nil
+}
+
+// maskPhoneLocal returns a display-safe form of a phone number for the one
+// dev-only log line in this package (the devBypass branch above) — e.g.
+// "***3606". It intentionally duplicates nothing from the notification
+// package (no shared logging/PII framework is warranted for one call site);
+// it exists purely so that branch never has to print a full phone number.
+func maskPhoneLocal(phone string) string {
+	const keep = 4
+	if len(phone) <= keep {
+		return "***"
+	}
+	return "***" + phone[len(phone)-keep:]
 }
 
 // Compile-time assertion that Service satisfies the PART 1 contract.
