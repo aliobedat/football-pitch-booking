@@ -159,15 +159,24 @@ func main() {
 		}
 		guarded := notification.NewQuotaGuardedChannel(wa, outbox.NewQuotaStore(pool), quotaBucket, slog.Default())
 
-		// Meta keeps its transparent SMS fallback (unchanged, fallback-safe default).
-		// Infobip SMS fallback is intentionally out of scope for this PR.
-		var whatsappChannel notification.NotificationChannel = guarded
+		// WO-SECURITY-V1 PR-S2: the paid-send kill switch sits OUTSIDE the quota
+		// guard — checked before any quota reservation, per the required wrapper
+		// order (PaidWhatsAppEnabledGuard -> QuotaGuardedChannel -> provider).
+		paidGuarded := notification.NewPaidWhatsAppEnabledGuard(guarded, cfg.PaidWhatsAppEnabled, slog.Default())
+
+		// Meta keeps its (now opt-in, config-gated) SMS fallback. Infobip SMS
+		// fallback is intentionally out of scope for this PR.
+		var whatsappChannel notification.NotificationChannel = paidGuarded
 		if waProvider == notification.ProviderMeta {
-			whatsappChannel = notification.NewFallbackChannel(guarded, sms)
+			whatsappChannel = notification.NewFallbackChannel(paidGuarded, sms,
+				notification.WithFallbackEnabled(cfg.WhatsAppToSMSFallbackEnabled))
 		}
 		channelOpts = append(channelOpts,
 			notification.WithChannel(notification.ChannelWhatsApp, whatsappChannel))
 	}
+
+	log.Printf("[CONFIG] PAID_WHATSAPP_ENABLED=%v WHATSAPP_TO_SMS_FALLBACK_ENABLED=%v",
+		cfg.PaidWhatsAppEnabled, cfg.WhatsAppToSMSFallbackEnabled)
 
 	notifier := notification.NewService(activeChannel, channelOpts...)
 

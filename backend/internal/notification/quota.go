@@ -5,12 +5,13 @@ package notification
 // under its ~250/day messaging ceiling. It is a plain NotificationChannel, so it
 // composes INSIDE the existing FallbackChannel:
 //
-//	FallbackChannel{ primary: QuotaGuardedChannel{ wrapped: WhatsApp }, fallback: SMS }
+//	FallbackChannel{ primary: PaidWhatsAppEnabledGuard{ QuotaGuardedChannel{ wrapped: WhatsApp } }, fallback: SMS }
 //
-// That placement is what makes the cap behaviour "same message, same request, now":
-// a refusal returns a DeliveryFailed result, which the outer FallbackChannel already
-// treats as a primary failure and transparently re-sends through SMS — no deferral,
-// no reschedule.
+// WO-SECURITY-V1 PR-S2 correction: a quota refusal (cap reached OR the quota
+// datastore itself unavailable) is a GATE REFUSAL, not a genuine provider
+// failure — FallbackChannel recognizes both typed sentinels below and never
+// routes them to SMS (see fallback.go's isGateRefusal). Both fail CLOSED: no
+// WhatsApp provider call is made once either condition is detected.
 //
 // SCOPE: OTP plus the three booking UTILITY kinds (booking_confirmed /
 // booking_cancelled / booking_reminder) are counted and gated. OTP is included
@@ -27,16 +28,34 @@ import (
 )
 
 // Daily quota thresholds for an unverified WABA (Tier 250).
+//
+// Reserve returns the POST-increment count, i.e. the ordinal of the CURRENT
+// attempt (the 1st reservation of the day returns 1, the 250th returns 250).
+// So attempts 1..250 (count <= 250) must be ADMITTED and only attempt 251
+// onward (count > 250) refused — the boundary check below is intentionally
+// `count > quotaHardCap`, not `count >= quotaHardCap` (WO-SECURITY-V1 PR-S2
+// off-by-one fix: the prior `>=` incorrectly refused the 250th, legitimate,
+// in-budget attempt).
 const (
 	quotaWarnThreshold = 200 // sends with count > this (201+) emit a warn-level alert
-	quotaHardCap       = 250 // sends with count >= this are refused (→ fallback)
+	quotaHardCap       = 250 // sends with count > this are refused (→ fallback)
 )
 
 // ErrWhatsAppDailyCapReached is the typed refusal returned once the daily cap is
-// hit. It surfaces as a DeliveryFailed result so FallbackChannel routes to SMS;
-// callers/log sites can match it with errors.Is to distinguish a cap refusal from
-// a genuine Meta API failure.
+// hit. It is a GATE REFUSAL, not a genuine provider failure: FallbackChannel
+// must never route it to SMS (WO-SECURITY-V1 PR-S2 — quota exhaustion must not
+// trigger fallback). Callers/log sites match it with errors.Is to distinguish a
+// cap refusal from a genuine Meta API failure.
 var ErrWhatsAppDailyCapReached = errors.New("notification/whatsapp: daily WABA send cap reached")
+
+// ErrWhatsAppQuotaUnavailable is the typed refusal returned when the quota
+// datastore itself cannot be reached/queried. A cost-protection datastore
+// failure must PREVENT the paid provider call (fail closed), not silently
+// admit it — the previous fail-open behavior is the exact defect this sentinel
+// closes. It is also a gate refusal: FallbackChannel must never route it to
+// SMS, and the booking/outbox layer treats it like any other notification
+// refusal (booking success is unaffected).
+var ErrWhatsAppQuotaUnavailable = errors.New("notification/whatsapp: quota accounting unavailable")
 
 // SendQuotaGuard counts one gated WhatsApp send against the WABA's daily bucket and
 // returns the resulting count. outbox.QuotaStore is the production implementation;
@@ -75,19 +94,25 @@ func (q *QuotaGuardedChannel) Send(ctx context.Context, msg OutboundMessage) (De
 
 	count, err := q.guard.Reserve(ctx, q.wabaID)
 	if err != nil {
-		// Fail OPEN: the counter is a guardrail, not a hard gate. A DB blip must not
-		// silence booking notifications — proceed to WhatsApp. If we genuinely are
-		// over Meta's real limit, that send fails upstream and FallbackChannel still
-		// routes to SMS.
-		q.logger.Warn("waba quota reserve failed; sending without quota enforcement",
+		// Fail CLOSED (WO-SECURITY-V1 PR-S2): a cost-protection datastore failure
+		// must prevent the paid provider call, not silently admit it. The prior
+		// fail-open behavior let a DB blip bypass quota enforcement entirely — the
+		// exact defect this closes. The raw datastore error is logged internally
+		// (structured, no phone/OTP/token/secret) but never exposed to the caller;
+		// only the typed sentinel crosses that boundary.
+		q.logger.Warn("waba quota reserve failed; refusing WhatsApp (fail closed)",
 			"kind", msg.Kind, "waba_id", q.wabaID, "error", err)
-		return q.wrapped.Send(ctx, msg)
+		return failedWhatsApp(fmt.Errorf("%w", ErrWhatsAppQuotaUnavailable))
 	}
 
-	if count >= quotaHardCap {
-		// Refuse: return DeliveryFailed so the outer FallbackChannel re-sends via SMS
-		// in this same request (NOT deferred to the next day).
-		q.logger.Warn("waba daily cap reached; refusing WhatsApp, falling back",
+	if count > quotaHardCap {
+		// Refuse: this is a GATE REFUSAL, not a provider failure (WO-SECURITY-V1
+		// PR-S2) — FallbackChannel must not route it to SMS. The outbox/OTP layer
+		// still sees a DeliveryFailed result so existing classification (no rapid
+		// retry loop) is unchanged. count > cap (not >=): the cap'th attempt
+		// itself is still in-budget and must be admitted (see the boundary
+		// comment on quotaHardCap above).
+		q.logger.Warn("waba daily cap reached; refusing WhatsApp",
 			"kind", msg.Kind, "waba_id", q.wabaID, "count", count, "cap", quotaHardCap)
 		return failedWhatsApp(fmt.Errorf("%w: count=%d cap=%d", ErrWhatsAppDailyCapReached, count, quotaHardCap))
 	}

@@ -42,11 +42,11 @@ type Config struct {
 	// Only the exact string "true" turns the OTP requirement back on. Owner/staff/
 	// admin login is unaffected — this flag gates the booking caller only.
 	BookingOTPRequired bool
-	DB           DBConfig
-	JWT          JWTConfig      // ← NEW
-	BcryptCost   int            // ← NEW
-	OTP          OTPConfig      // ← NEW (PART 3B)
-	WhatsApp     WhatsAppConfig // ← NEW (PART 4)
+	DB                 DBConfig
+	JWT                JWTConfig      // ← NEW
+	BcryptCost         int            // ← NEW
+	OTP                OTPConfig      // ← NEW (PART 3B)
+	WhatsApp           WhatsAppConfig // ← NEW (PART 4)
 	// WhatsAppProvider selects the WhatsApp delivery provider: "meta" (default) or
 	// "infobip" (Gate 2 / PR-1). Empty/unset → meta, the fallback-safe provider.
 	WhatsAppProvider string
@@ -54,6 +54,20 @@ type Config struct {
 	Cloudinary       CloudinaryConfig
 	Twilio           TwilioConfig       // ← NEW (MVP auth channel)
 	Notification     NotificationConfig // ← NEW (type-based routing)
+
+	// PaidWhatsAppEnabled is the WO-SECURITY-V1 PR-S2 kill switch: when false, no
+	// real paid WhatsApp provider call is ever made (checked before quota
+	// reservation). FAIL-CLOSED: an unset PAID_WHATSAPP_ENABLED resolves to
+	// false in production; a malformed (non-boolean) value fails startup. A dev
+	// environment (IsDevEnv) may default to true because a dev deployment's
+	// notification channel is FAKE/log-only — never a real provider — so the
+	// switch being "on" by default there cannot cause a real send.
+	PaidWhatsAppEnabled bool
+	// WhatsAppToSMSFallbackEnabled gates whether a genuine eligible WhatsApp
+	// provider failure may fall back to SMS. Defaults to false in ALL
+	// environments — fallback is opt-in, not opt-out — matching Marma's current
+	// WhatsApp-only production intent. A malformed value fails startup.
+	WhatsAppToSMSFallbackEnabled bool
 }
 
 // TwilioConfig holds the Twilio Programmable SMS credentials for the closed-beta
@@ -287,11 +301,22 @@ func Load() *Config {
 		panic("CONFIG: OTP_GLOBAL_DAILY_CAP must be a positive integer")
 	}
 
+	appEnv := getEnv("APP_ENV", "")
+	isDev := IsDevEnv(appEnv)
+
+	// WO-SECURITY-V1 PR-S2 cost-protection switches. FAIL-CLOSED: unset resolves
+	// to false in production (isDev=false); a malformed value panics regardless
+	// of environment. Dev may default PAID_WHATSAPP_ENABLED to true because a
+	// dev deployment's registered WhatsApp channel is never wired to a real
+	// provider unless the operator explicitly configures one.
+	paidWhatsAppEnabled := getBoolEnvFailClosed("PAID_WHATSAPP_ENABLED", isDev)
+	whatsappToSMSFallbackEnabled := getBoolEnvFailClosed("WHATSAPP_TO_SMS_FALLBACK_ENABLED", false)
+
 	return &Config{
 		// FAIL-CLOSED: no dev default. An unset/empty APP_ENV is NOT a dev value
 		// (see IsDevEnv) and therefore inherits the secure production path. Local
 		// dev must set APP_ENV=development explicitly.
-		AppEnv: getEnv("APP_ENV", ""),
+		AppEnv: appEnv,
 		// FAIL-OPEN (scoped): only an explicit "true" requires booking OTP; anything
 		// else — unset, "false", or a typo — leaves booking OTP NOT required so the
 		// player flow is never blocked by a misread flag.
@@ -312,13 +337,15 @@ func Load() *Config {
 			Pepper:         otpPepper,
 			GlobalDailyCap: otpGlobalDailyCap,
 		},
-		WhatsApp:         loadWhatsAppConfig(),
-		WhatsAppProvider: getEnv("WHATSAPP_PROVIDER", "meta"),
-		Infobip:          loadInfobipConfig(),
-		Cloudinary:       loadCloudinaryConfig(),
-		Twilio:           loadTwilioConfig(),
-		Notification:     loadNotificationConfig(),
-		DB:               loadDBConfig(int32(maxConns), int32(minConns), IsDevEnv(getEnv("APP_ENV", ""))),
+		WhatsApp:                     loadWhatsAppConfig(),
+		WhatsAppProvider:             getEnv("WHATSAPP_PROVIDER", "meta"),
+		Infobip:                      loadInfobipConfig(),
+		Cloudinary:                   loadCloudinaryConfig(),
+		Twilio:                       loadTwilioConfig(),
+		Notification:                 loadNotificationConfig(),
+		PaidWhatsAppEnabled:          paidWhatsAppEnabled,
+		WhatsAppToSMSFallbackEnabled: whatsappToSMSFallbackEnabled,
+		DB:                           loadDBConfig(int32(maxConns), int32(minConns), isDev),
 	}
 }
 
@@ -449,6 +476,27 @@ func getEnv(key, fallback string) string {
 		return val
 	}
 	return fallback
+}
+
+// getBoolEnvFailClosed reads key as a strict boolean ("true"/"false",
+// case-insensitive, surrounding space trimmed). Absent or empty resolves to
+// def (the caller decides the fail-closed default per variable). A PRESENT but
+// malformed value (anything else) panics — a cost-control switch must never
+// silently resolve to "enabled" because of a typo, matching this file's other
+// fail-fast conventions (JWT_SECRET, OTP_HMAC_PEPPER, TWILIO_*).
+func getBoolEnvFailClosed(key string, def bool) bool {
+	raw, ok := os.LookupEnv(key)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return def
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "true":
+		return true
+	case "false":
+		return false
+	default:
+		panic(fmt.Sprintf("CONFIG: %s must be \"true\" or \"false\" (got %q)", key, raw))
+	}
 }
 
 func mustGetEnv(key string) string {

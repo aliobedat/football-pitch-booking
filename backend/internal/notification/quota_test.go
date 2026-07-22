@@ -98,10 +98,13 @@ func TestQuota_OTPUnderCap_ReservesAndSends(t *testing.T) {
 	}
 }
 
-// Gate 2 / PR-1: OTP at/over the cap is refused exactly like a booking kind, so the
-// real provider limit can't be silently exceeded.
+// Gate 2 / PR-1: OTP over the cap is refused exactly like a booking kind, so the
+// real provider limit can't be silently exceeded. Reserve returns the
+// POST-increment count (this attempt's ordinal), so "over the cap" is
+// quotaHardCap+1 — the 251st attempt — not quotaHardCap itself (see the
+// exact-boundary test for the cap'th attempt, which must be ADMITTED).
 func TestQuota_OTPAtCap_Refused(t *testing.T) {
-	guard := &fakeGuard{count: quotaHardCap}
+	guard := &fakeGuard{count: quotaHardCap + 1}
 	wa := &recordingChannel{result: DeliveryResult{Status: DeliverySent}}
 	q := NewQuotaGuardedChannel(wa, guard, "WABA1", slog.New(&capturingHandler{}))
 
@@ -111,10 +114,10 @@ func TestQuota_OTPAtCap_Refused(t *testing.T) {
 		t.Fatalf("OTP must be quota-gated; Reserve called %d times (want 1)", guard.calls)
 	}
 	if wa.called != 0 {
-		t.Fatalf("OTP at cap must NOT reach WhatsApp; called=%d", wa.called)
+		t.Fatalf("OTP over cap must NOT reach WhatsApp; called=%d", wa.called)
 	}
 	if res.Status != DeliveryFailed || !errors.Is(err, ErrWhatsAppDailyCapReached) {
-		t.Fatalf("OTP at cap must fail with the cap error; status=%s err=%v", res.Status, err)
+		t.Fatalf("OTP over cap must fail with the cap error; status=%s err=%v", res.Status, err)
 	}
 }
 
@@ -154,33 +157,70 @@ func TestQuota_WarnBand_SendsAndWarns(t *testing.T) {
 	}
 }
 
-// At/over the cap: refuse — WhatsApp is NOT called, result is DeliveryFailed wrapping
-// ErrWhatsAppDailyCapReached (the signal FallbackChannel routes on).
-func TestQuota_AtCap_RefusesWhatsApp(t *testing.T) {
-	guard := &fakeGuard{count: 250}
+// Over the cap (the 251st attempt): refuse — WhatsApp is NOT called, result is
+// DeliveryFailed wrapping ErrWhatsAppDailyCapReached. The exact-boundary test
+// below proves the cap'th (250th) attempt is admitted, not refused.
+func TestQuota_OverCap_RefusesWhatsApp(t *testing.T) {
+	guard := &fakeGuard{count: quotaHardCap + 1}
 	wa := &recordingChannel{result: DeliveryResult{Status: DeliverySent}}
 	h := &capturingHandler{}
 	q := NewQuotaGuardedChannel(wa, guard, "WABA1", slog.New(h))
 
 	res, err := q.Send(context.Background(), bookingMsg())
 	if wa.called != 0 {
-		t.Fatalf("at cap, WhatsApp must NOT be called; called=%d", wa.called)
+		t.Fatalf("over cap, WhatsApp must NOT be called; called=%d", wa.called)
 	}
 	if res.Status != DeliveryFailed {
-		t.Fatalf("at cap, result must be DeliveryFailed; got %s", res.Status)
+		t.Fatalf("over cap, result must be DeliveryFailed; got %s", res.Status)
 	}
 	if !errors.Is(err, ErrWhatsAppDailyCapReached) {
-		t.Fatalf("at cap, error must wrap ErrWhatsAppDailyCapReached; got %v", err)
+		t.Fatalf("over cap, error must wrap ErrWhatsAppDailyCapReached; got %v", err)
 	}
 }
 
-// GATE 2.1 PROOF: the REAL Meta WhatsApp adapter, wrapped exactly as production
-// wires it — QuotaGuardedChannel(meta) inside FallbackChannel(_, sms) — must NOT
-// lock out OTP at the quota cap. At cap the guard refuses WhatsApp and the OTP is
-// delivered through the SMS fallback instead. This exercises the actual chain
-// (real adapter + real guard + real fallback), not a stand-in for the WhatsApp leg,
-// so it proves admission control is separated from accounting on the Meta path.
-func TestQuota_MetaOTP_AtCap_FallsBackToSMS(t *testing.T) {
+// WO-SECURITY-V1 PR-S2 exact-boundary regression: Reserve returns the
+// POST-increment count (this attempt's ordinal). For a configured hard cap of
+// 250: attempt 250 (count==250) must be ADMITTED (still in-budget), and
+// attempt 251 (count==251) must be REFUSED. This proves the off-by-one fix
+// (count > quotaHardCap, not count >= quotaHardCap).
+func TestQuota_ExactBoundary_250thAdmitted_251stRefused(t *testing.T) {
+	// The 250th attempt: Reserve reports count=250 (this send is #250 today).
+	guard250 := &fakeGuard{count: quotaHardCap}
+	wa250 := &recordingChannel{result: DeliveryResult{Status: DeliverySent, ProviderMessageID: "wamid.250"}}
+	q250 := NewQuotaGuardedChannel(wa250, guard250, "WABA1", slog.New(&capturingHandler{}))
+
+	res250, err250 := q250.Send(context.Background(), bookingMsg())
+	if err250 != nil {
+		t.Fatalf("the 250th (cap'th) attempt must be ADMITTED, not refused: %v", err250)
+	}
+	if wa250.called != 1 {
+		t.Fatalf("the 250th attempt must reach WhatsApp exactly once; called=%d", wa250.called)
+	}
+	if res250.Status != DeliverySent {
+		t.Fatalf("the 250th attempt must succeed; got status=%s", res250.Status)
+	}
+
+	// The 251st attempt: Reserve reports count=251 (over budget).
+	guard251 := &fakeGuard{count: quotaHardCap + 1}
+	wa251 := &recordingChannel{result: DeliveryResult{Status: DeliverySent}}
+	q251 := NewQuotaGuardedChannel(wa251, guard251, "WABA1", slog.New(&capturingHandler{}))
+
+	res251, err251 := q251.Send(context.Background(), bookingMsg())
+	if wa251.called != 0 {
+		t.Fatalf("the 251st attempt must NOT reach WhatsApp; called=%d", wa251.called)
+	}
+	if res251.Status != DeliveryFailed || !errors.Is(err251, ErrWhatsAppDailyCapReached) {
+		t.Fatalf("the 251st attempt must be refused with the cap error; status=%s err=%v", res251.Status, err251)
+	}
+}
+
+// WO-SECURITY-V1 PR-S2 correction of the former "GATE 2.1 PROOF": quota
+// exhaustion is now a GATE REFUSAL, not a genuine provider failure, so it must
+// NOT fall back to SMS even when fallback is enabled on the FallbackChannel.
+// This exercises the actual chain (real Meta adapter + real guard + real
+// fallback wrapper) to prove the refusal, not just a stand-in for the WhatsApp
+// leg.
+func TestQuota_MetaOTP_AtCap_RefusesWithoutFallback(t *testing.T) {
 	// A real Meta adapter pointed at a server that records whether it is ever hit.
 	// At cap it must NOT be: the quota guard refuses before any HTTP call.
 	var whatsappHit bool
@@ -196,12 +236,14 @@ func TestQuota_MetaOTP_AtCap_FallsBackToSMS(t *testing.T) {
 		t.Fatalf("NewWhatsAppChannel: %v", err)
 	}
 
-	guard := &fakeGuard{count: quotaHardCap} // pinned at the hard cap
+	guard := &fakeGuard{count: quotaHardCap + 1} // pinned OVER the hard cap (251st attempt)
 	sms := &recordingChannel{result: DeliveryResult{Status: DeliverySent, ProviderMessageID: "SM-OTP-1"}}
 
-	// Exactly the production composition for the Meta provider.
+	// Exactly the production composition for the Meta provider, with fallback
+	// explicitly enabled — proving the refusal holds EVEN THEN, because a gate
+	// refusal is never eligible for fallback regardless of the switch.
 	guarded := NewQuotaGuardedChannel(meta, guard, "WABA1", slog.New(&capturingHandler{}))
-	channel := NewFallbackChannel(guarded, sms)
+	channel := NewFallbackChannel(guarded, sms, WithFallbackEnabled(true))
 
 	otp := OutboundMessage{
 		Recipient: "+962790000000",
@@ -209,9 +251,6 @@ func TestQuota_MetaOTP_AtCap_FallsBackToSMS(t *testing.T) {
 		Payload:   OTPPayload{Code: "123456", ExpiresInSeconds: 300},
 	}
 	res, sendErr := channel.Send(context.Background(), otp)
-	if sendErr != nil {
-		t.Fatalf("chain returned an error; OTP must be delivered via SMS fallback: %v", sendErr)
-	}
 
 	// 1) OTP was counted against the WABA quota (accounting preserved).
 	if guard.calls != 1 {
@@ -221,36 +260,46 @@ func TestQuota_MetaOTP_AtCap_FallsBackToSMS(t *testing.T) {
 	if whatsappHit {
 		t.Fatalf("at cap the quota guard must refuse before the Meta adapter sends; WhatsApp endpoint was hit")
 	}
-	// 3) The OTP was actually delivered through the SMS fallback (no lockout).
-	if sms.called != 1 {
-		t.Fatalf("OTP must fall through to SMS exactly once; sms.called=%d", sms.called)
+	// 3) The refusal must NOT fall back to SMS — quota exhaustion is a gate
+	// refusal, not a provider failure.
+	if sms.called != 0 {
+		t.Fatalf("quota exhaustion must NOT trigger SMS fallback; sms.called=%d", sms.called)
 	}
-	if sms.last.Kind != KindOTP || sms.last.Recipient != otp.Recipient {
-		t.Fatalf("SMS fallback must carry the SAME OTP message; got kind=%s recipient=%s", sms.last.Kind, sms.last.Recipient)
-	}
-	if res.Status != DeliverySent || res.ProviderMessageID != "SM-OTP-1" {
-		t.Fatalf("result must be the successful SMS delivery; got status=%s id=%q", res.Status, res.ProviderMessageID)
+	if res.Status != DeliveryFailed || !errors.Is(sendErr, ErrWhatsAppDailyCapReached) {
+		t.Fatalf("result must be the cap-reached gate refusal; status=%s err=%v", res.Status, sendErr)
 	}
 }
 
-// A guard (DB) error must fail OPEN: send proceeds through WhatsApp.
-func TestQuota_GuardError_FailsOpen(t *testing.T) {
-	guard := &fakeGuard{err: errors.New("db down")}
+// A guard (DB) error must fail CLOSED (WO-SECURITY-V1 PR-S2): the provider must
+// never be invoked when quota accounting is unavailable, and the typed
+// ErrWhatsAppQuotaUnavailable sentinel — not the raw datastore error — is what
+// crosses the caller boundary.
+func TestQuota_GuardError_FailsClosed(t *testing.T) {
+	dbErr := errors.New("db down")
+	guard := &fakeGuard{err: dbErr}
 	wa := &recordingChannel{result: DeliveryResult{Status: DeliverySent}}
 	q := NewQuotaGuardedChannel(wa, guard, "WABA1", slog.New(&capturingHandler{}))
 
 	res, err := q.Send(context.Background(), bookingMsg())
-	if err != nil {
-		t.Fatalf("fail-open must not surface the guard error: %v", err)
+	if wa.called != 0 {
+		t.Fatalf("fail-closed must NOT invoke the WhatsApp provider; called=%d", wa.called)
 	}
-	if wa.called != 1 || res.Status != DeliverySent {
-		t.Fatalf("fail-open must still send via WhatsApp (called=%d status=%s)", wa.called, res.Status)
+	if res.Status != DeliveryFailed {
+		t.Fatalf("fail-closed result must be DeliveryFailed; got %s", res.Status)
+	}
+	if !errors.Is(err, ErrWhatsAppQuotaUnavailable) {
+		t.Fatalf("fail-closed error must wrap ErrWhatsAppQuotaUnavailable; got %v", err)
+	}
+	if strings.Contains(err.Error(), dbErr.Error()) {
+		t.Fatalf("the raw datastore error must not cross the caller boundary; got %v", err)
 	}
 }
 
-// End-to-end: composed INSIDE FallbackChannel, a cap refusal transparently routes
-// the SAME message to SMS in the same request (not deferred).
-func TestQuota_AtCap_FallsBackToSMS(t *testing.T) {
+// End-to-end: composed INSIDE FallbackChannel (default-enabled, matching the
+// channel-mechanism's own backward-compatible default), a cap refusal must
+// STILL not fall back — quota exhaustion is a gate refusal, not a provider
+// failure, regardless of the fallback switch.
+func TestQuota_AtCap_DoesNotFallBackToSMS(t *testing.T) {
 	guard := &fakeGuard{count: 300}
 	wa := &recordingChannel{result: DeliveryResult{Status: DeliverySent, ProviderMessageID: "wamid.X"}}
 	sms := &recordingChannel{result: DeliveryResult{Status: DeliverySent, ProviderMessageID: "SM123"}}
@@ -260,20 +309,14 @@ func TestQuota_AtCap_FallsBackToSMS(t *testing.T) {
 
 	msg := bookingMsg()
 	res, err := channel.Send(context.Background(), msg)
-	if err != nil {
-		t.Fatalf("fallback send errored: %v", err)
-	}
 	if wa.called != 0 {
 		t.Fatalf("WhatsApp must be refused at cap; called=%d", wa.called)
 	}
-	if sms.called != 1 {
-		t.Fatalf("SMS fallback must be invoked exactly once; called=%d", sms.called)
+	if sms.called != 0 {
+		t.Fatalf("quota exhaustion must NOT trigger SMS fallback; called=%d", sms.called)
 	}
-	if sms.last.Recipient != msg.Recipient || sms.last.Kind != msg.Kind {
-		t.Fatalf("fallback must carry the SAME message; got recipient=%s kind=%s", sms.last.Recipient, sms.last.Kind)
-	}
-	if res.ProviderMessageID != "SM123" {
-		t.Fatalf("result must be the SMS delivery; got id=%q", res.ProviderMessageID)
+	if res.Status != DeliveryFailed || !errors.Is(err, ErrWhatsAppDailyCapReached) {
+		t.Fatalf("result must be the cap-reached gate refusal; status=%s err=%v", res.Status, err)
 	}
 }
 
