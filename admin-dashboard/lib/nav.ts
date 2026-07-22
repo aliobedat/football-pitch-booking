@@ -1,6 +1,6 @@
 import type { Role } from '@malaab/shared/auth';
 import { canViewFinance } from '@malaab/shared/auth';
-import { LayoutDashboard, CalendarRange, CalendarClock, MapPin, BarChart3, ClipboardList, Users, UserCog, FileText, type LucideIcon } from 'lucide-react';
+import { LayoutDashboard, CalendarRange, CalendarClock, MapPin, BarChart3, ClipboardList, Users, UserCog, FileText, Activity, type LucideIcon } from 'lucide-react';
 
 export interface NavItem {
   href: string;
@@ -54,6 +54,14 @@ export const NAV_ITEMS: NavItem[] = [
     icon: UserCog,
     visible: (role) => canViewFinance(role),
   },
+  // المراقبة — WO-MONITORING-V1: read-only admin monitoring page. Admin-only, no
+  // owner/staff access (backed by GET /admin/monitoring, RequireRole("admin")).
+  {
+    href: '/monitoring',
+    label: 'المراقبة',
+    icon: Activity,
+    visible: (role) => role === 'admin',
+  },
 ];
 
 // Routes gated to owner/admin (finance-capable) roles. Used by the route-level
@@ -64,4 +72,13 @@ export const FINANCE_ROUTES = ['/analytics', '/customers', '/calendar', '/day-vi
 
 export function isFinanceRoute(pathname: string): boolean {
   return FINANCE_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`));
+}
+
+// Admin-only routes (stricter than finance — owner is excluded too). Used by
+// the same route-level guard so a non-admin deep-linking /monitoring is
+// redirected instead of rendered into a page the backend will 403.
+export const ADMIN_ONLY_ROUTES = ['/monitoring'];
+
+export function isAdminOnlyRoute(pathname: string): boolean {
+  return ADMIN_ONLY_ROUTES.some((r) => pathname === r || pathname.startsWith(`${r}/`));
 }

@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { canViewFinance, isDashboardRole } from '@malaab/shared/auth';
 import { useAuth } from '@/context/AuthContext';
-import { isFinanceRoute } from '@/lib/nav';
+import { isFinanceRoute, isAdminOnlyRoute } from '@/lib/nav';
 import Sidebar from '@/components/Sidebar';
 import Header from '@/components/Header';
 
@@ -44,6 +44,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     }
     // Non-staff deep-linking finance/analytics they can't view → overview.
     if (isFinanceRoute(pathname) && !canViewFinance(user.role)) {
+      router.replace('/');
+      return;
+    }
+    // WO-MONITORING-V1: /monitoring is admin-only — even an owner deep-linking
+    // it bounces to the overview (the backend enforces the same boundary).
+    if (isAdminOnlyRoute(pathname) && user.role !== 'admin') {
       router.replace('/');
     }
   }, [user, isLoading, pathname, router]);

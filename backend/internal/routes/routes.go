@@ -54,6 +54,17 @@ func Register(
 	expenseHandler := handlers.NewExpenseHandler(expenseRepo)
 	financialsHandler := handlers.NewFinancialsHandler(analyticsRepo, expenseRepo)
 	bookingHandler := handlers.NewBookingHandler(db, bookingSvc).WithCustomers(customerRepo)
+	// WO-MONITORING-V1: the monitoring page's WhatsApp-usage figure must read the
+	// SAME (wabaID, UTC send_date) bucket the quota guard's Reserve call writes to
+	// (cmd/api/main.go's quotaBucket resolution) — Infobip has no Meta WABA id, so
+	// its registered sender is the bucket key instead. An unrecognised
+	// WHATSAPP_PROVIDER falls back to the WABA id (same default main.go's fatal
+	// startup check would otherwise catch first).
+	monitoringWabaID := cfg.WhatsApp.WABAID
+	if provider, provErr := notification.ParseWhatsAppProvider(cfg.WhatsAppProvider); provErr == nil && provider == notification.ProviderInfobip {
+		monitoringWabaID = cfg.Infobip.Sender
+	}
+	monitoringHandler := handlers.NewMonitoringHandler(repository.NewMonitoringRepository(db), monitoringWabaID)
 	// The Cloudinary credentials are validated at config load (fail-fast), so the
 	// only error here would be a programming/SDK error — panic to fail fast,
 	// consistent with the other startup security assertions.
@@ -194,6 +205,13 @@ func Register(
 
 		// Notification consent (PART 6): a user withdraws consent for themselves.
 		protected.POST("/notifications/opt-out", notificationHandler.OptOut)
+
+		// WO-MONITORING-V1: read-only admin monitoring page. Admin-only — no
+		// owner/staff access (role enforced at route + handler).
+		protected.GET("/admin/monitoring",
+			middleware.RequireRole("admin"),
+			monitoringHandler.GetMonitoring,
+		)
 
 		// ── Bookings ─────────────────────────────────────────────────────────
 		// Any authenticated user can create a booking or list their own.

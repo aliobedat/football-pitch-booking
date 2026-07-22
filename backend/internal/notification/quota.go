@@ -125,6 +125,13 @@ func (q *QuotaGuardedChannel) Send(ctx context.Context, msg OutboundMessage) (De
 	return q.wrapped.Send(ctx, msg)
 }
 
+// WhatsAppQuotaHardCap and WhatsAppQuotaWarnThreshold expose the daily-cap
+// constants above read-only, so other packages (e.g. the admin monitoring
+// repository) can report the same numbers the guard actually enforces instead
+// of duplicating them (WO-MONITORING-V1).
+func WhatsAppQuotaHardCap() int       { return quotaHardCap }
+func WhatsAppQuotaWarnThreshold() int { return quotaWarnThreshold }
+
 // isQuotaGated reports whether a message kind is counted/capped by this guard:
 // OTP (AUTHENTICATION) plus the three booking UTILITY templates — all of which
 // count against Meta/WABA's daily limit. booking_rejected (unsupported by the
