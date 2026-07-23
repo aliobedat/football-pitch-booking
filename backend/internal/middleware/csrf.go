@@ -10,10 +10,11 @@ import (
 
 // CSRF double-submit cookie constants. The cookie is set (readable) by the auth
 // handlers (handlers.cookieCSRF); the client echoes it back in this header.
-const (
-	csrfCookieName = "malaab_csrf"
-	csrfHeaderName = "X-CSRF-Token"
-)
+// csrfCookieName is a var, not a const, so SetCookieNamePrefix (auth.go) can
+// override it at startup for Demo cookie isolation.
+var csrfCookieName = "malaab_csrf"
+
+const csrfHeaderName = "X-CSRF-Token"
 
 // RequireCSRF enforces the double-submit-cookie CSRF defence on state-changing,
 // cookie-authenticated requests.

@@ -9,7 +9,11 @@
 import { createApiClient } from '@malaab/shared/auth';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api/v1';
+// Demo isolation: NEXT_PUBLIC_COOKIE_NAME_PREFIX must match the backend's
+// COOKIE_NAME_PREFIX (e.g. malaab_demo_) so the CSRF double-submit read finds
+// the right cookie. Unset in Production/dev → 'malaab_', unchanged default.
+const COOKIE_PREFIX = process.env.NEXT_PUBLIC_COOKIE_NAME_PREFIX || 'malaab_';
 
-const api = createApiClient({ baseURL: API_URL, loginPath: '/login' });
+const api = createApiClient({ baseURL: API_URL, loginPath: '/login', csrfCookie: `${COOKIE_PREFIX}csrf` });
 
 export default api;

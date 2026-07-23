@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -22,18 +23,42 @@ import (
 	"github.com/ali/football-pitch-api/internal/config"
 )
 
-const (
+// Session cookie names. These are VARS, not consts, so SetCookieNamePrefix can
+// override the "malaab_" prefix once at startup (Demo isolation). Every
+// existing reference (this file, handlers/auth.go, and the test suite) reads
+// these identifiers as plain strings, so overriding them here changes the
+// names everywhere consistently without any call-site changes.
+var (
 	cookieAccess  = "malaab_access"  // httpOnly: the access JWT
 	cookieRefresh = "malaab_refresh" // httpOnly: the opaque refresh token
 	cookieRole    = "malaab_role"    // readable: role, for the edge guard
 	cookieExpiry  = "malaab_expiry"  // readable: access-token expiry (unix secs)
 	cookieCSRF    = "malaab_csrf"    // readable: double-submit CSRF token
-
-	// refreshCookiePath scopes the refresh token to the auth endpoints that
-	// actually consume it (refresh + logout), so the long-lived secret is not
-	// transmitted on every API request.
-	refreshCookiePath = "/api/v1/auth"
 )
+
+// refreshCookiePath scopes the refresh token to the auth endpoints that
+// actually consume it (refresh + logout), so the long-lived secret is not
+// transmitted on every API request.
+const refreshCookiePath = "/api/v1/auth"
+
+// SetCookieNamePrefix overrides the "malaab_" default for all five session
+// cookie names. Call ONCE at startup (main.go), before the router serves any
+// request — e.g. COOKIE_NAME_PREFIX=malaab_demo_ on the Demo deployment, so
+// Demo's malaab_demo_* cookies can never collide with or overwrite
+// Production's malaab_* cookies even under a shared parent domain. An empty
+// or whitespace-only prefix is ignored, preserving the Production default —
+// this can never silently blank out the prefix.
+func SetCookieNamePrefix(prefix string) {
+	p := strings.TrimSpace(prefix)
+	if p == "" {
+		return
+	}
+	cookieAccess = p + "access"
+	cookieRefresh = p + "refresh"
+	cookieRole = p + "role"
+	cookieExpiry = p + "expiry"
+	cookieCSRF = p + "csrf"
+}
 
 // cookieSecurity returns the SameSite mode and Secure flag for session cookies,
 // derived from the deployment environment.

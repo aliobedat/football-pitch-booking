@@ -12,7 +12,12 @@ import { isFinanceRoute } from '@/lib/nav';
 //
 // scope is intentionally absent from the token — it is DB-resolved server-side.
 
-const ACCESS_COOKIE = process.env.NEXT_PUBLIC_ACCESS_COOKIE || 'malaab_access';
+// Demo isolation: NEXT_PUBLIC_COOKIE_NAME_PREFIX must match the backend's
+// COOKIE_NAME_PREFIX (e.g. malaab_demo_) so this edge guard reads the right
+// access cookie. NEXT_PUBLIC_ACCESS_COOKIE remains a full-name override for
+// any case the prefix scheme doesn't cover. Unset → 'malaab_access', unchanged.
+const COOKIE_PREFIX = process.env.NEXT_PUBLIC_COOKIE_NAME_PREFIX || 'malaab_';
+const ACCESS_COOKIE = process.env.NEXT_PUBLIC_ACCESS_COOKIE || `${COOKIE_PREFIX}access`;
 const B2C_URL = process.env.NEXT_PUBLIC_B2C_URL || 'http://localhost:3000';
 
 // Paths that never require a session.

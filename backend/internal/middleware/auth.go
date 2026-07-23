@@ -10,6 +10,21 @@ import (
 	"github.com/ali/football-pitch-api/internal/auth"
 )
 
+// SetCookieNamePrefix overrides the "malaab_" default for the cookie names
+// this package reads (the access cookie in RequireAuth and the CSRF cookie in
+// RequireCSRF, see csrf.go). Call ONCE at startup (main.go), mirroring
+// handlers.SetCookieNamePrefix — duplicated rather than imported because
+// handlers already imports middleware (importing back would cycle). An empty
+// or whitespace-only prefix is ignored, preserving the Production default.
+func SetCookieNamePrefix(prefix string) {
+	p := strings.TrimSpace(prefix)
+	if p == "" {
+		return
+	}
+	accessCookieName = p + "access"
+	csrfCookieName = p + "csrf"
+}
+
 // Context keys for values injected by RequireAuth.
 // Using string constants with a namespaced prefix prevents collisions with
 // Gin's own keys and any third-party middleware.
@@ -134,8 +149,9 @@ func GetActor(c *gin.Context) auth.Actor {
 
 // accessCookieName is the httpOnly cookie carrying the access JWT for browser
 // clients. It mirrors handlers.cookieAccess (duplicated, not imported, because
-// handlers depends on middleware — importing it back would be a cycle).
-const accessCookieName = "malaab_access"
+// handlers depends on middleware — importing it back would be a cycle). A var,
+// not a const, so SetCookieNamePrefix can override it at startup.
+var accessCookieName = "malaab_access"
 
 // extractToken pulls the access token from the session cookie first (the browser
 // path), then falls back to the Authorization header for non-browser API clients

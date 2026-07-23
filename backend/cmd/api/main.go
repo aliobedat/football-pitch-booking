@@ -21,6 +21,8 @@ import (
 	"github.com/ali/football-pitch-api/internal/booking"
 	"github.com/ali/football-pitch-api/internal/config"
 	"github.com/ali/football-pitch-api/internal/database"
+	"github.com/ali/football-pitch-api/internal/handlers"
+	"github.com/ali/football-pitch-api/internal/middleware"
 	"github.com/ali/football-pitch-api/internal/notification"
 	"github.com/ali/football-pitch-api/internal/notification/outbox"
 	"github.com/ali/football-pitch-api/internal/otp"
@@ -34,6 +36,27 @@ func main() {
 	}
 
 	cfg := config.Load()
+
+	// DEMO COOKIE SAFETY GATE: refuse to boot unless Demo's cookie isolation is
+	// explicitly and correctly configured (COOKIE_NAME_PREFIX=malaab_demo_,
+	// COOKIE_DOMAIN=[.]demo.marmajo.com). Runs BEFORE the prefix is applied
+	// below, so a misconfigured Demo can never serve a single request under a
+	// cookie name/domain that could collide with Production.
+	if cfg.IsDemo() {
+		if err := config.ValidateDemoCookieSafety(cfg); err != nil {
+			log.Fatalf("[FATAL] %v", err)
+		}
+		log.Printf("[DEMO] APP_ENV=demo recognised — cookie isolation verified (%s / %s); production-grade security enforced (ReleaseMode, Secure cookies, required DATABASE_URL); notification config will be validated as Demo-safe below",
+			cfg.CookieNamePrefix, cfg.CookieDomain)
+	}
+
+	// Demo cookie isolation: overrides the "malaab_" default ONLY when
+	// COOKIE_NAME_PREFIX is explicitly set to something else (e.g.
+	// malaab_demo_ on the Demo deployment). Production/dev leave
+	// COOKIE_NAME_PREFIX unset and get byte-for-byte unchanged cookie names.
+	// Must run before the router (routes.Register) handles any request.
+	handlers.SetCookieNamePrefix(cfg.CookieNamePrefix)
+	middleware.SetCookieNamePrefix(cfg.CookieNamePrefix)
 
 	// FAIL-CLOSED: Gin runs in ReleaseMode by default; only an explicit dev
 	// APP_ENV (see config.IsDevEnv) opts into DebugMode. An unset/typo'd value
@@ -74,6 +97,17 @@ func main() {
 	activeChannel, err := notification.ActiveChannelFromEnv()
 	if err != nil {
 		log.Fatalf("[FATAL] Invalid notification channel configuration: %v", err)
+	}
+
+	// DEMO SAFETY GATE: refuse to boot unless Demo's notification posture is
+	// entirely fake/log-only with zero paid credentials configured. This is a
+	// fail-closed ASSERTION, not a silent override — misconfiguration must be
+	// fixed by the operator, never quietly corrected at runtime.
+	if cfg.IsDemo() {
+		if err := config.ValidateDemoSafety(cfg, string(activeChannel)); err != nil {
+			log.Fatalf("[FATAL] %v", err)
+		}
+		log.Printf("[DEMO] notification posture verified Demo-safe (FAKE/log_only, no paid credentials)")
 	}
 
 	// Register every delivery adapter under its channel name; the Service routes

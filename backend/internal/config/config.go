@@ -30,10 +30,37 @@ func IsDevEnv(appEnv string) bool {
 // IsDev reports whether this config is running in a developer environment.
 func (c *Config) IsDev() bool { return IsDevEnv(c.AppEnv) }
 
+// demoEnvs is the explicit allowlist for the Demo environment. Deliberately
+// its OWN allowlist — NOT merged into devEnvs — because Demo must inherit
+// PRODUCTION-grade security (Gin ReleaseMode, SameSite=None+Secure cookies,
+// required DATABASE_URL, no dev DB fallback, no auth relaxation). Demo-specific
+// behaviour is limited to: identification (this flag), permitting the Demo
+// reset command, forcing the notification config to a Demo-safe posture (see
+// ValidateDemoSafety), and — optionally — a distinct cookie-name prefix.
+var demoEnvs = map[string]bool{
+	"demo": true,
+}
+
+// IsDemoEnv reports whether appEnv is the recognised Demo environment.
+// Unknown/empty values are NOT demo (fail-closed) — matches IsDevEnv's posture.
+func IsDemoEnv(appEnv string) bool {
+	return demoEnvs[strings.ToLower(strings.TrimSpace(appEnv))]
+}
+
+// IsDemo reports whether this config is running in the Demo environment.
+func (c *Config) IsDemo() bool { return IsDemoEnv(c.AppEnv) }
+
 type Config struct {
 	AppEnv       string
 	CookieDomain string
-	ServerPort   string
+	// CookieNamePrefix prefixes all five session cookie names (access, refresh,
+	// role, expiry, csrf). Defaults to "malaab_" — Production's existing names —
+	// so Production and unconfigured deployments are byte-for-byte unchanged.
+	// Set COOKIE_NAME_PREFIX=malaab_demo_ on the Demo deployment so Demo cookies
+	// can never be confused with or overwrite Production's malaab_* cookies even
+	// when both share a parent registrable domain (marmajo.com).
+	CookieNamePrefix string
+	ServerPort       string
 	// BookingOTPRequired gates whether the PLAYER booking flow requires an OTP.
 	// MVP default: false (booking works with name + JO phone only, no code).
 	// FAIL-OPEN BY DESIGN — a deliberate, scoped inversion of this stack's usual
@@ -326,7 +353,11 @@ func Load() *Config {
 		// by the API host are readable across sibling subdomains (first-party,
 		// cross-subdomain). No panic — empty is a valid, safe default.
 		CookieDomain: getEnv("COOKIE_DOMAIN", ""),
-		ServerPort:   getEnv("PORT", getEnv("SERVER_PORT", "8080")),
+		// Empty COOKIE_NAME_PREFIX still resolves to "malaab_" — the historical
+		// Production names — never to an empty prefix, so a blank env var cannot
+		// accidentally strip the prefix off Production cookies.
+		CookieNamePrefix: getEnv("COOKIE_NAME_PREFIX", "malaab_"),
+		ServerPort:       getEnv("PORT", getEnv("SERVER_PORT", "8080")),
 		BcryptCost:   bcryptCost,
 		JWT: JWTConfig{
 			Secret:        jwtSecret,
@@ -497,6 +528,80 @@ func getBoolEnvFailClosed(key string, def bool) bool {
 	default:
 		panic(fmt.Sprintf("CONFIG: %s must be \"true\" or \"false\" (got %q)", key, raw))
 	}
+}
+
+// demoCookieNamePrefix and demoCookieDomain are the ONLY values
+// ValidateDemoCookieSafety accepts. Hardcoded (not env-derived) deliberately:
+// the whole point of this check is to catch a Demo deployment whose env vars
+// are missing, still at the Production default, or pointed somewhere else.
+const (
+	demoCookieNamePrefix = "malaab_demo_"
+	demoCookieDomain     = "demo.marmajo.com"
+)
+
+// ValidateDemoCookieSafety enforces that Demo's cookie isolation is actually
+// configured, not left at defaults. Call ONLY when cfg.IsDemo() is true, once
+// at startup, before the router serves any request. It is a fail-closed
+// startup ASSERTION: a Demo deployment with a missing/default cookie prefix
+// or a cookie domain outside the Demo subtree could let a Demo session
+// collide with, or be confused for, a Production session under the shared
+// marmajo.com parent domain — so it must refuse to boot rather than serve
+// traffic in that state.
+func ValidateDemoCookieSafety(cfg *Config) error {
+	if cfg.CookieNamePrefix != demoCookieNamePrefix {
+		return fmt.Errorf("DEMO SAFETY: COOKIE_NAME_PREFIX must be %q in Demo, got %q",
+			demoCookieNamePrefix, cfg.CookieNamePrefix)
+	}
+	// A leading dot is the only safe normalization: it is how a cookie Domain
+	// attribute opts into cross-subdomain sharing (demo.marmajo.com,
+	// api.demo.marmajo.com, admin.demo.marmajo.com) and carries no other
+	// meaning here. Anything else — empty, ".marmajo.com", or any other
+	// domain/subdomain string — is rejected verbatim, not partially matched.
+	domain := strings.TrimPrefix(strings.TrimSpace(cfg.CookieDomain), ".")
+	if domain != demoCookieDomain {
+		return fmt.Errorf("DEMO SAFETY: COOKIE_DOMAIN must be %q or %q in Demo, got %q",
+			demoCookieDomain, "."+demoCookieDomain, cfg.CookieDomain)
+	}
+	return nil
+}
+
+// ValidateDemoSafety enforces the Demo-safe notification posture. Call ONLY
+// when cfg.IsDemo() is true, once at startup, before the router serves any
+// request. It is a fail-closed startup ASSERTION, not a silent override — a
+// misconfigured Demo deployment refuses to boot rather than risk a real
+// Infobip/Twilio/WhatsApp send under an APP_ENV=demo label. activeChannel is
+// the resolved NOTIFICATION_CHANNEL value (from notification.ActiveChannelFromEnv).
+func ValidateDemoSafety(cfg *Config, activeChannel string) error {
+	if activeChannel != "FAKE" {
+		return fmt.Errorf("DEMO SAFETY: NOTIFICATION_CHANNEL must be FAKE in Demo, got %q", activeChannel)
+	}
+	if cfg.Notification.OTPRoute != "FAKE" {
+		return fmt.Errorf("DEMO SAFETY: NOTIFY_OTP_ROUTE must be FAKE in Demo, got %q", cfg.Notification.OTPRoute)
+	}
+	if cfg.Notification.BookingRoute != "log_only" {
+		return fmt.Errorf("DEMO SAFETY: NOTIFY_BOOKING_ROUTE must be log_only in Demo, got %q", cfg.Notification.BookingRoute)
+	}
+	if cfg.Notification.DefaultRoute != "log_only" {
+		return fmt.Errorf("DEMO SAFETY: NOTIFY_DEFAULT_ROUTE must be log_only in Demo, got %q", cfg.Notification.DefaultRoute)
+	}
+	if cfg.PaidWhatsAppEnabled {
+		return fmt.Errorf("DEMO SAFETY: PAID_WHATSAPP_ENABLED must be false in Demo")
+	}
+	if cfg.WhatsAppToSMSFallbackEnabled {
+		return fmt.Errorf("DEMO SAFETY: WHATSAPP_TO_SMS_FALLBACK_ENABLED must be false in Demo")
+	}
+	// Defense in depth: even an unrouted paid credential must not be present in
+	// Demo, so a future routing-policy edit can never accidentally activate one.
+	if cfg.Twilio.Configured() {
+		return fmt.Errorf("DEMO SAFETY: Twilio credentials must not be configured in Demo")
+	}
+	if cfg.Infobip.Configured() {
+		return fmt.Errorf("DEMO SAFETY: Infobip credentials must not be configured in Demo")
+	}
+	if cfg.WhatsApp.Token != "" || cfg.WhatsApp.PhoneID != "" {
+		return fmt.Errorf("DEMO SAFETY: WhatsApp (Meta) credentials must not be configured in Demo")
+	}
+	return nil
 }
 
 func mustGetEnv(key string) string {
