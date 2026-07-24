@@ -29,6 +29,17 @@ const idempotencyHeader = "Idempotency-Key"
 // bookingEndpoint labels the idempotency record's origin (audit/debug only).
 const bookingEndpoint = "POST /api/v1/bookings"
 
+// bookingLeadTime is the minimum gap between "now" and a player booking's
+// start (WO-CROSS-MIDNIGHT Gate 1A, Q6): no lead-time gate existed before
+// this — a booking starting one second in the future used to pass. Fixed,
+// not env-tunable.
+const bookingLeadTime = 15 * time.Minute
+
+// maxBookingDuration is the upper bound on a single player booking's length
+// (WO-CROSS-MIDNIGHT Gate 1A, Q4): previously unbounded above the 1-hour
+// floor. 120 minutes matches the new booking UI's longest duration option.
+const maxBookingDuration = 120 * time.Minute
+
 // bookingFingerprint hashes the SEMANTIC content of a booking request (pitch +
 // time range) so the same idempotency key reused with a different booking is
 // detected (→ 422). total_price is excluded: the server recomputes it, so it is
@@ -131,6 +142,12 @@ func (h *BookingHandler) CreateBooking(c *gin.Context) {
 		})
 		return
 	}
+	if req.StartTime.Before(now.Add(bookingLeadTime)) {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "insufficient_lead_time", "message": "start_time must be at least 15 minutes from now",
+		})
+		return
+	}
 	if !req.EndTime.After(req.StartTime) {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
 			"error": "invalid_time", "message": "end_time must be after start_time",
@@ -140,6 +157,12 @@ func (h *BookingHandler) CreateBooking(c *gin.Context) {
 	if req.EndTime.Sub(req.StartTime) < time.Hour {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{
 			"error": "invalid_duration", "message": "minimum booking duration is 1 hour",
+		})
+		return
+	}
+	if req.EndTime.Sub(req.StartTime) > maxBookingDuration {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "invalid_duration", "message": "maximum booking duration is 120 minutes",
 		})
 		return
 	}

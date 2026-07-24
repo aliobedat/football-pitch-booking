@@ -196,6 +196,116 @@ func TestCreateBooking_ValidationFailsBeforeService(t *testing.T) {
 	}
 }
 
+// WO-CROSS-MIDNIGHT Gate 1A: lead-time gate — a start under 15 minutes from
+// now must be rejected before the service is called; >= 15 minutes passes
+// the handler's own check (a canned service response still returns 201).
+func TestCreateBooking_LeadTimeRejectsUnder15Minutes(t *testing.T) {
+	svc := &fakeBookingService{booking: sampleHandlerBooking()}
+	h := &BookingHandler{service: svc}
+	r := newBookingRouter(h, 3, "player")
+
+	body := validCreateBody()
+	body["start_time"] = time.Now().UTC().Add(14 * time.Minute).Format(time.RFC3339)
+	body["end_time"] = time.Now().UTC().Add(74 * time.Minute).Format(time.RFC3339)
+
+	rec := doJSON(t, r, http.MethodPost, "/bookings", body)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	if svc.createCalls != 0 {
+		t.Errorf("service.Create called %d times, want 0 on lead-time failure", svc.createCalls)
+	}
+}
+
+func TestCreateBooking_LeadTimeAccepts16Minutes(t *testing.T) {
+	svc := &fakeBookingService{booking: sampleHandlerBooking()}
+	h := &BookingHandler{service: svc}
+	r := newBookingRouter(h, 3, "player")
+
+	body := validCreateBody()
+	body["start_time"] = time.Now().UTC().Add(16 * time.Minute).Format(time.RFC3339)
+	body["end_time"] = time.Now().UTC().Add(76 * time.Minute).Format(time.RFC3339)
+
+	rec := doJSON(t, r, http.MethodPost, "/bookings", body)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	if svc.createCalls != 1 {
+		t.Errorf("service.Create called %d times, want 1", svc.createCalls)
+	}
+}
+
+// WO-CROSS-MIDNIGHT Gate 1A: max-duration gate — 121 minutes must be
+// rejected before the service is called; exactly 120 minutes passes the
+// handler's own check.
+func TestCreateBooking_MaxDurationRejects121Minutes(t *testing.T) {
+	svc := &fakeBookingService{booking: sampleHandlerBooking()}
+	h := &BookingHandler{service: svc}
+	r := newBookingRouter(h, 3, "player")
+
+	start := time.Now().UTC().Add(48 * time.Hour)
+	body := validCreateBody()
+	body["start_time"] = start.Format(time.RFC3339)
+	body["end_time"] = start.Add(121 * time.Minute).Format(time.RFC3339)
+
+	rec := doJSON(t, r, http.MethodPost, "/bookings", body)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	if svc.createCalls != 0 {
+		t.Errorf("service.Create called %d times, want 0 on max-duration failure", svc.createCalls)
+	}
+}
+
+func TestCreateBooking_MaxDurationAccepts120Minutes(t *testing.T) {
+	svc := &fakeBookingService{booking: sampleHandlerBooking()}
+	h := &BookingHandler{service: svc}
+	r := newBookingRouter(h, 3, "player")
+
+	start := time.Now().UTC().Add(48 * time.Hour)
+	body := validCreateBody()
+	body["start_time"] = start.Format(time.RFC3339)
+	body["end_time"] = start.Add(120 * time.Minute).Format(time.RFC3339)
+
+	rec := doJSON(t, r, http.MethodPost, "/bookings", body)
+
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	if svc.createCalls != 1 {
+		t.Errorf("service.Create called %d times, want 1", svc.createCalls)
+	}
+}
+
+// WO-CROSS-MIDNIGHT Gate 1A follow-up: the player path rejects the combined
+// scenario (start under 15min lead AND duration over 120min) that the owner
+// manual-booking path (repository-level, see
+// TestManualBooking_OwnerBypassesLeadTimeAndDuration in the repository
+// package) is proven to allow. Same magnitudes on both sides of the
+// role-differentiated comparison.
+func TestCreateBooking_PlayerCannotBookNow2MinFor150Min(t *testing.T) {
+	svc := &fakeBookingService{booking: sampleHandlerBooking()}
+	h := &BookingHandler{service: svc}
+	r := newBookingRouter(h, 3, "player")
+
+	start := time.Now().UTC().Add(2 * time.Minute)
+	body := validCreateBody()
+	body["start_time"] = start.Format(time.RFC3339)
+	body["end_time"] = start.Add(150 * time.Minute).Format(time.RFC3339)
+
+	rec := doJSON(t, r, http.MethodPost, "/bookings", body)
+
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want %d (body: %s)", rec.Code, http.StatusUnprocessableEntity, rec.Body.String())
+	}
+	if svc.createCalls != 0 {
+		t.Errorf("service.Create called %d times, want 0 (start+2min/150min duration must fail both gates)", svc.createCalls)
+	}
+}
+
 func TestCreateBooking_ServiceErrorMapsToConflict(t *testing.T) {
 	svc := &fakeBookingService{createErr: repository.ErrDoubleBooking}
 	h := &BookingHandler{service: svc}
