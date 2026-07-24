@@ -43,11 +43,15 @@ Malaeb is a SaaS for booking sports fields. Two actors:
    owner's venue. Admin operations that link a pitch to a venue derive or
    validate ownership from the venue/pitch rows — never from the admin actor.
 
-## Hard external constraints (WhatsApp Business Platform)
+## Production messaging posture & external constraints
+- Current Production Messaging Posture:
+  - Infobip WhatsApp is the active channel.
+  - Twilio/SMS is inactive legacy code.
+  - SMS fallback is disabled.
+  - WhatsApp OTP is disabled until Meta Authentication-template approval.
+  - Fake/log-only adapters remain available for local development and tests.
 - AUTHENTICATION-category templates (OTP) are restricted to verified / high-tier
-  Meta businesses. A new account may NOT get them approved immediately. Therefore
-  code must NOT assume WhatsApp OTP is available — always support an SMS fallback
-  and a Fake adapter.
+  Meta businesses. A new account may NOT get them approved immediately.
 - The OTP message body is FIXED by Meta. We only control the OTP button type
   (copy-code / one-tap). Do not template free-form OTP body text.
 - Opt-in is mandatory before sending authentication messages. Store an explicit
@@ -119,6 +123,28 @@ production-build verification. Introduced by PR #54.
   public URL (e.g. an owner-provisioning guide with malaebjo.com/venues/{slug}).
 
 ## Merged work log
+2026-07-25 — WO-CROSS-MIDNIGHT SHIPPED to main, Gate 2 owner-cleared on a real
+phone. Backend 4c73149 (Gate 1A): player-path hardening — 15-min lead-time gate
+and 120-min max-duration gate added to CreateBooking; operating-window
+containment (SlotContained) and the GIST EXCLUDE constraint were confirmed
+already cross-midnight-correct with no change; owner/admin paths (CreateBlock,
+CreateManualBooking) intentionally carry NEITHER gate (walk-in-now /
+any-length-block authority, proven by an owner-accepted/player-rejected test
+pair at the same magnitudes). Frontend 8642fa0 (Gate 1B): handoff redesign of
+the booking card — continuous slot timeline grouped by part of day incl. the
+after-midnight group ("فجر <weekday>"), unavailable slots hidden never
+disabled, sticky summary with the cross-midnight note, D3-a live
+previous-session chip ("مستمرة الآن") in the early hours, selectedStart as
+absolute session-axis minutes (>1440 valid). IBM Plex Sans Arabic + hex tokens
+scoped to the card; layout.tsx untouched. D1 dropped (existing close<=open
+TIME convention stands; a 24-hour venue remains unrepresentable under it —
+accepted limitation). D2 = calendar-start attribution accepted as-is, zero
+stats/daily-view query changes.
+STALE-BLOCKER CLEARED: the "migration 035 enum check" pre-merge blocker was
+verified moot this session — سداسي is PRESENT in production pg_enum at
+sortorder 1.5 (between خماسي and سباعي), exactly matching 035's ADD VALUE
+BEFORE placement; 035 was already applied.
+
 2026-07-13 — PR #53 (WO-AUTH-GHOST-LOGIN), merged to main: fixed the
 phantom/ghost authenticated state — a wrong-password login no longer produces a
 logged-in UI; logout remains effective after a refresh; refresh and logout
@@ -134,6 +160,23 @@ dated historical malaebjo.com reference in
 `docs/followups/auth-refresh-replay-wipe.md`.
 
 ## Discipline log
+2026-07-25 — WO-CROSS-MIDNIGHT learnings (gotchas re-encountered):
+- PORT-ZOMBIE, again: a Next dev server survived its shell's termination and
+  kept port 3100 with a STALE baked-in NEXT_PUBLIC_API_URL (localhost) — the
+  page loads but every API call silently targets the wrong host. Same family
+  as the PR #62 port-3000 zombie. It recurred TWICE in one session (including
+  after the final TaskStop teardown). Rule: after stopping a Next dev shell on
+  Windows, always `netstat -ano | findstr :<port>` and `taskkill /F` the
+  survivor before starting a replacement — never trust the shell stop alone.
+- buildDateTime SAME-DAY TRAP: removing the frontend endMs>1440 duration clamp
+  alone was insufficient for cross-midnight — buildDateTime(dateStr,"HH:MM")
+  always constructed the end on the START day, so 23:00+1.5h produced 00:30 on
+  the WRONG date. Fix: model times as absolute minutes from the session day's
+  midnight and construct via Date minute-overflow normalisation
+  (new Date(y,m,d,0,1470) → next day 00:30), which also survives month/year
+  boundaries. Any future clamp removal must trace every downstream consumer of
+  the clamped value, not just delete the guard.
+
 2026-07-12 — Gate 1d-minimal: the WO listed any backend change as out of scope
 with an explicit stop-and-report trigger. CC found a genuine missing
 label-persistence path but implemented the backend change instead of stopping.
