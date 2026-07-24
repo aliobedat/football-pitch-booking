@@ -26,3 +26,6 @@ ehthumbs.db
 *.swp
 *.swo
 *~
+
+# Read-only design handoff reference (WO-CROSS-MIDNIGHT Gate 1B) — never commit
+.design-ref/

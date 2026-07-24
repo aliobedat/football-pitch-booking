@@ -3,11 +3,20 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { CalendarDays, CheckCircle2, Users } from 'lucide-react';
+import { IBM_Plex_Sans_Arabic } from 'next/font/google';
 import axios from 'axios';
 import api from '@/lib/api';
 import { useAuth, type User } from '@/context/AuthContext';
 import FullNameField, { isValidFullName, saveFullName } from '@/components/FullNameField';
 import OtpModal from './OtpModal';
+
+// Handoff design font (WO-CROSS-MIDNIGHT Gate 1B) — scoped to THIS card only.
+// The global Cairo font in layout.tsx is intentionally untouched.
+const plexArabic = IBM_Plex_Sans_Arabic({
+  subsets: ['arabic', 'latin'],
+  weight: ['400', '500', '600', '700'],
+  display: 'swap',
+});
 
 // MVP no-OTP booking flag (mirrors backend BOOKING_OTP_REQUIRED, fail-open):
 // only the exact string "true" requires OTP; unset / anything else → NOT required,
@@ -31,10 +40,13 @@ interface OpenWindow {
   end:   string;
 }
 
-// LocalRange is an OpenWindow projected onto the selected civil day's minute axis
-// (minutes from that day's Amman midnight), clamped to [0, 1440] so the half-hour
-// grid can test containment without any timezone math of its own.
-interface LocalRange {
+// SessionRange is an OpenWindow projected onto the SESSION-day minute axis:
+// minutes from the selected day's local midnight, UN-clamped — end (and, for the
+// after-midnight tail, even start) may exceed 1440. A window that began on the
+// PREVIOUS day (start < 0 on this axis) belongs to the previous session and is
+// excluded here — that is the session-anchoring rule (a 00:30 slot belongs to
+// yesterday's session, surfaced under yesterday's بعد منتصف الليل group).
+interface SessionRange {
   start: number;
   end:   number;
 }
@@ -53,8 +65,8 @@ interface Props {
   // Multi-pitch venue selector (Gate 1c): when >1 option is passed, segmented
   // chips render above the date bar. Selection is controlled by the parent —
   // the availability effect below already refetches on pitchId and clears the
-  // selected slot (setBaseHour(null)); date + صباحاً/مساءً stay sticky because
-  // they live in state the pitch switch never touches.
+  // selected slot; the date stays sticky because it lives in state the pitch
+  // switch never touches.
   pitchOptions?: PitchOption[];
   onPitchChange?: (id: number) => void;
 }
@@ -63,6 +75,19 @@ interface Props {
 
 const AR_DAYS = ['الأحد', 'الاثنين', 'الثلاثاء', 'الأربعاء', 'الخميس', 'الجمعة', 'السبت'];
 const MAX_BOOKING_DAYS = 365;
+
+// Server-enforced lead window (Gate 1A: bookingLeadTime). The UI filters starts
+// inside it so the server's insufficient_lead_time rejection is never provoked.
+const LEAD_MINUTES = 15;
+
+// Time groups per the handoff spec. `from`/`to` are session-axis minutes; the
+// after-midnight group covers everything past 1440 (labeled "فجر <next weekday>").
+const GROUP_DEFS = [
+  { label: 'الصباح',          from: 0,    to: 720 },
+  { label: 'الظهيرة والعصر',  from: 720,  to: 1020 },
+  { label: 'المساء',          from: 1020, to: 1440 },
+  { label: 'بعد منتصف الليل', from: 1440, to: 2880 },
+] as const;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -96,64 +121,69 @@ function parseDateStr(s: string): Date {
   return new Date(y, mo - 1, d);
 }
 
-function minsToTime(mins: number): string {
-  return `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`;
-}
-
-function buildDateTime(dateStr: string, timeStr: string): Date {
+// buildAbs constructs the ABSOLUTE instant for `mins` minutes after dateStr's
+// local midnight. Because JS Date normalises overflowing minute values, a
+// cross-midnight value (e.g. 1500 = 25:00) lands on the CORRECT NEXT calendar
+// day automatically — this replaces the old buildDateTime(dateStr, "HH:MM")
+// which always resolved on dateStr's own day (the Gate 1B-0 trap).
+function buildAbs(dateStr: string, mins: number): Date {
   const [y, mo, d] = dateStr.split('-').map(Number);
-  const [h, m] = timeStr.split(':').map(Number);
-  return new Date(y, mo - 1, d, h, m, 0, 0);
+  return new Date(y, mo - 1, d, 0, mins, 0, 0);
 }
 
-function isSlotBooked(slotMins: number, booked: BookedSlot[], dateStr: string): boolean {
-  const slotStart = buildDateTime(dateStr, minsToTime(slotMins)).getTime();
-  const slotEnd   = slotStart + 30 * 60 * 1000;
-  return booked.some(b => {
-    const bStart = new Date(b.start_time).getTime();
-    const bEnd   = new Date(b.end_time).getTime();
-    return bStart < slotEnd && bEnd > slotStart;
-  });
+// fmt24 renders session-axis minutes as a 24h wall clock, wrapping past-midnight
+// values (1500 → "01:00") per the spec's `minutes % 1440` display rule. The
+// underlying value stays absolute for all math.
+function fmt24(mins: number): string {
+  const m = ((mins % 1440) + 1440) % 1440;
+  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
 }
 
-function rangeOverlapsBookings(
-  startMins: number,
-  endMins:   number,
-  booked:    BookedSlot[],
-  dateStr:   string,
-): boolean {
-  const rangeStart = buildDateTime(dateStr, minsToTime(startMins)).getTime();
-  const rangeEnd   = buildDateTime(dateStr, minsToTime(endMins)).getTime();
-  return booked.some(b => {
-    const bStart = new Date(b.start_time).getTime();
-    const bEnd   = new Date(b.end_time).getTime();
-    return bStart < rangeEnd && bEnd > rangeStart;
-  });
-}
-
-// projectWindowToDay maps an absolute-UTC open window onto the civil day `dayStr`
-// (Amman), returning minutes-from-midnight clamped to [0, 1440], or null if the
-// window does not touch that day. A window that started the day BEFORE clamps its
-// start to 0 (open from midnight); one that ends the day AFTER clamps its end to
-// 1440 (open through midnight) — so the early-hours tail of a cross-midnight
-// window and a window that runs past midnight are both represented correctly on
-// the day's axis. Date strings are YYYY-MM-DD, so lexical comparison is date order.
-function projectWindowToDay(w: OpenWindow, dayStr: string): LocalRange | null {
-  const s = getAmmanParts(new Date(w.start));
-  const e = getAmmanParts(new Date(w.end));
-
-  let start: number;
-  if (s.dateStr < dayStr) start = 0;                       // began before today → from midnight
-  else if (s.dateStr === dayStr) start = s.hours * 60 + s.minutes;
-  else return null;                                        // begins after today
-
-  let end: number;
-  if (e.dateStr > dayStr) end = 24 * 60;                   // ends after today → through midnight
-  else if (e.dateStr === dayStr) end = e.hours * 60 + e.minutes;
-  else return null;                                        // ended before today
-
-  if (end <= start) return null;
+// windowToSessionRange projects an absolute-UTC open window onto dayStr's
+// session axis (minutes from local midnight), UN-clamped. Returns null for a
+// window that began before this day's midnight — that is the previous session's
+// after-midnight tail and must not appear under this day (session anchoring).
+function windowToSessionRange(w: OpenWindow, dayStr: string): SessionRange | null {
+  const base  = buildAbs(dayStr, 0).getTime();
+  const start = Math.round((new Date(w.start).getTime() - base) / 60000);
+  const end   = Math.round((new Date(w.end).getTime()   - base) / 60000);
+  if (start < 0)     return null; // previous session's window
+  if (end <= start)  return null;
   return { start, end };
+}
+
+// overlapsBooked: does the ABSOLUTE range [aStart, aEnd) touch any booked slot?
+// All comparisons are epoch-ms of real Date objects, so cross-midnight ranges
+// need no special casing.
+function overlapsBooked(aStart: number, aEnd: number, booked: BookedSlot[]): boolean {
+  return booked.some(b => {
+    const bStart = new Date(b.start_time).getTime();
+    const bEnd   = new Date(b.end_time).getTime();
+    return bStart < aEnd && bEnd > aStart;
+  });
+}
+
+// availableStartsFor computes the bookable 30-min start marks for one session
+// day: inside a window, room for ≥60 min before window close, not overlapping a
+// booked slot, and not inside the lead window (absolute-time comparison, so the
+// after-midnight tail of today's session filters correctly too).
+function availableStartsFor(
+  dayStr:   string,
+  windows:  SessionRange[],
+  booked:   BookedSlot[],
+  minStartMs: number,
+): number[] {
+  const out: number[] = [];
+  for (const w of windows) {
+    const first = Math.ceil(w.start / 30) * 30;
+    for (let m = first; m <= w.end - 60; m += 30) {
+      const absStart = buildAbs(dayStr, m).getTime();
+      if (absStart < minStartMs) continue;
+      if (overlapsBooked(absStart, absStart + 30 * 60000, booked)) continue;
+      out.push(m);
+    }
+  }
+  return [...new Set(out)].sort((a, b) => a - b);
 }
 
 // Accepts: 07XXXXXXXX | 7XXXXXXXX | +9627XXXXXXXX | 009627XXXXXXXX
@@ -179,18 +209,10 @@ function durationLabel(mins: number): string {
   return `${mins / 60} ساعة`;
 }
 
-// Returns 12-hour display string: 0→"12", 1→"01" … 11→"11", 12→"12", 13→"01" …
-function displayHour(h: number): string {
-  const d = h % 12 === 0 ? 12 : h % 12;
-  return String(d).padStart(2, '0');
-}
-
-// Formats minutes-from-midnight as "02:00 م" / "11:30 ص" etc.
-function formatTime12(totalMins: number): string {
-  const h    = Math.floor(totalMins / 60) % 24;
-  const m    = totalMins % 60;
-  const hr12 = (h === 0 || h === 12) ? 12 : h > 12 ? h - 12 : h;
-  return `${String(hr12).padStart(2, '0')}:${String(m).padStart(2, '0')} ${h < 12 ? 'ص' : 'م'}`;
+// Arabic month-day label ("24 يوليو") with latin digits, per the handoff.
+function monthDayLabel(dateStr: string): string {
+  return new Intl.DateTimeFormat('ar-u-nu-latn', { day: 'numeric', month: 'long' })
+    .format(parseDateStr(dateStr));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -245,37 +267,23 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
   }, []);
 
   // ── Selected date ─────────────────────────────────────────────────────────
-  const [selDayStr,     setSelDayStr]     = useState<string>('');
+  const [selDayStr,      setSelDayStr]      = useState<string>('');
   const [showDatePicker, setShowDatePicker] = useState(false);
 
   useEffect(() => {
     if (serverTodayStr && !selDayStr) setSelDayStr(serverTodayStr);
   }, [serverTodayStr, selDayStr]);
 
-  // ── AM/PM — smart default tied to server time ─────────────────────────────
-  const [amPm, setAmPm] = useState<'am' | 'pm'>('am');
-
-  useEffect(() => {
-    if (!serverNow || !selDayStr || !serverTodayStr) return;
-    if (selDayStr === serverTodayStr) {
-      const { hours } = getAmmanParts(serverNow);
-      setAmPm(hours < 12 ? 'am' : 'pm');
-    } else {
-      setAmPm('am');
-    }
-  }, [selDayStr, serverNow, serverTodayStr]);
-
-  // ── Time selection ────────────────────────────────────────────────────────
-  const [baseHour, setBaseHour] = useState<number | null>(null);
-  const [startMod, setStartMod] = useState<0 | 30>(0);
-  const [duration, setDuration] = useState<60 | 90 | 120>(60);
+  // ── Time selection (handoff state model) ──────────────────────────────────
+  // selectedStart = ABSOLUTE minutes from the selected session-day's midnight;
+  // exceeds 1440 for after-midnight slots. Replaces the old baseHour+startMod.
+  const [selectedStart, setSelectedStart] = useState<number | null>(null);
+  const [duration,      setDuration]      = useState<60 | 90 | 120>(60);
 
   // ── Availability data ─────────────────────────────────────────────────────
   const [booked,       setBooked]       = useState<BookedSlot[]>([]);
   // Operating hours for the selected day. hasSchedule=false → the pitch is
-  // unconfigured and OPEN 24/7 (the server's fail-open decision); openWindows is
-  // then irrelevant. hasSchedule=true with no covering window for a slot → CLOSED
-  // (rendered distinctly from "booked").
+  // unconfigured and OPEN 24/7 (the server's fail-open decision).
   const [openWindows,  setOpenWindows]  = useState<OpenWindow[]>([]);
   const [hasSchedule,  setHasSchedule]  = useState(false);
   const [loadingSlots, setLoadingSlots] = useState(false);
@@ -286,7 +294,7 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
   useEffect(() => {
     if (!selDayStr) return;
     setLoadingSlots(true);
-    setBaseHour(null);
+    setSelectedStart(null);
     setApiError(null);
     api
       .get(`/pitches/${pitchId}/availability?date=${selDayStr}`)
@@ -299,26 +307,62 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
       .finally(() => setLoadingSlots(false));
   }, [pitchId, selDayStr]);
 
-  // ── Open-hours projection for the selected day ─────────────────────────────
-  // null = open 24/7 (unconfigured pitch); otherwise the day's covering ranges.
-  const openRanges = useMemo<LocalRange[] | null>(() => {
-    if (!hasSchedule) return null;
+  // ── Session windows for the selected day (UN-clamped, session-anchored) ───
+  // Unconfigured (24/7) → one full civil-day window [0, 1440).
+  const sessionWindows = useMemo<SessionRange[]>(() => {
+    if (!hasSchedule) return [{ start: 0, end: 1440 }];
     return openWindows
-      .map(w => projectWindowToDay(w, selDayStr))
-      .filter((r): r is LocalRange => r !== null);
+      .map(w => windowToSessionRange(w, selDayStr))
+      .filter((r): r is SessionRange => r !== null);
   }, [openWindows, hasSchedule, selDayStr]);
 
-  // ── Server "now" in minutes (Amman time, today only) ──────────────────────
-  const nowMins = useMemo(() => {
-    if (!serverNow || !selDayStr || selDayStr !== serverTodayStr) return -1;
-    const { hours, minutes } = getAmmanParts(serverNow);
-    return hours * 60 + minutes;
-  }, [serverNow, selDayStr, serverTodayStr]);
+  // Earliest bookable absolute instant (server lead window).
+  const minStartMs = serverNow ? serverNow.getTime() + LEAD_MINUTES * 60000 : 0;
 
-  // ── 7-day rolling strip ───────────────────────────────────────────────────
+  // ── Available 30-min start marks for the selected session day ─────────────
+  const starts = useMemo(
+    () => selDayStr ? availableStartsFor(selDayStr, sessionWindows, booked, minStartMs) : [],
+    [selDayStr, sessionWindows, booked, minStartMs],
+  );
+
+  // ── D3-a: still-live previous session ─────────────────────────────────────
+  // After midnight, while YESTERDAY's cross-midnight session is still open, a
+  // player at 00:30 must be able to book 01:00 — but those slots belong to the
+  // previous session day (session anchoring), whose chip the strip would not
+  // otherwise show. When the early hours + a live tail are detected, prepend a
+  // special "yesterday, session ongoing" chip to the strip.
+  const [prevSessionLive, setPrevSessionLive] = useState(false);
+  useEffect(() => {
+    if (!serverNow || !serverTodayStr) { setPrevSessionLive(false); return; }
+    const { hours } = getAmmanParts(serverNow);
+    if (hours >= 6) { setPrevSessionLive(false); return; } // only relevant in the early hours
+    const yStr = addDays(serverTodayStr, -1);
+    const cutoff = serverNow.getTime() + LEAD_MINUTES * 60000;
+    api
+      .get(`/pitches/${pitchId}/availability?date=${yStr}`, { _silent: true })
+      .then(r => {
+        const yWindows: SessionRange[] = (r.data.has_schedule
+          ? (r.data.open_windows ?? [])
+              .map((w: OpenWindow) => windowToSessionRange(w, yStr))
+              .filter((x: SessionRange | null): x is SessionRange => x !== null)
+          : []); // unconfigured 24/7 has no after-midnight tail — nothing to surface
+        const tail = availableStartsFor(yStr, yWindows, r.data.booked_slots ?? [], cutoff)
+          .filter(m => m >= 1440);
+        setPrevSessionLive(tail.length > 0);
+      })
+      .catch(() => setPrevSessionLive(false));
+  }, [pitchId, serverNow, serverTodayStr]);
+
+  // ── 7-day rolling strip (+ optional live-previous-session chip) ───────────
   const sevenDays = useMemo(
     () => serverTodayStr ? Array.from({ length: 7 }, (_, i) => addDays(serverTodayStr, i)) : [],
     [serverTodayStr],
+  );
+  const stripDays = useMemo(
+    () => (prevSessionLive && serverTodayStr)
+      ? [addDays(serverTodayStr, -1), ...sevenDays]
+      : sevenDays,
+    [prevSessionLive, serverTodayStr, sevenDays],
   );
 
   const maxDateStr = useMemo(
@@ -326,88 +370,34 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
     [serverTodayStr],
   );
 
-  // ── Grid hours for selected half ──────────────────────────────────────────
-  const gridHours = amPm === 'am'
-    ? [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
-    : [12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23];
+  // ── Duration validity + derived values ────────────────────────────────────
 
-  // ── Slot availability predicates ──────────────────────────────────────────
-
-  function slotIsPast(mins: number): boolean {
-    return nowMins >= 0 && mins <= nowMins;
+  // A duration fits iff the whole [start, start+dur) lies inside ONE session
+  // window (containment — mirrors the server gate) and overlaps no booked slot.
+  function validDur(start: number, dur: number): boolean {
+    if (!sessionWindows.some(w => w.start <= start && start + dur <= w.end)) return false;
+    const a = buildAbs(selDayStr, start).getTime();
+    return !overlapsBooked(a, buildAbs(selDayStr, start + dur).getTime(), booked);
   }
 
-  function slotIsBooked(mins: number): boolean {
-    return isSlotBooked(mins, booked, selDayStr);
+  function pickStart(m: number) {
+    setApiError(null);
+    if (selectedStart === m) { setSelectedStart(null); return; }
+    setSelectedStart(m);
+    // Auto-fallback 60→90→120 when the current duration no longer fits.
+    if (!validDur(m, duration)) {
+      const fit = ([60, 90, 120] as const).find(d => validDur(m, d)) ?? 60;
+      setDuration(fit);
+    }
   }
 
-  // rangeIsOpen: is [startMins, endMins] fully inside a single open window?
-  // (containment, not overlap — a range straddling a split-shift gap is closed.)
-  // null openRanges = open 24/7.
-  function rangeIsOpen(startMins: number, endMins: number): boolean {
-    if (openRanges === null) return true;
-    return openRanges.some(r => r.start <= startMins && endMins <= r.end);
-  }
-
-  // A 30-min slot is closed when it is not contained by any open window.
-  function slotIsClosed(mins: number): boolean {
-    return !rangeIsOpen(mins, mins + 30);
-  }
-
-  function slotUnavailable(mins: number): boolean {
-    return slotIsPast(mins) || slotIsBooked(mins) || slotIsClosed(mins);
-  }
-
-  function isHourDisabled(h: number): boolean {
-    return slotUnavailable(h * 60) && slotUnavailable(h * 60 + 30);
-  }
-
-  function isHourFullyBooked(h: number): boolean {
-    return slotIsBooked(h * 60) && slotIsBooked(h * 60 + 30);
-  }
-
-  function isHourFullyPast(h: number): boolean {
-    return nowMins >= 0 && h * 60 + 30 <= nowMins;
-  }
-
-  // Both half-slots of the hour fall outside operating hours (and aren't booked) →
-  // render as "مغلق" (closed), visually distinct from "محجوز" (booked).
-  function isHourFullyClosed(h: number): boolean {
-    return slotIsClosed(h * 60) && slotIsClosed(h * 60 + 30)
-      && !slotIsBooked(h * 60) && !slotIsBooked(h * 60 + 30);
-  }
-
-  // ── Fine-tuning validation ────────────────────────────────────────────────
-
-  function isModDisabled(mod: 0 | 30): boolean {
-    if (baseHour === null) return true;
-    return slotUnavailable(baseHour * 60 + mod);
-  }
-
-  function isDurationDisabled(d: 60 | 90 | 120): boolean {
-    if (baseHour === null) return true;
-    const startMs = baseHour * 60 + startMod;
-    const endMs   = startMs + d;
-    if (endMs > 24 * 60) return true;
-    if (rangeOverlapsBookings(startMs, endMs, booked, selDayStr)) return true;
-    // The whole range must lie inside one open window (out-of-hours → disabled).
-    return !rangeIsOpen(startMs, endMs);
-  }
-
-  // ── Empty state check for current AM/PM half ──────────────────────────────
-  const hasAvailableHours = gridHours.some(h => !isHourDisabled(h));
-
-  // The pitch is configured but has no open window covering ANY part of the
-  // selected day → it is closed all day (distinct from "fully booked").
-  const dayClosed = openRanges !== null && openRanges.length === 0;
-
-  // ── Derived booking values ────────────────────────────────────────────────
-  const actualStartMins = baseHour !== null ? baseHour * 60 + startMod : -1;
-  const actualEndMins   = actualStartMins >= 0 ? actualStartMins + duration : -1;
-  const actualStartStr  = actualStartMins >= 0 ? minsToTime(actualStartMins) : null;
-  const actualEndStr    = actualEndMins   >= 0 ? minsToTime(actualEndMins)   : null;
-  const total           = actualStartMins >= 0
-    ? Math.round((duration / 60) * pricePerHour * 100) / 100 : 0;
+  const started        = selectedStart !== null;
+  const endMins        = started ? selectedStart! + duration : 0;
+  const crossesMidnight = started && selectedStart! < 1440 && endMins > 1440;
+  const startsAfterMid  = started && selectedStart! >= 1440;
+  const total          = started ? Math.round((duration / 60) * pricePerHour * 100) / 100 : 0;
+  const durationOK     = started && validDur(selectedStart!, duration);
+  const nextDayName    = selDayStr ? AR_DAYS[parseDateStr(addDays(selDayStr, 1)).getDay()] : '';
 
   // A returning user's stored name satisfies validity without re-entry; a guest
   // (or a new account with no name yet) must supply a valid guestName.
@@ -418,9 +408,8 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
   const guestPhoneOK = !isGuest || normalizePhone(guestPhone).e164 !== null;
 
   const canSubmit =
-    baseHour !== null &&
-    !isModDisabled(startMod) &&
-    !isDurationDisabled(duration) &&
+    started &&
+    durationOK &&
     nameOK &&
     guestNameOK &&
     guestPhoneOK &&
@@ -430,35 +419,13 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
 
   function handleDaySelect(dayStr: string) {
     setSelDayStr(dayStr);
-    setBaseHour(null);
+    setSelectedStart(null);
     setApiError(null);
     setShowDatePicker(false);
   }
 
-  function handleAmPm(val: 'am' | 'pm') {
-    setAmPm(val);
-    setBaseHour(null);
-    setApiError(null);
-  }
-
-  function handleHourClick(h: number) {
-    if (isHourDisabled(h)) return;
-    setApiError(null);
-    if (baseHour === h) { setBaseHour(null); return; }
-    setBaseHour(h);
-    const newMod = (!slotUnavailable(h * 60) ? 0 : 30) as 0 | 30;
-    setStartMod(newMod);
-    setDuration(60);
-  }
-
-  function handleModClick(mod: 0 | 30) {
-    if (isModDisabled(mod)) return;
-    setStartMod(mod);
-    setApiError(null);
-  }
-
   function handleDurationClick(d: 60 | 90 | 120) {
-    if (isDurationDisabled(d)) return;
+    if (selectedStart === null || !validDur(selectedStart, d)) return;
     setDuration(d);
     setApiError(null);
   }
@@ -483,17 +450,24 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
         ? crypto.randomUUID()
         : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 
+    // Absolute instants for the selected range. buildAbs normalises minute
+    // overflow, so a cross-midnight end (e.g. 1470 = 00:30) constructs on the
+    // CORRECT NEXT calendar day — the Gate 1B buildDateTime fix.
+    const absStart = buildAbs(selDayStr, selectedStart!);
+    const absEnd   = buildAbs(selDayStr, selectedStart! + duration);
+
     // Fresh availability check — catches the race where another player booked
-    // the same slot while the OTP window was open (or between submit and POST).
+    // the same slot between selection and POST. Display-advisory only: the
+    // server's GIST EXCLUDE constraint remains the sole conflict referee.
     try {
       const avail = await api.get(`/pitches/${pitchId}/availability?date=${selDayStr}`, { _silent: true });
       const freshBooked: BookedSlot[] = avail.data.booked_slots ?? [];
       setBooked(freshBooked);
       setOpenWindows(avail.data.open_windows ?? []);
       setHasSchedule(!!avail.data.has_schedule);
-      if (rangeOverlapsBookings(actualStartMins, actualEndMins, freshBooked, selDayStr)) {
+      if (overlapsBooked(absStart.getTime(), absEnd.getTime(), freshBooked)) {
         setApiError('هذا الموعد لم يعد متاحاً');
-        setBaseHour(null);
+        setSelectedStart(null);
         setSubmitting(false);
         inFlightRef.current = false;
         return;
@@ -506,8 +480,8 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
     try {
       await api.post('/bookings', {
         pitch_id:    pitchId,
-        start_time:  buildDateTime(selDayStr, actualStartStr!).toISOString(),
-        end_time:    buildDateTime(selDayStr, actualEndStr!).toISOString(),
+        start_time:  absStart.toISOString(),
+        end_time:    absEnd.toISOString(),
         total_price: total,
       }, {
         _silent: true,
@@ -520,10 +494,10 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
         const code = err.response?.data?.error as string | undefined;
         const msg  = err.response?.data?.message as string | undefined;
         if (err.response?.status === 409 || code === 'slot_unavailable') {
-          // GIST EXCLUDE fired — slot was taken during the OTP window.
+          // GIST EXCLUDE fired — slot was taken concurrently.
           // Stay on screen, clear the selected slot, re-fetch the grid.
           setApiError('هذا الموعد لم يعد متاحاً');
-          setBaseHour(null);
+          setSelectedStart(null);
           api.get(`/pitches/${pitchId}/availability?date=${selDayStr}`)
             .then(r => {
               setBooked(r.data.booked_slots ?? []);
@@ -536,7 +510,7 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
         else if (err.response?.status === 401)
           // _silent suppresses the interceptor's redirect; surface here instead.
           setApiError('حدث خطأ، يرجى المحاولة مرة أخرى');
-        else if (code === 'invalid_time' || code === 'invalid_duration')
+        else if (code === 'invalid_time' || code === 'invalid_duration' || code === 'insufficient_lead_time')
           setApiError(msg ?? 'الوقت المحدد غير صالح');
         else
           setApiError(msg ?? 'حدث خطأ ما، يرجى المحاولة مرة أخرى');
@@ -580,7 +554,7 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
   // ── Submit ────────────────────────────────────────────────────────────────
 
   async function handleSubmit() {
-    if (!canSubmit || !actualStartStr || !actualEndStr) return;
+    if (!canSubmit) return;
     // Re-entry guard only — do NOT acquire the ref here. createBooking is the
     // SOLE acquirer/releaser (it sets true on entry, resets in its finally). If
     // handleSubmit set it true, the delegated createBooking call below would see
@@ -662,590 +636,445 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
 
   if (success) {
     return (
-      <div className="rounded-2xl bg-[#141715] border border-white/[0.07] p-8 flex flex-col items-center gap-5 text-center">
-        <div className="w-14 h-14 rounded-full bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
-          <CheckCircle2 size={28} className="text-emerald-500" aria-hidden />
+      <div className={`${plexArabic.className} rounded-2xl bg-[#0a0c0b] border border-[#1a1f1c] p-8 flex flex-col items-center gap-5 text-center`}>
+        <div className="w-14 h-14 rounded-full bg-[#124631]/40 border border-[#2fdc8f]/25 flex items-center justify-center">
+          <CheckCircle2 size={28} className="text-[#2fdc8f]" aria-hidden />
         </div>
         <div>
-          <h3 className="text-[18px] font-bold text-[#f0efe8] mb-1.5">تم الحجز بنجاح!</h3>
-          <p className="text-[12px] text-white/35">جاري التحويل إلى صفحة حجوزاتك...</p>
+          <h3 className="text-[18px] font-bold text-[#f2f5f3] mb-1.5">تم الحجز بنجاح!</h3>
+          <p className="text-[12px] text-[#8a938e]">جاري التحويل إلى صفحة حجوزاتك...</p>
         </div>
-        <div className="w-5 h-5 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
+        <div className="w-5 h-5 rounded-full border-2 border-[#2fdc8f] border-t-transparent animate-spin" />
       </div>
     );
   }
-
-  // ── Shared option-button style factory ────────────────────────────────────
-
-  const optionBtn = (selected: boolean, disabled: boolean, extra = '') =>
-    [
-      'rounded-xl border transition-all duration-150 font-bold select-none',
-      'flex items-center justify-center',
-      selected
-        ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
-        : disabled
-          ? 'bg-white/[0.01] border-white/[0.03] text-white/15 cursor-not-allowed opacity-40'
-          : [
-              'bg-white/[0.04] border-white/[0.08] text-white/50 cursor-pointer',
-              'hover:bg-emerald-500/10 hover:border-emerald-500/25 hover:text-emerald-300',
-            ].join(' '),
-      extra,
-    ].join(' ');
 
   // ── Loading screen (waiting for server time) ──────────────────────────────
 
   if (!serverTodayStr || !selDayStr) {
     return (
-      <div className="rounded-2xl bg-[#141715] border border-white/[0.07] p-8 flex items-center justify-center h-44">
-        <div className="w-5 h-5 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
+      <div className={`${plexArabic.className} rounded-2xl bg-[#0a0c0b] border border-[#1a1f1c] p-8 flex items-center justify-center h-44`}>
+        <div className="w-5 h-5 rounded-full border-2 border-[#2fdc8f] border-t-transparent animate-spin" />
       </div>
     );
   }
+
+  // ── Grouped slots for render ──────────────────────────────────────────────
+  const groups = GROUP_DEFS
+    .map(g => ({
+      ...g,
+      sub: g.from >= 1440 ? `فجر ${nextDayName}` : null,
+      slots: starts.filter(m => m >= g.from && m < g.to),
+    }))
+    .filter(g => g.slots.length > 0);
 
   // ── Main render ───────────────────────────────────────────────────────────
 
   return (
     <>
-    <div className="rounded-2xl bg-[#141715] border border-white/[0.07] overflow-hidden">
+    <div dir="rtl" className={`${plexArabic.className} rounded-2xl bg-[#0a0c0b] border border-[#1a1f1c] overflow-hidden max-w-[430px] mx-auto w-full relative`}>
 
       {/* ── Header ── */}
-      <div className="px-5 pt-5 pb-4 border-b border-white/[0.05]">
-        <p className="text-[10px] font-bold tracking-widest text-emerald-500 uppercase mb-1.5">
-          احجز الملعب
-        </p>
-        <h2 className="text-[20px] font-bold text-[#f0efe8] tracking-tight leading-snug">
-          اختر الموعد المناسب
-        </h2>
-      </div>
+      <header className="px-5 pt-[22px] pb-3.5 border-b border-[#1a1f1c] flex flex-col gap-1">
+        <span className="text-[12px] font-semibold text-[#2fdc8f] tracking-[.5px]">احجز الملعب</span>
+        <h2 className="text-[22px] font-bold text-[#f2f5f3] leading-snug m-0">اختر الموعد المناسب</h2>
+      </header>
 
-      <div className="px-5 py-5 flex flex-col gap-5">
-
-        {/* ── Pitch selector — multi-pitch venues only (Gate 1c) ── */}
-        {pitchOptions && pitchOptions.length > 1 && onPitchChange && (
-          <div>
-            <p className="flex items-center gap-1.5 text-[10px] font-bold text-white/30 tracking-widest uppercase mb-3">
-              <Users size={11} className="text-emerald-500" aria-hidden />
-              الملعب
-            </p>
-            <div
-              className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-              role="group"
-              aria-label="اختيار الملعب"
-            >
-              {pitchOptions.map(opt => {
-                const selected = opt.id === pitchId;
-                return (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    onClick={() => { if (!selected) onPitchChange(opt.id); }}
-                    aria-pressed={selected}
-                    className={optionBtn(selected, false, 'flex-col gap-0.5 px-4 py-2.5 min-w-[88px] flex-shrink-0')}
-                  >
-                    <span className="text-[12px] leading-tight whitespace-nowrap">{opt.label}</span>
-                    {opt.subline && (
-                      <span className={`text-[9px] font-semibold whitespace-nowrap ${selected ? 'text-emerald-300/70' : 'text-white/30'}`}>
-                        {opt.subline}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* ── 7-day rolling strip + date picker ── */}
-        <div>
-          <div className="flex items-center justify-between mb-3">
-            <p className="flex items-center gap-1.5 text-[10px] font-bold text-white/30 tracking-widest uppercase">
-              <CalendarDays size={11} className="text-emerald-500" aria-hidden />
-              التاريخ
-            </p>
-            <button
-              type="button"
-              onClick={() => setShowDatePicker(v => !v)}
-              aria-expanded={showDatePicker}
-              className="flex items-center gap-1 text-[10px] text-white/30 hover:text-emerald-400 transition-colors duration-150"
-            >
-              <CalendarDays size={12} />
-              <span>تاريخ آخر</span>
-            </button>
-          </div>
-
-          {/* Horizontally scrollable 7-day strip */}
-          <div className="flex gap-2 overflow-x-auto pt-3 pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-            {sevenDays.map(dayStr => {
-              const date      = parseDateStr(dayStr);
-              const dow       = date.getDay();
-              const dd        = date.getDate();
-              const isSelected = selDayStr === dayStr;
-              const isToday    = dayStr === serverTodayStr;
-              const isTomorrow = dayStr === addDays(serverTodayStr, 1);
-
+      {/* ── Pitch selector — multi-pitch venues only (Gate 1c) ── */}
+      {pitchOptions && pitchOptions.length > 1 && onPitchChange && (
+        <div className="px-5 pt-4">
+          <p className="flex items-center gap-1.5 text-[12px] font-semibold text-[#8a938e] mb-2.5">
+            <Users size={11} className="text-[#2fdc8f]" aria-hidden />
+            الملعب
+          </p>
+          <div
+            className="flex gap-2 overflow-x-auto pb-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+            role="group"
+            aria-label="اختيار الملعب"
+          >
+            {pitchOptions.map(opt => {
+              const selected = opt.id === pitchId;
               return (
                 <button
-                  key={dayStr}
+                  key={opt.id}
                   type="button"
-                  onClick={() => handleDaySelect(dayStr)}
-                  aria-pressed={isSelected}
+                  onClick={() => { if (!selected) onPitchChange(opt.id); }}
+                  aria-pressed={selected}
                   className={[
-                    'relative flex-shrink-0 flex flex-col items-center gap-1',
-                    'rounded-xl border px-3 py-2.5 min-w-[56px]',
-                    'transition-all duration-150 select-none',
-                    isSelected
-                      ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
-                      : 'bg-white/[0.03] border-white/[0.07] text-white/50 hover:bg-white/[0.06] hover:border-white/[0.14]',
+                    'flex-shrink-0 flex flex-col items-center gap-0.5 px-4 py-2.5 min-w-[88px]',
+                    'rounded-[14px] border-[1.5px] transition-all duration-150 select-none',
+                    selected
+                      ? 'bg-[#0f2a1e] border-[#2fdc8f] text-[#eafff4]'
+                      : 'bg-[#141715] border-[#212823] text-[#aab3ad] cursor-pointer',
                   ].join(' ')}
                 >
-                  {(isToday || isTomorrow) && (
-                    <span className={[
-                      'absolute -top-2.5 left-1/2 -translate-x-1/2',
-                      'px-1.5 py-px rounded-full text-[8px] font-bold whitespace-nowrap',
-                      isSelected ? 'bg-emerald-500 text-white' : 'bg-white/10 text-white/50',
-                    ].join(' ')}>
-                      {isToday ? 'اليوم' : 'غداً'}
+                  <span className="text-[12px] leading-tight whitespace-nowrap font-semibold">{opt.label}</span>
+                  {opt.subline && (
+                    <span className={`text-[9px] font-semibold whitespace-nowrap ${selected ? 'text-[#5ceaa8]' : 'text-[#8a938e]'}`}>
+                      {opt.subline}
                     </span>
                   )}
-                  <span className="text-[9px] font-bold tracking-wide">{AR_DAYS[dow]}</span>
-                  <span className="text-[18px] font-bold leading-none font-mono">{dd}</span>
                 </button>
               );
             })}
           </div>
-
-          {/* Expandable date picker for dates beyond the 7-day strip */}
-          <div className={[
-            'overflow-hidden transition-all duration-300 ease-in-out',
-            showDatePicker ? 'max-h-24 opacity-100 mt-2' : 'max-h-0 opacity-0',
-          ].join(' ')}>
-            <input
-              type="date"
-              value={selDayStr}
-              min={serverTodayStr}
-              max={maxDateStr}
-              onChange={e => { if (e.target.value) handleDaySelect(e.target.value); }}
-              className={[
-                'w-full rounded-xl border border-white/[0.09] px-4 py-2.5',
-                'bg-[#0d0f0e] text-[13px] text-[#f0efe8]',
-                'hover:border-white/[0.18] focus:outline-none',
-                'focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/[0.12]',
-                'transition-all duration-150 [color-scheme:dark]',
-              ].join(' ')}
-            />
-          </div>
-
-          {/* Selected date badge when outside the 7-day strip */}
-          {!sevenDays.includes(selDayStr) && (
-            <div className="mt-2 px-3 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-[11px] text-emerald-400 text-center">
-              {parseDateStr(selDayStr).toLocaleDateString('ar-JO', {
-                weekday: 'long',
-                year:    'numeric',
-                month:   'long',
-                day:     'numeric',
-              })}
-            </div>
-          )}
         </div>
+      )}
 
-        {loadingSlots ? (
-          <div className="h-44 flex items-center justify-center">
-            <div className="w-5 h-5 rounded-full border-2 border-emerald-500 border-t-transparent animate-spin" />
-          </div>
-        ) : (
-          <>
-            {/* ── AM / PM Toggle ── */}
-            <div>
-              <p className="text-[10px] font-bold text-white/30 tracking-widest uppercase mb-3">
-                الفترة
-              </p>
-              <div className="flex rounded-xl border border-white/[0.08] bg-[#0d0f0e] p-1 gap-1">
-                {(['am', 'pm'] as const).map(val => (
-                  <button
-                    key={val}
-                    type="button"
-                    onClick={() => handleAmPm(val)}
-                    className={[
-                      'flex-1 py-2.5 rounded-lg text-[13px] font-bold tracking-wide',
-                      'transition-all duration-150 border',
-                      amPm === val
-                        ? 'bg-emerald-500/20 border-emerald-500/30 text-emerald-300'
-                        : 'border-transparent text-white/35 hover:text-white/60 hover:bg-white/[0.04]',
-                    ].join(' ')}
-                  >
-                    {val === 'am' ? 'صباحاً' : 'مساءً'}
-                  </button>
-                ))}
-              </div>
-            </div>
+      {/* ── Date row ── */}
+      <div className="px-5 pt-4 pb-2 flex items-center justify-between">
+        <span className="text-[12px] font-semibold text-[#8a938e] whitespace-nowrap">التاريخ</span>
+        <div className="flex items-center gap-3">
+          <span className="text-[11px] text-[#5c655f] whitespace-nowrap">
+            {monthDayLabel(sevenDays[0])} — {monthDayLabel(sevenDays[6])}
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowDatePicker(v => !v)}
+            aria-expanded={showDatePicker}
+            className="flex items-center gap-1 text-[11px] text-[#5c655f] hover:text-[#2fdc8f] transition-colors duration-150"
+          >
+            <CalendarDays size={12} />
+          </button>
+        </div>
+      </div>
 
-            {/* ── 12-Hour Grid or Empty State ── */}
-            {dayClosed ? (
-              <div className="flex flex-col items-center gap-3 py-8 text-center">
-                <div className="w-10 h-10 rounded-full bg-white/[0.04] border border-white/[0.07] flex items-center justify-center [background-image:repeating-linear-gradient(45deg,transparent,transparent_4px,rgba(255,255,255,0.03)_4px,rgba(255,255,255,0.03)_8px)]">
-                  <CalendarDays size={18} className="text-white/20" aria-hidden />
-                </div>
-                <div>
-                  <p className="text-[13px] font-bold text-white/40 mb-1">الملعب مغلق هذا اليوم</p>
-                  <p className="text-[11px] text-white/20">اختر يوماً آخر لعرض المواعيد المتاحة</p>
-                </div>
-              </div>
-            ) : !hasAvailableHours ? (
-              <div className="flex flex-col items-center gap-3 py-8 text-center">
-                <div className="w-10 h-10 rounded-full bg-white/[0.04] border border-white/[0.07] flex items-center justify-center">
-                  <CalendarDays size={18} className="text-white/20" aria-hidden />
-                </div>
-                <div>
-                  <p className="text-[13px] font-bold text-white/40 mb-1">لا مواعيد متاحة لهذا اليوم</p>
-                  <p className="text-[11px] text-white/20">
-                    {amPm === 'am' ? 'جرب فترة المساء أو اختر يوماً آخر' : 'جرب فترة الصباح أو اختر يوماً آخر'}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleAmPm(amPm === 'am' ? 'pm' : 'am')}
-                  className="px-4 py-2 rounded-xl text-[11px] font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 hover:bg-emerald-500/20 transition-all duration-150"
-                >
-                  {amPm === 'am' ? 'تبديل إلى المساء' : 'تبديل إلى الصباح'}
-                </button>
-              </div>
-            ) : (
-              <div>
-                <p className="text-[10px] font-bold text-white/30 tracking-widest uppercase mb-3">
-                  الساعة
-                </p>
-                <div role="group" aria-label="اختر الساعة" className="grid grid-cols-4 gap-2">
-                  {gridHours.map(h => {
-                    const fullyPast     = isHourFullyPast(h);
-                    const fullyBooked   = isHourFullyBooked(h);
-                    const fullyClosed   = isHourFullyClosed(h);
-                    const disabled      = isHourDisabled(h);
-                    const selected      = baseHour === h;
-                    const partialBooked = !fullyBooked && (slotIsBooked(h * 60) || slotIsBooked(h * 60 + 30));
+      {/* ── Date strip ── */}
+      <div className="flex gap-2 overflow-x-auto px-5 pt-2.5 pb-3.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        {stripDays.map(dayStr => {
+          const date       = parseDateStr(dayStr);
+          const isSelected = selDayStr === dayStr;
+          const isToday    = dayStr === serverTodayStr;
+          const isTomorrow = dayStr === addDays(serverTodayStr, 1);
+          const isPrevLive = prevSessionLive && dayStr === addDays(serverTodayStr, -1);
+          const badge = isPrevLive ? 'مستمرة الآن' : isToday ? 'اليوم' : isTomorrow ? 'غداً' : null;
 
-                    // Strict 12-hour mapping — never shows raw 24-hr values
-                    // 0→12, 1-11→01-11, 12→12, 13-23→01-11
-                    const hr12  = (h === 0 || h === 12) ? 12 : h > 12 ? h - 12 : h;
-                    const label = String(hr12).padStart(2, '0') + ':00';
-
-                    const edgeNote = h === 0 ? ' منتصف الليل' : h === 12 ? ' الظهر' : '';
-
-                    return (
-                      <button
-                        key={h}
-                        type="button"
-                        onClick={() => handleHourClick(h)}
-                        disabled={disabled}
-                        aria-pressed={selected}
-                        aria-label={label + edgeNote}
-                        title={
-                          fullyBooked ? 'محجوز'
-                          : fullyClosed ? 'خارج ساعات العمل'
-                          : fullyPast  ? 'انقضى الوقت'
-                          : disabled   ? 'لا توجد أوقات متاحة في هذه الساعة'
-                          : undefined
-                        }
-                        className={[
-                          'h-14 rounded-xl border transition-all duration-150 select-none',
-                          'flex flex-col items-center justify-center gap-0.5',
-                          fullyPast
-                            ? 'opacity-30 pointer-events-none bg-white/[0.02] border-white/[0.04] text-white/20'
-                            : fullyBooked
-                              ? 'bg-red-950/40 text-red-400 border-red-800/50 cursor-not-allowed'
-                              : fullyClosed
-                                ? 'bg-white/[0.015] border-white/[0.05] text-white/20 cursor-not-allowed [background-image:repeating-linear-gradient(45deg,transparent,transparent_5px,rgba(255,255,255,0.025)_5px,rgba(255,255,255,0.025)_10px)]'
-                                : selected
-                                  ? 'bg-emerald-500/25 border-emerald-400/60 text-emerald-300 shadow-[0_0_14px_rgba(52,211,153,0.15)]'
-                                  : disabled
-                                    ? 'bg-white/[0.01] border-white/[0.03] text-white/10 cursor-not-allowed'
-                                    : [
-                                        'bg-white/[0.03] border-white/[0.07] text-white/55 cursor-pointer',
-                                        'hover:bg-emerald-500/10 hover:border-emerald-500/30 hover:text-emerald-300',
-                                        partialBooked ? 'border-dashed border-white/[0.12]' : '',
-                                      ].join(' '),
-                        ].join(' ')}
-                      >
-                        {/* Single inline string — hour and :00 are never split across elements */}
-                        <span className="text-[14px] font-mono font-bold leading-none tracking-wide">
-                          {label}
-                        </span>
-                        {fullyBooked && (
-                          <span className="text-[8px] font-bold tracking-wider">محجوز</span>
-                        )}
-                        {!fullyBooked && fullyClosed && (
-                          <span className="text-[8px] font-bold tracking-wider">مغلق</span>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            {/* ── Fine-Tuning Panel — slides in smoothly via max-height transition ── */}
-            <div
+          return (
+            <button
+              key={dayStr}
+              type="button"
+              onClick={() => handleDaySelect(dayStr)}
+              aria-pressed={isSelected}
               className={[
-                'overflow-hidden transition-all duration-300 ease-in-out',
-                baseHour !== null ? 'max-h-[420px] opacity-100' : 'max-h-0 opacity-0',
+                'relative flex-shrink-0 flex flex-col items-center gap-0.5',
+                'rounded-[14px] border-[1.5px] min-w-[64px] px-2 pt-2.5 pb-[9px]',
+                'transition-all duration-150 select-none cursor-pointer',
+                isSelected
+                  ? 'bg-[#0f2a1e] border-[#2fdc8f] text-[#eafff4]'
+                  : 'bg-[#141715] border-[#212823] text-[#aab3ad]',
               ].join(' ')}
             >
-              <div className="rounded-xl border border-white/[0.08] bg-[#0d0f0e] p-4 flex flex-col gap-5">
-
-                {/* Start modifier :00 / :30 */}
-                <div>
-                  <p className="text-[10px] font-bold text-white/25 tracking-widest uppercase mb-2.5">
-                    وقت البداية بالضبط
-                  </p>
-                  <div className="grid grid-cols-2 gap-2">
-                    {([0, 30] as const).map(mod => {
-                      const dis = isModDisabled(mod);
-                      const sel = startMod === mod;
-                      const tip = !dis ? undefined
-                        : slotIsPast(baseHour! * 60 + mod) ? 'الوقت انقضى' : 'محجوز';
-                      return (
-                        <button
-                          key={mod}
-                          type="button"
-                          onClick={() => handleModClick(mod)}
-                          disabled={dis}
-                          title={tip}
-                          aria-pressed={sel}
-                          className={optionBtn(sel, dis, 'py-3 text-[14px] font-mono')}
-                        >
-                          {minsToTime(baseHour! * 60 + mod)}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-
-                {/* Duration — shows live price per option */}
-                <div>
-                  <p className="text-[10px] font-bold text-white/25 tracking-widest uppercase mb-2.5">
-                    المدة
-                  </p>
-                  <div className="grid grid-cols-3 gap-2">
-                    {([60, 90, 120] as const).map(d => {
-                      const dis   = isDurationDisabled(d);
-                      const sel   = duration === d;
-                      const price = Math.round((d / 60) * pricePerHour * 100) / 100;
-                      return (
-                        <button
-                          key={d}
-                          type="button"
-                          onClick={() => handleDurationClick(d)}
-                          disabled={dis}
-                          title={dis ? 'يتعارض مع حجز موجود أو يتجاوز منتصف الليل' : undefined}
-                          aria-pressed={sel}
-                          className={optionBtn(sel, dis, 'py-3 text-[11px] flex-col gap-0.5')}
-                        >
-                          <span>{durationLabel(d)}</span>
-                          <span className={[
-                            'text-[9px] font-mono',
-                            sel ? 'text-emerald-400/70' : 'text-white/25',
-                          ].join(' ')}>
-                            {price} د.أ
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* ── Legend ── */}
-            <div className="flex flex-wrap gap-x-4 gap-y-1.5 text-[10px] text-white/25">
-              <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-sm bg-white/[0.05] border border-white/[0.08]" aria-hidden />
-                متاح
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-sm bg-red-950/40 border border-red-800/50" aria-hidden />
-                محجوز
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-sm bg-white/[0.02] border border-white/[0.04] opacity-30" aria-hidden />
-                منتهي
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-sm border border-white/[0.08] [background-image:repeating-linear-gradient(45deg,transparent,transparent_2px,rgba(255,255,255,0.06)_2px,rgba(255,255,255,0.06)_4px)]" aria-hidden />
-                مغلق
-              </span>
-              <span className="flex items-center gap-1.5">
-                <span className="w-2.5 h-2.5 rounded-sm bg-emerald-500/25 border border-emerald-400/60" aria-hidden />
-                محدد
-              </span>
-            </div>
-          </>
-        )}
-
-        {/* ── Price summary ── */}
-        {canSubmit && actualStartStr && actualEndStr && (
-          <div className="flex items-center justify-between px-4 py-3.5 rounded-xl bg-[#0d0f0e] border border-white/[0.05]">
-            <div>
-              <p className="text-[9px] font-bold text-white/20 tracking-widest uppercase mb-0.5">
-                إجمالي الحجز
-              </p>
-              <p className="text-[11px] text-white/30 font-mono">
-                {formatTime12(actualStartMins)} - {formatTime12(actualEndMins)}
-              </p>
-            </div>
-            <div className="flex items-baseline gap-1">
-              <span className="text-[30px] font-bold text-[#f0efe8] leading-none tracking-tight">
-                {total.toFixed(2)}
-              </span>
-              <span className="text-[13px] font-bold text-emerald-500">د.أ</span>
-            </div>
-          </div>
-        )}
-
-        {/* ── JIT full-name capture (only when missing) ── */}
-        {needsName && (
-          <div className="rounded-xl border border-white/[0.05] bg-[#0d0f0e] px-4 py-3.5">
-            <p className="text-[11px] text-white/35 mb-2.5 leading-relaxed">
-              أدخل اسمك مرة واحدة لإتمام الحجز
-            </p>
-            <FullNameField
-              value={nameInput}
-              onChange={(v) => { setNameInput(v); setNameTouched(true); }}
-              disabled={submitting}
-              showError={nameTouched}
-              id="booking-full-name"
-            />
-          </div>
-        )}
-
-        {/* ── Guest fields — name / phone ── */}
-        {/* Gate on !authLoading so the block never flashes during the /auth/me
-            in-flight window: a returning user is null until the probe resolves. */}
-        {!authLoading && isGuest && (
-          <div className="rounded-xl border border-white/[0.08] bg-[#0d0f0e] px-4 py-4 flex flex-col gap-4">
-            <p className="text-[11px] font-bold text-white/30 tracking-widest uppercase">
-              بياناتك
-            </p>
-
-            {/* Name. This block renders only inside the guest path (outer
-                `{isGuest && …}` gate), so a returning user with a stored name
-                never reaches it — the field is already hidden for them. TS narrows
-                `user` to null here, which is exactly the "(!user || !full_name)"
-                contract: the field shows for a guest / new-no-name account only. */}
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor="guest-name" className="text-[11px] font-bold text-white/40 tracking-wide">
-                الاسم الكامل <span className="text-emerald-500">*</span>
-              </label>
-              <input
-                id="guest-name"
-                type="text"
-                dir="rtl"
-                value={guestName}
-                disabled={submitting}
-                onChange={(e) => { setGuestName(e.target.value); setGuestNameTouched(true); }}
-                onBlur={() => setGuestNameTouched(true)}
-                placeholder="مثال: أحمد خالد"
-                aria-invalid={guestNameTouched && !isValidFullName(guestName) || undefined}
-                className={[
-                  'w-full rounded-xl px-4 py-2.5 bg-[#121413] text-[13px] text-[#f0efe8]',
-                  'border transition-all duration-150 focus:outline-none',
-                  'placeholder:text-white/20 disabled:opacity-50',
-                  guestNameTouched && !isValidFullName(guestName)
-                    ? 'border-red-500/50 focus:ring-1 focus:ring-red-500/30'
-                    : 'border-white/[0.09] hover:border-white/[0.18] focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/15',
-                ].join(' ')}
-              />
-              {guestNameTouched && !isValidFullName(guestName) && (
-                <span className="text-[11px] text-red-400/80">الاسم يجب أن يكون بين حرفين و100 حرف</span>
-              )}
-            </div>
-
-            {/* Phone */}
-            <div className="flex flex-col gap-1.5">
-              <label htmlFor="guest-phone" className="text-[11px] font-bold text-white/40 tracking-wide">
-                رقم الجوال <span className="text-emerald-500">*</span>
-              </label>
-              <input
-                id="guest-phone"
-                type="tel"
-                dir="ltr"
-                value={guestPhone}
-                disabled={submitting}
-                onChange={(e) => {
-                  setGuestPhone(e.target.value);
-                  setGuestPhoneTouched(true);
-                  const { error } = normalizePhone(e.target.value);
-                  setGuestPhoneError(e.target.value.trim() ? error : null);
-                }}
-                onBlur={() => {
-                  if (guestPhone.trim()) {
-                    setGuestPhoneTouched(true);
-                    setGuestPhoneError(normalizePhone(guestPhone).error);
-                  }
-                }}
-                placeholder="07XXXXXXXX"
-                aria-invalid={!!guestPhoneError || undefined}
-                className={[
-                  'w-full rounded-xl px-4 py-2.5 bg-[#121413] text-[13px] text-[#f0efe8] font-mono',
-                  'border transition-all duration-150 focus:outline-none',
-                  'placeholder:text-white/20 disabled:opacity-50',
-                  guestPhoneTouched && guestPhoneError
-                    ? 'border-red-500/50 focus:ring-1 focus:ring-red-500/30'
-                    : 'border-white/[0.09] hover:border-white/[0.18] focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/15',
-                ].join(' ')}
-              />
-              {guestPhoneTouched && guestPhoneError && (
-                <span className="text-[11px] text-red-400/80">{guestPhoneError}</span>
-              )}
-              {guestPhoneTouched && !guestPhoneError && guestPhone.trim() && (
-                <span className="text-[11px] text-emerald-500/70 font-mono">
-                  {normalizePhone(guestPhone).e164}
+              {badge && (
+                <span className={[
+                  'absolute -top-[7px] left-1/2 -translate-x-1/2',
+                  'px-2 py-px rounded-full text-[9px] font-bold whitespace-nowrap',
+                  isSelected ? 'bg-[#2fdc8f] text-[#06231a]' : 'bg-[#263029] text-[#c9d2cc]',
+                ].join(' ')}>
+                  {badge}
                 </span>
               )}
-            </div>
-          </div>
-        )}
-
-        {/* ── API error ── */}
-        {apiError && (
-          <div
-            role="alert"
-            className="rounded-xl px-4 py-3 text-[11px] text-red-400 bg-red-500/[0.07] border border-red-500/[0.14] leading-relaxed"
-          >
-            {apiError}
-          </div>
-        )}
-
-        {/* ── Confirm button ── */}
-        {/* While auth is resolving, show a neutral, non-actionable loading state
-            rather than an active/disabled state derived from incomplete user data. */}
-        <button
-          type="button"
-          onClick={handleSubmit}
-          disabled={authLoading || !canSubmit}
-          className={[
-            'flex items-center justify-center gap-2.5 w-full py-3.5 rounded-xl mb-1',
-            'text-[13px] font-bold tracking-wide',
-            'transition-all duration-200 active:scale-[0.98]',
-            'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500',
-            'focus-visible:ring-offset-2 focus-visible:ring-offset-[#141715]',
-            !authLoading && canSubmit
-              ? 'bg-gradient-to-r from-green-600 to-emerald-500 text-white ' +
-                'shadow-[0_4px_20px_rgba(16,185,129,0.22)] hover:shadow-[0_4px_28px_rgba(16,185,129,0.38)]'
-              : 'bg-white/[0.04] text-white/20 border border-white/[0.05] cursor-not-allowed',
-          ].join(' ')}
-        >
-          {authLoading ? (
-            <div className="w-4 h-4 rounded-full border-2 border-white/25 border-t-white/60 animate-spin" />
-          ) : submitting ? (
-            <>
-              <div className="w-4 h-4 rounded-full border-2 border-white/25 border-t-white animate-spin" />
-              جاري الحجز...
-            </>
-          ) : (
-            'تأكيد الحجز'
-          )}
-        </button>
-
+              <span className="text-[11px] font-medium opacity-85">{AR_DAYS[date.getDay()]}</span>
+              <span className="text-[18px] font-bold leading-none">{date.getDate()}</span>
+            </button>
+          );
+        })}
       </div>
+
+      {/* Expandable date picker for dates beyond the 7-day strip */}
+      <div className={[
+        'overflow-hidden transition-all duration-300 ease-in-out px-5',
+        showDatePicker ? 'max-h-24 opacity-100 pb-2' : 'max-h-0 opacity-0',
+      ].join(' ')}>
+        <input
+          type="date"
+          value={selDayStr}
+          min={serverTodayStr}
+          max={maxDateStr}
+          onChange={e => { if (e.target.value) handleDaySelect(e.target.value); }}
+          className={[
+            'w-full rounded-xl border border-[#212823] px-4 py-2.5',
+            'bg-[#111412] text-[13px] text-[#f2f5f3]',
+            'hover:border-[#2fdc8f]/40 focus:outline-none focus:border-[#2fdc8f]/60',
+            'transition-all duration-150 [color-scheme:dark]',
+          ].join(' ')}
+        />
+      </div>
+
+      {/* Selected date badge when outside the strip */}
+      {!stripDays.includes(selDayStr) && (
+        <div className="mx-5 mb-2 px-3 py-2 rounded-xl bg-[#0f2a1e] border border-[#2fdc8f]/30 text-[11px] text-[#5ceaa8] text-center">
+          {parseDateStr(selDayStr).toLocaleDateString('ar-JO', {
+            weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+          })}
+        </div>
+      )}
+
+      {/* ── Start-time section label ── */}
+      <div className="px-5 pt-2.5 pb-1.5 flex items-baseline justify-between gap-2.5">
+        <span className="text-[12px] font-semibold text-[#8a938e] whitespace-nowrap">وقت البداية</span>
+        <span className="text-[11px] text-[#5c655f] whitespace-nowrap">تُعرض الأوقات المتاحة فقط</span>
+      </div>
+
+      {loadingSlots ? (
+        <div className="h-44 flex items-center justify-center">
+          <div className="w-5 h-5 rounded-full border-2 border-[#2fdc8f] border-t-transparent animate-spin" />
+        </div>
+      ) : groups.length === 0 ? (
+        /* ── Empty state: zero available starts this day ── */
+        <div className="mx-5 my-2.5 px-5 py-[26px] border border-dashed border-[#263029] rounded-[14px] text-[#8a938e] text-[13px] text-center leading-[1.8]">
+          لا توجد أوقات متاحة في هذا اليوم.<br />جرّب يوماً آخر من شريط التاريخ.
+        </div>
+      ) : (
+        /* ── Time groups ── */
+        <div className="flex flex-col gap-[18px] px-5 pt-1.5 pb-4">
+          {groups.map(g => (
+            <div key={g.label} className="flex flex-col gap-2.5">
+              <div className="flex items-center gap-2.5">
+                <span className="text-[13px] font-semibold text-[#c9d2cc] whitespace-nowrap">{g.label}</span>
+                {g.sub && (
+                  <span className="text-[11px] text-[#2fdc8f] bg-[#10231a] border border-[#1d3a2c] rounded-full px-2.5 py-0.5 whitespace-nowrap">
+                    {g.sub}
+                  </span>
+                )}
+                <span className="flex-1 h-px bg-[#1a1f1c]" aria-hidden />
+              </div>
+              <div className="grid grid-cols-4 gap-[9px]" role="group" aria-label={g.label}>
+                {g.slots.map(m => {
+                  const sel = selectedStart === m;
+                  return (
+                    <button
+                      key={m}
+                      type="button"
+                      dir="ltr"
+                      onClick={() => pickStart(m)}
+                      aria-pressed={sel}
+                      className={[
+                        'text-[14px] font-semibold py-3 px-1 rounded-xl cursor-pointer',
+                        'border-[1.5px] transition-all duration-[120ms] select-none',
+                        sel
+                          ? 'bg-[#0f2a1e] border-[#2fdc8f] text-[#5ceaa8] shadow-[0_0_0_3px_rgba(47,220,143,0.12)]'
+                          : 'bg-[#141715] border-[#212823] text-[#dfe6e1]',
+                      ].join(' ')}
+                    >
+                      {fmt24(m)}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* ── Duration section (after start selection) ── */}
+      {started && (
+        <div className="px-5 pb-4 flex flex-col gap-2.5">
+          <span className="text-[12px] font-semibold text-[#8a938e]">المدة</span>
+          <div className="grid grid-cols-3 gap-[9px]">
+            {([60, 90, 120] as const).map(d => {
+              const ok    = validDur(selectedStart!, d);
+              const sel   = duration === d;
+              const price = Math.round((d / 60) * pricePerHour * 100) / 100;
+              return (
+                <button
+                  key={d}
+                  type="button"
+                  onClick={() => handleDurationClick(d)}
+                  disabled={!ok}
+                  aria-pressed={sel && ok}
+                  className={[
+                    'flex flex-col items-center gap-[3px] py-3 px-1.5 rounded-xl',
+                    'border-[1.5px] transition-all duration-[120ms] select-none',
+                    !ok
+                      ? 'bg-[#101312] border-[#1a1f1c] text-[#5c655f] cursor-not-allowed opacity-60'
+                      : sel
+                        ? 'bg-[#0f2a1e] border-[#2fdc8f] text-[#eafff4] cursor-pointer'
+                        : 'bg-[#141715] border-[#212823] text-[#dfe6e1] cursor-pointer',
+                  ].join(' ')}
+                >
+                  <span className="text-[14px] font-bold">{durationLabel(d)}</span>
+                  <span dir="rtl" className={[
+                    'text-[10.5px]',
+                    sel && ok ? 'text-[#5ceaa8]' : ok ? 'text-[#8a938e]' : 'text-[#5c655f]',
+                  ].join(' ')}>
+                    {ok ? `ينتهي ${fmt24(selectedStart! + d)} · ${price} د.أ` : 'غير متاح'}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ── JIT full-name capture (only when missing) ── */}
+      {needsName && (
+        <div className="mx-5 mb-4 rounded-xl border border-[#1a1f1c] bg-[#111412] px-4 py-3.5">
+          <p className="text-[11px] text-[#8a938e] mb-2.5 leading-relaxed">
+            أدخل اسمك مرة واحدة لإتمام الحجز
+          </p>
+          <FullNameField
+            value={nameInput}
+            onChange={(v) => { setNameInput(v); setNameTouched(true); }}
+            disabled={submitting}
+            showError={nameTouched}
+            id="booking-full-name"
+          />
+        </div>
+      )}
+
+      {/* ── Guest fields — name / phone ── */}
+      {/* Gate on !authLoading so the block never flashes during the /auth/me
+          in-flight window: a returning user is null until the probe resolves. */}
+      {!authLoading && isGuest && (
+        <div className="mx-5 mb-4 rounded-xl border border-[#212823] bg-[#111412] px-4 py-4 flex flex-col gap-4">
+          <p className="text-[11px] font-bold text-[#8a938e] tracking-wide">بياناتك</p>
+
+          {/* Name. This block renders only inside the guest path (outer
+              `{isGuest && …}` gate), so a returning user with a stored name
+              never reaches it — the field is already hidden for them. TS narrows
+              `user` to null here, which is exactly the "(!user || !full_name)"
+              contract: the field shows for a guest / new-no-name account only. */}
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="guest-name" className="text-[11px] font-bold text-[#c9d2cc]">
+              الاسم الكامل <span className="text-[#2fdc8f]">*</span>
+            </label>
+            <input
+              id="guest-name"
+              type="text"
+              dir="rtl"
+              value={guestName}
+              disabled={submitting}
+              onChange={(e) => { setGuestName(e.target.value); setGuestNameTouched(true); }}
+              onBlur={() => setGuestNameTouched(true)}
+              placeholder="مثال: أحمد خالد"
+              aria-invalid={guestNameTouched && !isValidFullName(guestName) || undefined}
+              className={[
+                'w-full rounded-xl px-4 py-2.5 bg-[#141715] text-[13px] text-[#f2f5f3]',
+                'border transition-all duration-150 focus:outline-none',
+                'placeholder:text-[#5c655f] disabled:opacity-50',
+                guestNameTouched && !isValidFullName(guestName)
+                  ? 'border-red-500/50 focus:ring-1 focus:ring-red-500/30'
+                  : 'border-[#212823] hover:border-[#2fdc8f]/30 focus:border-[#2fdc8f]/60',
+              ].join(' ')}
+            />
+            {guestNameTouched && !isValidFullName(guestName) && (
+              <span className="text-[11px] text-red-400/80">الاسم يجب أن يكون بين حرفين و100 حرف</span>
+            )}
+          </div>
+
+          {/* Phone */}
+          <div className="flex flex-col gap-1.5">
+            <label htmlFor="guest-phone" className="text-[11px] font-bold text-[#c9d2cc]">
+              رقم الجوال <span className="text-[#2fdc8f]">*</span>
+            </label>
+            <input
+              id="guest-phone"
+              type="tel"
+              dir="ltr"
+              value={guestPhone}
+              disabled={submitting}
+              onChange={(e) => {
+                setGuestPhone(e.target.value);
+                setGuestPhoneTouched(true);
+                const { error } = normalizePhone(e.target.value);
+                setGuestPhoneError(e.target.value.trim() ? error : null);
+              }}
+              onBlur={() => {
+                if (guestPhone.trim()) {
+                  setGuestPhoneTouched(true);
+                  setGuestPhoneError(normalizePhone(guestPhone).error);
+                }
+              }}
+              placeholder="07XXXXXXXX"
+              aria-invalid={!!guestPhoneError || undefined}
+              className={[
+                'w-full rounded-xl px-4 py-2.5 bg-[#141715] text-[13px] text-[#f2f5f3] font-mono',
+                'border transition-all duration-150 focus:outline-none',
+                'placeholder:text-[#5c655f] disabled:opacity-50',
+                guestPhoneTouched && guestPhoneError
+                  ? 'border-red-500/50 focus:ring-1 focus:ring-red-500/30'
+                  : 'border-[#212823] hover:border-[#2fdc8f]/30 focus:border-[#2fdc8f]/60',
+              ].join(' ')}
+            />
+            {guestPhoneTouched && guestPhoneError && (
+              <span className="text-[11px] text-red-400/80">{guestPhoneError}</span>
+            )}
+            {guestPhoneTouched && !guestPhoneError && guestPhone.trim() && (
+              <span className="text-[11px] text-[#5ceaa8]/70 font-mono">
+                {normalizePhone(guestPhone).e164}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── API error ── */}
+      {apiError && (
+        <div
+          role="alert"
+          className="mx-5 mb-3 rounded-xl px-4 py-3 text-[11px] text-red-400 bg-red-500/[0.07] border border-red-500/[0.14] leading-relaxed"
+        >
+          {apiError}
+        </div>
+      )}
+
+      {/* ── Sticky summary bar ── */}
+      <div className="sticky bottom-0 bg-gradient-to-t from-[#0a0c0b] from-75% to-transparent px-5 pt-[18px] pb-5">
+        <div className="bg-[#111412] border border-[#212823] rounded-[18px] px-[18px] py-4 flex flex-col gap-3 shadow-[0_-8px_30px_rgba(0,0,0,0.45)]">
+          {started ? (
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex flex-col gap-[3px]">
+                <span className="text-[11px] text-[#8a938e]">
+                  {AR_DAYS[parseDateStr(selDayStr).getDay()]} {monthDayLabel(selDayStr)}
+                </span>
+                <span dir="ltr" className="text-[17px] font-bold text-[#f2f5f3] text-right">
+                  {fmt24(selectedStart!)} → {fmt24(endMins)}
+                </span>
+                {crossesMidnight && (
+                  <span className="text-[11px] text-[#2fdc8f]">يمتد الحجز إلى فجر {nextDayName}</span>
+                )}
+                {startsAfterMid && (
+                  <span className="text-[11px] text-[#2fdc8f]">هذا الوقت فجر {nextDayName}</span>
+                )}
+              </div>
+              <div className="flex flex-col items-start gap-0.5">
+                <span className="text-[11px] text-[#8a938e]">إجمالي الحجز</span>
+                <span className="text-[22px] font-bold text-[#2fdc8f] whitespace-nowrap">{total} د.أ</span>
+              </div>
+            </div>
+          ) : (
+            <span className="text-[13px] text-[#8a938e] text-center">اختر وقت البداية لعرض ملخص الحجز</span>
+          )}
+          <button
+            type="button"
+            onClick={handleSubmit}
+            disabled={authLoading || !canSubmit}
+            className={[
+              'flex items-center justify-center gap-2.5 w-full py-3.5 rounded-[13px]',
+              'text-[15px] font-bold transition-all duration-150',
+              !authLoading && canSubmit
+                ? 'bg-[#2fdc8f] text-[#06231a] cursor-pointer hover:bg-[#5ceaa8]'
+                : 'bg-[#1a1f1c] text-[#5c655f] cursor-not-allowed',
+            ].join(' ')}
+          >
+            {authLoading ? (
+              <div className="w-4 h-4 rounded-full border-2 border-[#5c655f]/40 border-t-[#5c655f] animate-spin" />
+            ) : submitting ? (
+              <>
+                <div className="w-4 h-4 rounded-full border-2 border-[#06231a]/25 border-t-[#06231a] animate-spin" />
+                جاري الحجز...
+              </>
+            ) : canSubmit ? (
+              'تأكيد الحجز'
+            ) : started && durationOK ? (
+              'أكمل بياناتك للمتابعة'
+            ) : (
+              'اختر الوقت أولاً'
+            )}
+          </button>
+        </div>
+      </div>
+
     </div>
 
     {/* OTP modal — rendered outside the booking card via portal-like fixed positioning.
