@@ -3,6 +3,7 @@ package data
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/ali/football-pitch-api/internal/timeutil"
@@ -140,6 +141,189 @@ func SlotContained(slotStart, slotEnd time.Time, windows []ConcreteInterval) boo
 	return false
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Merged containment gate (WO-24H-CONTINUITY)
+//
+// A 24/7 pitch stores the explicit full-day row 00:00→00:00, which anchors to a
+// window ending EXACTLY at the next local midnight. Monday's window and
+// Tuesday's window abut at that instant but ResolveWindowsForDate never puts
+// both in one candidate set, and SlotContained requires a SINGLE interval to
+// contain the slot — so Mon 23:00 → Tue 00:30 was rejected even though the
+// pitch never closes. The functions below fix that for the WRITE-PATH GATE
+// ONLY: they anchor every day the slot touches, coalesce abutting/overlapping
+// concrete intervals into maximal open runs, and test containment against the
+// merged set. Read paths (availability search, GetOpenWindows, day view,
+// calendar) deliberately keep consuming ResolveWindowsForDate and are
+// behaviorally untouched.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// ResolveWindowsForRange anchors the weekly windows to EVERY Amman calendar day
+// the half-open range [start, end) touches, plus the day before the first (for
+// its cross-midnight / full-day coverage of the early hours), and returns all
+// resulting concrete UTC intervals, unmerged. The day count follows the range —
+// a multi-day owner booking anchors every day it spans, not a fixed D+1.
+func ResolveWindowsForRange(windows []OperatingWindow, start, end time.Time) ([]ConcreteInterval, error) {
+	loc := timeutil.Amman()
+	firstLocal := start.In(loc)
+	lastLocal := end.In(loc)
+
+	y, m, d := firstLocal.Date()
+	day := time.Date(y, m, d-1, 0, 0, 0, 0, loc) // D−1 first: yesterday's spill/full-day
+	out := make([]ConcreteInterval, 0, len(windows))
+	for !day.After(lastLocal) {
+		wd := int(day.Weekday())
+		for _, w := range windows {
+			if w.Weekday != wd {
+				continue
+			}
+			iv, err := anchorWindow(w, day)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, iv)
+		}
+		day = day.AddDate(0, 0, 1)
+	}
+	return out, nil
+}
+
+// CoalesceIntervals merges abutting or overlapping half-open intervals into
+// maximal open runs. Operates ONLY on concrete UTC instants (never on TIME
+// values): [Mon00:00,Tue00:00) + [Tue00:00,Wed00:00) → [Mon00:00,Wed00:00).
+// Intervals separated by any gap are left distinct. Input order is irrelevant;
+// the input slice is not modified.
+func CoalesceIntervals(ivs []ConcreteInterval) []ConcreteInterval {
+	if len(ivs) <= 1 {
+		return append([]ConcreteInterval(nil), ivs...)
+	}
+	sorted := append([]ConcreteInterval(nil), ivs...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Start.Before(sorted[j].Start) })
+	out := []ConcreteInterval{sorted[0]}
+	for _, iv := range sorted[1:] {
+		last := &out[len(out)-1]
+		if !iv.Start.After(last.End) { // abuts or overlaps → extend the run
+			if iv.End.After(last.End) {
+				last.End = iv.End
+			}
+			continue
+		}
+		out = append(out, iv)
+	}
+	return out
+}
+
+// SlotWithinHours is the merged operating-hours gate: it reports whether
+// [slotStart, slotEnd) lies fully inside the coalesced union of the open
+// windows anchored across every day the slot touches. This — not the
+// single-day SlotContained — is what every WRITE-path hours gate must call.
+// Callers keep their own fail-open handling (len(windows)==0 → skip the gate).
+func SlotWithinHours(windows []OperatingWindow, slotStart, slotEnd time.Time) (bool, error) {
+	resolved, err := ResolveWindowsForRange(windows, slotStart, slotEnd)
+	if err != nil {
+		return false, err
+	}
+	return SlotContained(slotStart, slotEnd, CoalesceIntervals(resolved)), nil
+}
+
+// HoursShape classifies how a pitch's coverage behaves at the midnight boundary
+// of a given Amman calendar date. It is the availability payload's shape signal:
+// ONE mutually-exclusive value, because the two facts the client needs — "may a
+// booking end past midnight?" and "do the after-midnight slots belong to THIS
+// day or to the next one?" — cannot be carried by a single boolean (spill and
+// day-bounded would both read false on a continuity flag).
+type HoursShape string
+
+const (
+	// ShapeContinuous — the day's coverage ends exactly at the next local
+	// midnight AND the next day's coverage begins exactly there (the 24/7
+	// 00:00→00:00 shape, or two abutting rows). A booking may end past
+	// midnight, but the after-midnight slots belong to the NEXT day's own
+	// window: a client must NOT render them as this day's tail, or the same
+	// concrete slot appears under two day chips.
+	ShapeContinuous HoursShape = "continuous"
+	// ShapeSpill — a window of THIS day genuinely ends after the next local
+	// midnight (e.g. 16:00→01:00) and the next day does not open at midnight.
+	// A booking may end past midnight AND the after-midnight slots are this
+	// day's tail — the client renders them as such.
+	ShapeSpill HoursShape = "spill"
+	// ShapeDayBounded — coverage stops at or before the next local midnight
+	// with nothing continuing it (09:00→17:00, or a full day followed by a
+	// CLOSED day). No booking may end past midnight.
+	ShapeDayBounded HoursShape = "day_bounded"
+)
+
+// ResolveHoursShape classifies `ammanDate` for this schedule. Windows are
+// anchored directly to the date and to the following date — deliberately NOT
+// via ResolveWindowsForDate, whose candidate set also carries the PREVIOUS
+// day's spill tail, which says nothing about THIS day's midnight boundary.
+// Zero windows (unconfigured → fail-open 24/7) is continuous.
+//
+// The two questions are answered independently and then combined:
+//
+//   - does THIS day's coverage reach past midnight? (ends exactly at it, or a
+//     window runs beyond it)
+//   - does the NEXT day's own coverage begin exactly at midnight?
+//
+// Both true → continuous: the coverage is unbroken across the seam AND the next
+// day's window owns the after-midnight slots, so they must not be rendered as
+// this day's tail. Only the first → spill: the tail is genuinely this day's.
+// Neither → day_bounded. Note the first question is true for an ABUTTING window
+// (ends exactly at midnight) and for an OVERLAPPING one (ends after it); both
+// forms of continuity count.
+func ResolveHoursShape(windows []OperatingWindow, ammanDate time.Time) (HoursShape, error) {
+	if len(windows) == 0 {
+		return ShapeContinuous, nil // unconfigured → open 24/7
+	}
+	loc := timeutil.Amman()
+	y, m, d := ammanDate.In(loc).Date()
+	dayStart := time.Date(y, m, d, 0, 0, 0, 0, loc)
+	nextStart := dayStart.AddDate(0, 0, 1)
+	nextMidnight := nextStart.UTC()
+
+	var reachesMidnight, spills bool
+	todayWD := int(dayStart.Weekday())
+	for _, w := range windows {
+		if w.Weekday != todayWD {
+			continue
+		}
+		iv, err := anchorWindow(w, dayStart)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case iv.End.Equal(nextMidnight): // abuts the seam
+			reachesMidnight = true
+		case iv.End.After(nextMidnight): // runs past it
+			reachesMidnight = true
+			spills = true
+		}
+	}
+
+	var startsAtMidnight bool
+	nextWD := int(nextStart.Weekday())
+	for _, w := range windows {
+		if w.Weekday != nextWD {
+			continue
+		}
+		iv, err := anchorWindow(w, nextStart)
+		if err != nil {
+			return "", err
+		}
+		if iv.Start.Equal(nextMidnight) {
+			startsAtMidnight = true
+		}
+	}
+
+	switch {
+	case reachesMidnight && startsAtMidnight:
+		return ShapeContinuous, nil
+	case spills:
+		return ShapeSpill, nil
+	default:
+		return ShapeDayBounded, nil
+	}
+}
+
 // ResolveOpenWindows loads a pitch's weekly schedule and resolves it to the
 // concrete UTC intervals touching the Amman calendar date `ammanDate`. It returns
 // (intervals, hasSchedule, error):
@@ -167,4 +351,26 @@ func (m *PitchModel) ResolveOpenWindows(ctx context.Context, pitchID int, ammanD
 		return nil, true, err
 	}
 	return resolved, true, nil
+}
+
+// SlotWithinOpenHours loads the pitch's schedule and runs the MERGED
+// containment gate (SlotWithinHours) over [slotStart, slotEnd). Returns
+// (contained, hasSchedule, err); hasSchedule==false means unconfigured →
+// fail-open (contained is returned true in that case, callers need no extra
+// branch). This is the write-path gate entry point for handlers that only hold
+// a pitch id (the extend sheet); the repository create paths call
+// SlotWithinHours directly on windows they load under their own tx lock.
+func (m *PitchModel) SlotWithinOpenHours(ctx context.Context, pitchID int, slotStart, slotEnd time.Time) (contained bool, hasSchedule bool, err error) {
+	windows, err := m.GetOperatingHours(ctx, pitchID)
+	if err != nil {
+		return false, false, fmt.Errorf("SlotWithinOpenHours: %w", err)
+	}
+	if len(windows) == 0 {
+		return true, false, nil // unconfigured → open 24/7
+	}
+	ok, err := SlotWithinHours(windows, slotStart, slotEnd)
+	if err != nil {
+		return false, true, err
+	}
+	return ok, true, nil
 }

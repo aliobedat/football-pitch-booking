@@ -111,6 +111,13 @@ type BookingRepository interface {
 	// false when the pitch has NO configured windows (open 24/7 per the fail-open
 	// decision) — callers must NOT read an empty slice as "closed" without it.
 	GetOpenWindows(ctx context.Context, pitchID int, date time.Time) (intervals []data.ConcreteInterval, hasSchedule bool, err error)
+
+	// HoursShape classifies the pitch's midnight-boundary behavior on the Amman
+	// date: continuous | spill | day_bounded. The served open_windows stay
+	// DAY-shaped; this is the signal that tells a client whether a booking may
+	// end past midnight and whose day the after-midnight slots belong to.
+	// Unconfigured (fail-open 24/7) → continuous. See data.ResolveHoursShape.
+	HoursShape(ctx context.Context, pitchID int, date time.Time) (data.HoursShape, error)
 	GetUserBookings(ctx context.Context, userID int64) ([]models.Booking, error)
 
 	// GetAllBookings lists bookings scoped to the actor: an admin sees every
@@ -529,11 +536,11 @@ func (r *bookingRepo) CreateManualBooking(ctx context.Context, p ManualBookingPa
 				return nil, false, err
 			}
 			if len(windows) > 0 {
-				resolved, err := data.ResolveWindowsForDate(windows, timeutil.InAmman(occStart))
+				ok, err := data.SlotWithinHours(windows, occStart, occEnd)
 				if err != nil {
 					return nil, false, fmt.Errorf("CreateManualBooking: resolve operating hours: %w", err)
 				}
-				if !data.SlotContained(occStart, occEnd, resolved) {
+				if !ok {
 					return nil, false, &RecurrenceConflictError{
 						Week: week, OccStart: occStart.UTC(), OccEnd: occEnd.UTC(), Reason: "outside_hours",
 					}
@@ -881,11 +888,11 @@ func (r *bookingRepo) CreateAcademyBookings(ctx context.Context, p AcademyBookin
 		}
 		if len(windows) > 0 {
 			for i, occ := range occurrences {
-				resolved, err := data.ResolveWindowsForDate(windows, timeutil.InAmman(occ[0]))
+				ok, err := data.SlotWithinHours(windows, occ[0], occ[1])
 				if err != nil {
 					return nil, false, fmt.Errorf("CreateAcademyBookings: resolve operating hours: %w", err)
 				}
-				if !data.SlotContained(occ[0], occ[1], resolved) {
+				if !ok {
 					outsideHours[i] = true
 				}
 			}
@@ -1233,11 +1240,11 @@ func insertConfirmedBookingTx(ctx context.Context, tx pgx.Tx, req models.CreateB
 			return nil, err
 		}
 		if len(windows) > 0 { // configured → fail closed unless contained
-			resolved, err := data.ResolveWindowsForDate(windows, timeutil.InAmman(req.StartTime))
+			ok, err := data.SlotWithinHours(windows, req.StartTime, req.EndTime)
 			if err != nil {
 				return nil, fmt.Errorf("CreateBooking: resolve operating hours: %w", err)
 			}
-			if !data.SlotContained(req.StartTime, req.EndTime, resolved) {
+			if !ok {
 				return nil, ErrSlotOutsideOperatingHours
 			}
 		}
@@ -1570,6 +1577,20 @@ func (r *bookingRepo) GetOpenWindows(ctx context.Context, pitchID int, date time
 		return nil, true, fmt.Errorf("GetOpenWindows: resolve: %w", err)
 	}
 	return resolved, true, nil
+}
+
+// HoursShape — see the interface doc. Windows are loaded fresh (same loader as
+// GetOpenWindows); the classification math lives in the data layer.
+func (r *bookingRepo) HoursShape(ctx context.Context, pitchID int, date time.Time) (data.HoursShape, error) {
+	windows, err := loadOperatingWindowsTx(ctx, r.db, int64(pitchID))
+	if err != nil {
+		return "", err
+	}
+	shape, err := data.ResolveHoursShape(windows, date)
+	if err != nil {
+		return "", fmt.Errorf("HoursShape: %w", err)
+	}
+	return shape, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

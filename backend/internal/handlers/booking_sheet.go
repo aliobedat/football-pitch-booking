@@ -16,17 +16,15 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/ali/football-pitch-api/internal/auth"
-	"github.com/ali/football-pitch-api/internal/data"
 	"github.com/ali/football-pitch-api/internal/middleware"
 	"github.com/ali/football-pitch-api/internal/repository"
-	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
 // operatingHoursResolver is the slice of *data.PitchModel the extend handler
-// needs: resolve a pitch's open windows for an Amman date (fail-open when
-// unconfigured). Kept as an interface so the handler is unit-testable.
+// needs: the MERGED operating-hours gate over a concrete interval (fail-open
+// when unconfigured). Kept as an interface so the handler is unit-testable.
 type operatingHoursResolver interface {
-	ResolveOpenWindows(ctx context.Context, pitchID int, ammanDate time.Time) ([]data.ConcreteInterval, bool, error)
+	SlotWithinOpenHours(ctx context.Context, pitchID int, slotStart, slotEnd time.Time) (contained bool, hasSchedule bool, err error)
 }
 
 // BookingSheetHandler serves the owner/admin booking-extension endpoint.
@@ -95,19 +93,19 @@ func (h *BookingSheetHandler) ExtendBooking(c *gin.Context) {
 		return
 	}
 
-	// Operating-hours gate on the extension interval [oldEnd, newEnd). Resolve the
-	// windows for the Amman civil date of the extension START (oldEnd) — the date
-	// SlotContained's candidate set (incl. previous-day cross-midnight spill) must
-	// anchor on. Fail-open: an unconfigured pitch (hasSchedule=false) is unbounded.
+	// Operating-hours gate on the extension interval [oldEnd, newEnd), via the
+	// MERGED gate (WO-24H-CONTINUITY): anchors every day the interval touches
+	// and coalesces abutting windows, so extending past midnight on a 24/7
+	// pitch is accepted — same referee as the create paths. Fail-open: an
+	// unconfigured pitch (hasSchedule=false) returns contained=true.
 	newEnd := target.End.Add(time.Duration(req.Minutes) * time.Minute)
-	ammanDate := target.End.In(timeutil.Amman())
-	intervals, hasSchedule, err := h.hours.ResolveOpenWindows(c.Request.Context(), int(target.PitchID), ammanDate)
+	contained, _, err := h.hours.SlotWithinOpenHours(c.Request.Context(), int(target.PitchID), target.End, newEnd)
 	if err != nil {
 		c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "could not resolve operating hours"})
 		return
 	}
-	if hasSchedule && !data.SlotContained(target.End, newEnd, intervals) {
+	if !contained {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "outside_operating_hours", "message": "التمديد خارج ساعات عمل الملعب"})
 		return
 	}

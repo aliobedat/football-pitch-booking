@@ -299,6 +299,21 @@ func (h *BookingHandler) GetPitchAvailability(c *gin.Context) {
 		openWindows = []data.ConcreteInterval{} // serialise [] not null
 	}
 
+	// Shape signal (WO-24H-CONTINUITY): open_windows stay DAY-shaped; this tells
+	// the client how the day behaves at midnight — `continuous` (24/7 abutment:
+	// a booking may end past midnight, but the after-midnight slots belong to
+	// the NEXT day's window and must not be rendered as this day's tail),
+	// `spill` (16:00→01:00: past-midnight end allowed AND the tail is this
+	// day's), or `day_bounded` (no past-midnight end).
+	shape, err := h.repo.HoursShape(c.Request.Context(), pitchID, date)
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": "internal_error", "message": "failed to retrieve availability data",
+		})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"pitch_id":     pitchID,
 		"date":         dateStr,
@@ -306,6 +321,7 @@ func (h *BookingHandler) GetPitchAvailability(c *gin.Context) {
 		"count":        len(slots),
 		"open_windows": openWindows,
 		"has_schedule": hasSchedule,
+		"hours_shape":  shape,
 	})
 }
 
