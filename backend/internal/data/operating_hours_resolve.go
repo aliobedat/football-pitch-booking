@@ -336,8 +336,25 @@ func ResolveHoursShape(windows []OperatingWindow, ammanDate time.Time) (HoursSha
 //   - hasSchedule == true with an empty slice means "configured, but closed on
 //     this date".
 //
-// This is the only method that both the availability read and the write-path gate
-// should call, keeping the resolution logic single-sourced.
+// ⚠ DO NOT USE THIS FOR A CONTAINMENT GATE. As of WO-24H-CONTINUITY this method
+// has ZERO production callers — the booking-extension handler was its last one.
+// It is the UNMERGED, SINGLE-DAY resolver: its candidate set is one calendar day
+// (plus the previous day's cross-midnight spill), and containment against it can
+// only ever succeed inside ONE interval. On a continuously-open pitch (the
+// explicit full-day row 00:00→00:00) that rejects any slot crossing midnight,
+// because the abutting next-day window is absent from the set and two abutting
+// windows jointly covering a slot still fail single-interval containment — the
+// exact production bug WO-24H-CONTINUITY fixed. A new gate caller reaching for
+// this name would silently reintroduce it.
+//
+// Use SlotWithinHours (windows already loaded, e.g. under a tx lock) or
+// SlotWithinOpenHours (loads them for a pitch id) instead: both resolve every
+// day the slot touches and coalesce abutting windows first.
+//
+// Kept, not deleted, so the WO's additions-only proof over this file holds —
+// read paths depend on anchorWindow / ResolveWindowsForDate / SlotContained
+// being byte-unchanged. Delete or rename it under its own WO
+// (docs/followups/operating-hours-gate-fail-open.md).
 func (m *PitchModel) ResolveOpenWindows(ctx context.Context, pitchID int, ammanDate time.Time) (intervals []ConcreteInterval, hasSchedule bool, err error) {
 	windows, err := m.GetOperatingHours(ctx, pitchID)
 	if err != nil {
