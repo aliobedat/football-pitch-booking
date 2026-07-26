@@ -324,6 +324,107 @@ func ResolveHoursShape(windows []OperatingWindow, ammanDate time.Time) (HoursSha
 	}
 }
 
+// MaxPlayerBookingDuration is the upper bound on a single PLAYER booking's
+// length. It lives here, in the lowest layer, because three places must agree
+// on it and drift between them is a correctness bug, not a style issue:
+//
+//   - the player CreateBooking validation (rejects anything longer),
+//   - the continuation ceiling served on the availability payload,
+//   - the booked-slots lookahead (a day's payload must reveal any booking a
+//     same-day start could still collide with, which reaches exactly this far
+//     past the day's end).
+//
+// Owner/admin write paths deliberately have NO max-duration cap; this bound is
+// player-path only.
+const MaxPlayerBookingDuration = 120 * time.Minute
+
+// DateHours bundles the per-date signals the availability payload carries. The
+// served open_windows stay DAY-shaped; these two fields state what a client
+// cannot correctly infer from them.
+type DateHours struct {
+	Shape HoursShape
+	// ContinuationMinutes is how far past the next local midnight a booking may
+	// validly run on this date. ZERO unless Shape is continuous. A client may
+	// extend ONLY the window whose end reaches that midnight, and only by this
+	// many minutes.
+	ContinuationMinutes int
+}
+
+// ResolveContinuationMinutes reports how far past the next local midnight this
+// date's coverage actually continues, capped at `ceiling` (the caller's booking
+// ceiling). It answers the question the SHAPE alone cannot: `continuous` proves
+// the next day's coverage ABUTS this one, but says nothing about how LONG that
+// next-day coverage runs.
+//
+// Returns 0 for every non-continuous shape and for an unconfigured pitch (zero
+// windows) — the latter is fail-open server-side but deliberately advertises no
+// continuation, keeping clients day-bounded there.
+//
+// The run is measured with the SAME machinery the write-path gate uses —
+// ResolveWindowsForRange + CoalesceIntervals — so the advertised continuation
+// can never exceed what SlotWithinHours would accept. Measuring from the
+// coalesced run (not from a single next-day row) is what makes a split next-day
+// schedule (00:00→01:00 followed by 01:00→03:00) report the full 120 rather
+// than a premature 60.
+// An UNCONFIGURED pitch (zero windows) reports 0 structurally, with no special
+// case: no windows resolve to no intervals, so no run covers the seam. The
+// server fails OPEN for such a pitch, but advertising no continuation keeps
+// clients day-bounded there by contract rather than by client-side exception.
+func ResolveContinuationMinutes(windows []OperatingWindow, ammanDate time.Time, ceiling time.Duration) (int, error) {
+	shape, err := ResolveHoursShape(windows, ammanDate)
+	if err != nil {
+		return 0, err
+	}
+	if shape != ShapeContinuous {
+		return 0, nil
+	}
+	if ceiling <= 0 {
+		return 0, nil
+	}
+
+	loc := timeutil.Amman()
+	y, m, d := ammanDate.In(loc).Date()
+	nextMidnight := time.Date(y, m, d+1, 0, 0, 0, 0, loc)
+
+	// Probe the ceiling-wide span past the seam. ResolveWindowsForRange anchors
+	// WHOLE DAYS from the day before the range start through the day of its
+	// end, so (a) this date's own midnight-abutting window is present and
+	// coalesces across the seam, and (b) the probe is wide enough for ANY
+	// ceiling: if coverage really runs through nm+ceiling, the last anchored
+	// day's window ends at or after nm+ceiling, so the run is never truncated
+	// below the cap. Pinned by the multi-day-ceiling test.
+	resolved, err := ResolveWindowsForRange(windows, nextMidnight, nextMidnight.Add(ceiling))
+	if err != nil {
+		return 0, err
+	}
+	nm := nextMidnight.UTC()
+	for _, iv := range CoalesceIntervals(resolved) {
+		// The run covering the seam instant itself.
+		if !iv.Start.After(nm) && iv.End.After(nm) {
+			run := min(iv.End.Sub(nm), ceiling)
+			return int(run / time.Minute), nil
+		}
+	}
+	return 0, nil
+}
+
+// ResolveDateHours computes both per-date signals in one pass. `ceiling` is the
+// caller's booking ceiling (the player path's maxBookingDuration).
+func ResolveDateHours(windows []OperatingWindow, ammanDate time.Time, ceiling time.Duration) (DateHours, error) {
+	shape, err := ResolveHoursShape(windows, ammanDate)
+	if err != nil {
+		return DateHours{}, err
+	}
+	if shape != ShapeContinuous {
+		return DateHours{Shape: shape}, nil
+	}
+	cont, err := ResolveContinuationMinutes(windows, ammanDate, ceiling)
+	if err != nil {
+		return DateHours{}, err
+	}
+	return DateHours{Shape: shape, ContinuationMinutes: cont}, nil
+}
+
 // ResolveOpenWindows loads a pitch's weekly schedule and resolves it to the
 // concrete UTC intervals touching the Amman calendar date `ammanDate`. It returns
 // (intervals, hasSchedule, error):

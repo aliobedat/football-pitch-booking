@@ -48,15 +48,34 @@ func (e *bsEnv) seedHours(t *testing.T, pitch int64, open, close string, closed 
 }
 
 type availabilityPayload struct {
-	PitchID     int    `json:"pitch_id"`
-	Date        string `json:"date"`
-	Count       int    `json:"count"`
-	HasSchedule bool   `json:"has_schedule"`
-	HoursShape  string `json:"hours_shape"`
-	OpenWindows []struct {
+	PitchID             int    `json:"pitch_id"`
+	Date                string `json:"date"`
+	Count               int    `json:"count"`
+	HasSchedule         bool   `json:"has_schedule"`
+	HoursShape          string `json:"hours_shape"`
+	ContinuationMinutes int    `json:"continuation_minutes"`
+	OpenWindows         []struct {
 		Start time.Time `json:"start"`
 		End   time.Time `json:"end"`
 	} `json:"open_windows"`
+}
+
+// seedRows replaces a pitch's schedule with explicit (weekday, open, close)
+// rows — for split shifts and asymmetric next-day windows, which seedHours
+// (one row per weekday) cannot express.
+func (e *bsEnv) seedRows(t *testing.T, pitch int64, specs [][3]any) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := e.pool.Exec(ctx, `DELETE FROM operating_hours WHERE pitch_id = $1`, pitch); err != nil {
+		t.Fatalf("clear hours: %v", err)
+	}
+	for _, s := range specs {
+		if _, err := e.pool.Exec(ctx,
+			`INSERT INTO operating_hours (pitch_id, weekday, open_time, close_time) VALUES ($1,$2,$3,$4)`,
+			pitch, s[0], s[1], s[2]); err != nil {
+			t.Fatalf("seed row %v: %v", s, err)
+		}
+	}
 }
 
 func TestAvailabilityShape_ServedPayload(t *testing.T) {
@@ -100,6 +119,9 @@ func TestAvailabilityShape_ServedPayload(t *testing.T) {
 		if p.HoursShape != string(data.ShapeContinuous) {
 			t.Fatalf("hours_shape = %q, want %q", p.HoursShape, data.ShapeContinuous)
 		}
+		if p.ContinuationMinutes != 120 {
+			t.Fatalf("continuation_minutes = %d, want 120", p.ContinuationMinutes)
+		}
 		if !p.HasSchedule {
 			t.Fatalf("has_schedule = false, want true")
 		}
@@ -128,6 +150,56 @@ func TestAvailabilityShape_ServedPayload(t *testing.T) {
 		if !found {
 			t.Fatalf("spill window ending %s missing from open_windows: %+v", spillEnd, p.OpenWindows)
 		}
+		if p.ContinuationMinutes != 0 {
+			t.Fatalf("continuation_minutes = %d, want 0 for spill", p.ContinuationMinutes)
+		}
+	})
+
+	// ── Split shift classified continuous: the served continuation belongs to
+	// the MIDNIGHT seam only. A client that extended the morning window by it
+	// would offer bookings across a real midday closure. ────────────────────
+	t.Run("split_shift_continuous", func(t *testing.T) {
+		e.seedRows(t, pitch, [][3]any{
+			{int(time.Monday), "09:00", "12:00"},
+			{int(time.Monday), "20:00", "00:00"},
+			{int(time.Tuesday), "00:00", "08:00"},
+		})
+		p := get(t)
+		if p.HoursShape != string(data.ShapeContinuous) {
+			t.Fatalf("hours_shape = %q, want %q", p.HoursShape, data.ShapeContinuous)
+		}
+		if p.ContinuationMinutes != 120 {
+			t.Fatalf("continuation_minutes = %d, want 120", p.ContinuationMinutes)
+		}
+		// Two disjoint served windows; only the one ending at the next local
+		// midnight is eligible for the continuation.
+		if len(p.OpenWindows) != 2 {
+			t.Fatalf("expected 2 served windows, got %+v", p.OpenWindows)
+		}
+		eligible := 0
+		for _, w := range p.OpenWindows {
+			if w.End.Equal(nextMidnight) {
+				eligible++
+			}
+		}
+		if eligible != 1 {
+			t.Fatalf("exactly 1 window must reach the seam %s, got %d: %+v", nextMidnight, eligible, p.OpenWindows)
+		}
+	})
+
+	// ── Short next-day window: abutment holds but the run is only 60. ───────
+	t.Run("short_next_day_window", func(t *testing.T) {
+		e.seedRows(t, pitch, [][3]any{
+			{int(time.Monday), "16:00", "00:00"},
+			{int(time.Tuesday), "00:00", "01:00"},
+		})
+		p := get(t)
+		if p.HoursShape != string(data.ShapeContinuous) {
+			t.Fatalf("hours_shape = %q, want %q", p.HoursShape, data.ShapeContinuous)
+		}
+		if p.ContinuationMinutes != 60 {
+			t.Fatalf("continuation_minutes = %d, want 60 (a flat 120 would over-advertise)", p.ContinuationMinutes)
+		}
 	})
 
 	// ── Production shape 3: full day followed by a CLOSED day ────────────────
@@ -136,6 +208,9 @@ func TestAvailabilityShape_ServedPayload(t *testing.T) {
 		p := get(t)
 		if p.HoursShape != string(data.ShapeDayBounded) {
 			t.Fatalf("hours_shape = %q, want %q", p.HoursShape, data.ShapeDayBounded)
+		}
+		if p.ContinuationMinutes != 0 {
+			t.Fatalf("continuation_minutes = %d, want 0", p.ContinuationMinutes)
 		}
 	})
 
@@ -151,6 +226,12 @@ func TestAvailabilityShape_ServedPayload(t *testing.T) {
 		}
 		if p.HoursShape != string(data.ShapeContinuous) {
 			t.Fatalf("hours_shape = %q, want %q", p.HoursShape, data.ShapeContinuous)
+		}
+		// Server fails OPEN here, but the payload advertises NO continuation —
+		// clients stay day-bounded on an unconfigured pitch by contract, not by
+		// a client-side special case.
+		if p.ContinuationMinutes != 0 {
+			t.Fatalf("continuation_minutes = %d, want 0 for an unconfigured pitch", p.ContinuationMinutes)
 		}
 	})
 }

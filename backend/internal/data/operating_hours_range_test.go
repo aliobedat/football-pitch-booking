@@ -204,6 +204,276 @@ func TestResolveHoursShape_PerDay(t *testing.T) {
 	}
 }
 
+// rows builds a schedule from (weekday, open, close) triples.
+func rows(specs ...[3]string) []OperatingWindow {
+	out := make([]OperatingWindow, 0, len(specs))
+	for _, s := range specs {
+		wd := map[string]int{"sun": sun, "mon": mon, "tue": tue, "wed": wed, "thu": thu, "fri": fri, "sat": sat}[s[0]]
+		out = append(out, win(wd, s[1], s[2]))
+	}
+	return out
+}
+
+// TestResolveContinuationMinutes pins the value the availability payload serves.
+// The shape alone cannot carry this: `continuous` proves the next day's coverage
+// ABUTS this date's, but not how LONG it runs. Extending by a flat 120 on a
+// short next-day window advertises hours the server rejects — the defect this
+// signal exists to prevent.
+func TestResolveContinuationMinutes(t *testing.T) {
+	monday := am(2026, 7, 27, 0, 0)
+	if int(monday.Weekday()) != mon {
+		t.Fatalf("anchor 2026-07-27 is weekday %d, want Monday(%d)", int(monday.Weekday()), mon)
+	}
+	ceiling := 120 * time.Minute
+
+	cases := []struct {
+		name    string
+		windows []OperatingWindow
+		want    int
+	}{
+		{"24/7 (prod pitches 1+2) → full ceiling", fullWeek("00:00", "00:00"), 120},
+		{"split shift, evening row abuts midnight, next day 00:00→08:00",
+			rows([3]string{"mon", "09:00", "12:00"}, [3]string{"mon", "20:00", "00:00"}, [3]string{"tue", "00:00", "08:00"}), 120},
+		{"SHORT next day 00:00→01:00 → only 60",
+			rows([3]string{"mon", "16:00", "00:00"}, [3]string{"tue", "00:00", "01:00"}), 60},
+		{"very short next day 00:00→00:30 → only 30",
+			rows([3]string{"mon", "16:00", "00:00"}, [3]string{"tue", "00:00", "00:30"}), 30},
+		{"SPLIT next day 00:00→01:00 + 01:00→03:00 coalesces → full ceiling",
+			rows([3]string{"mon", "16:00", "00:00"}, [3]string{"tue", "00:00", "01:00"}, [3]string{"tue", "01:00", "03:00"}), 120},
+		{"next day has a GAP after 01:00 (01:30→05:00) → still only 60",
+			rows([3]string{"mon", "16:00", "00:00"}, [3]string{"tue", "00:00", "01:00"}, [3]string{"tue", "01:30", "05:00"}), 60},
+		{"spill 16:00→01:00 → 0 (tail already in served windows)", fullWeek("16:00", "01:00"), 0},
+		{"day-bounded 09:00→17:00 → 0", fullWeek("09:00", "17:00"), 0},
+		{"continuous-then-CLOSED next day → 0", weekExcept("00:00", "00:00", tue), 0},
+		{"unconfigured (fail-open) → 0", nil, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveContinuationMinutes(tc.windows, monday, ceiling)
+			if err != nil {
+				t.Fatalf("ResolveContinuationMinutes: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("want %d, got %d", tc.want, got)
+			}
+		})
+	}
+}
+
+// TestContinuation_SplitShiftSeamOnly is the regression test for the reviewed
+// defect: a split-shift day classified `continuous` must NOT license extending
+// its MORNING window.
+//
+// The next day deliberately opens 00:00→01:00, so the correct continuation is
+// 60 — NOT the 120 ceiling. That choice is what gives this test teeth: an
+// implementation that returns a hardcoded 120, or that measures anything other
+// than the seam run, FAILS here. (An earlier version of this test used a
+// next-day window longer than the ceiling, so every assertion held even against
+// a hardcoded 120 — it proved nothing about this function.)
+func TestContinuation_SplitShiftSeamOnly(t *testing.T) {
+	w := rows(
+		[3]string{"mon", "09:00", "12:00"}, // morning shift — NOT seam-eligible
+		[3]string{"mon", "20:00", "00:00"}, // evening shift — reaches the seam
+		[3]string{"tue", "00:00", "01:00"}, // next-day run is only 60 minutes
+	)
+	monday := am(2026, 7, 27, 0, 0)
+
+	cont, err := ResolveContinuationMinutes(w, monday, 120*time.Minute)
+	if err != nil {
+		t.Fatalf("ResolveContinuationMinutes: %v", err)
+	}
+	if cont != 60 {
+		t.Fatalf("continuation = %d, want 60 — a hardcoded ceiling or a non-seam measurement gives 120", cont)
+	}
+
+	// The morning window earns NO continuation: 11:30→12:30 runs past its
+	// 12:00 close into a real closure, and the gate rejects it.
+	if within(t, w, am(2026, 7, 27, 11, 30), am(2026, 7, 27, 12, 30)) {
+		t.Fatal("11:30→12:30 crosses the midday closure and must be REJECTED")
+	}
+	// The seam window earns exactly the served 60, and not one minute more.
+	if !within(t, w, am(2026, 7, 27, 23, 30), am(2026, 7, 28, 0, 30)) {
+		t.Fatal("23:30→00:30 is inside the seam run and must be accepted")
+	}
+	if within(t, w, am(2026, 7, 27, 23, 30), am(2026, 7, 28, 1, 30)) {
+		t.Fatal("23:30→01:30 exceeds the 60-minute seam run and must be REJECTED")
+	}
+}
+
+// TestContinuation_CeilingGuard pins the non-positive-ceiling guard. DELETING
+// it makes a negative ceiling produce a NEGATIVE continuation (min(run, -1m) →
+// -1), which this catches. Note the `<= 0` vs `< 0` refinement is deliberately
+// NOT pinned: at exactly 0 the guard and min(run, 0) agree, so the two spellings
+// are behaviourally identical and no test can distinguish them.
+func TestContinuation_CeilingGuard(t *testing.T) {
+	monday := am(2026, 7, 27, 0, 0)
+
+	schedules := map[string][]OperatingWindow{
+		// 24/7: with the guard removed the probe collapses and no run covers
+		// the seam, so this alone would NOT catch the deletion.
+		"24/7": fullWeek("00:00", "00:00"),
+		// A date that both SPILLS and abuts. This is the one with teeth: only
+		// day D gets anchored by a collapsed probe, and D's own spill window
+		// still covers the seam — so without the guard, min(2h, -1m) yields a
+		// NEGATIVE continuation.
+		"spill+continuous": rows(
+			[3]string{"mon", "16:00", "02:00"},
+			[3]string{"tue", "00:00", "00:30"},
+		),
+	}
+
+	for name, w := range schedules {
+		for _, ceiling := range []time.Duration{0, -1 * time.Minute, -48 * time.Hour} {
+			got, err := ResolveContinuationMinutes(w, monday, ceiling)
+			if err != nil {
+				t.Fatalf("%s ceiling=%s: %v", name, ceiling, err)
+			}
+			if got != 0 {
+				t.Fatalf("%s ceiling=%s: continuation = %d, want 0 (a non-positive ceiling can never license a continuation, and must never go negative)", name, ceiling, got)
+			}
+		}
+	}
+}
+
+// TestContinuation_ProbeWidthFollowsCeiling pins the probe span to the CEILING.
+// The probe is [seam, seam+ceiling] and ResolveWindowsForRange anchors whole
+// days across it, so the measurable run always reaches at least the ceiling.
+//
+// The ceiling here is 72h on purpose. A fixed +24h probe anchors days D…D+2,
+// whose coalesced run already ends 48h past the seam — so it satisfies any
+// ceiling ≤ 48h, and a 48-hour assertion PASSES against that mutation (verified
+// by mutation testing). 72h is the smallest round ceiling that forces the probe
+// to widen, making this the assertion that actually fails when the span stops
+// following the ceiling.
+func TestContinuation_ProbeWidthFollowsCeiling(t *testing.T) {
+	w := fullWeek("00:00", "00:00") // open forever
+	monday := am(2026, 7, 27, 0, 0)
+
+	got, err := ResolveContinuationMinutes(w, monday, 72*time.Hour)
+	if err != nil {
+		t.Fatalf("ResolveContinuationMinutes: %v", err)
+	}
+	if got != 4320 {
+		t.Fatalf("continuation = %d, want 4320 — the probe must span the whole ceiling, not a fixed day", got)
+	}
+	// And the gate agrees: a 72h run from the seam really is contained.
+	if !within(t, w, am(2026, 7, 28, 0, 0), am(2026, 7, 31, 0, 0)) {
+		t.Fatal("a 72h booking from the seam must be accepted on a 24/7 pitch")
+	}
+}
+
+// TestContinuation_UnconfiguredIsStructural documents WHY the unconfigured case
+// returns 0: not a special-cased early return, but because zero windows resolve
+// to zero intervals, so no run covers the seam. There is deliberately no guard
+// to pin — a guard here would be unreachable code, which this WO has already
+// paid for once (see the ResolveOpenWindows warning).
+func TestContinuation_UnconfiguredIsStructural(t *testing.T) {
+	monday := am(2026, 7, 27, 0, 0)
+	// Shape is continuous (the server's fail-open) …
+	shape, err := ResolveHoursShape(nil, monday)
+	if err != nil {
+		t.Fatalf("ResolveHoursShape: %v", err)
+	}
+	if shape != ShapeContinuous {
+		t.Fatalf("unconfigured shape = %q, want %q", shape, ShapeContinuous)
+	}
+	// … yet no continuation is advertised, for any ceiling.
+	for _, ceiling := range []time.Duration{30 * time.Minute, 120 * time.Minute, 48 * time.Hour} {
+		got, err := ResolveContinuationMinutes(nil, monday, ceiling)
+		if err != nil {
+			t.Fatalf("ceiling=%s: %v", ceiling, err)
+		}
+		if got != 0 {
+			t.Fatalf("ceiling=%s: unconfigured continuation = %d, want 0", ceiling, got)
+		}
+	}
+}
+
+// TestContinuation_ShortNextDayRejectedBeyondRun proves the served 60 is not
+// merely a smaller number but the ACTUAL limit the gate enforces.
+func TestContinuation_ShortNextDayRejectedBeyondRun(t *testing.T) {
+	w := rows([3]string{"mon", "16:00", "00:00"}, [3]string{"tue", "00:00", "01:00"})
+	monday := am(2026, 7, 27, 0, 0)
+
+	cont, err := ResolveContinuationMinutes(w, monday, 120*time.Minute)
+	if err != nil {
+		t.Fatalf("ResolveContinuationMinutes: %v", err)
+	}
+	if cont != 60 {
+		t.Fatalf("continuation = %d, want 60", cont)
+	}
+	// Exactly the served continuation is accepted …
+	if !within(t, w, am(2026, 7, 27, 23, 30), am(2026, 7, 28, 0, 30)) {
+		t.Fatal("23:30→00:30 is within the 60-minute continuation and must be accepted")
+	}
+	if !within(t, w, am(2026, 7, 28, 0, 0), am(2026, 7, 28, 1, 0)) {
+		t.Fatal("00:00→01:00 fills the next-day run exactly and must be accepted")
+	}
+	// … and one minute beyond it is not. A flat 120 would have offered this.
+	if within(t, w, am(2026, 7, 27, 23, 30), am(2026, 7, 28, 1, 30)) {
+		t.Fatal("23:30→01:30 exceeds the 60-minute continuation and must be REJECTED")
+	}
+}
+
+// TestContinuation_MultipleRowsEndingAtMidnight documents the declared edge:
+// when SEVERAL rows of the same date end exactly at the seam, the continuation
+// is a property of the seam, not of any one row — one value, applying to every
+// such window. Overlapping rows cannot disagree, because any two windows ending
+// at the same instant necessarily overlap.
+func TestContinuation_MultipleRowsEndingAtMidnight(t *testing.T) {
+	w := rows(
+		[3]string{"mon", "20:00", "00:00"},
+		[3]string{"mon", "22:00", "00:00"}, // second row, same seam
+		[3]string{"tue", "00:00", "01:00"},
+	)
+	monday := am(2026, 7, 27, 0, 0)
+
+	got, err := ResolveContinuationMinutes(w, monday, 120*time.Minute)
+	if err != nil {
+		t.Fatalf("ResolveContinuationMinutes: %v", err)
+	}
+	if got != 60 {
+		t.Fatalf("continuation = %d, want 60 (bounded by the next-day run, not by row count)", got)
+	}
+	// Both rows reach the seam, so a booking from either is accepted up to it.
+	if !within(t, w, am(2026, 7, 27, 23, 30), am(2026, 7, 28, 0, 30)) {
+		t.Fatal("23:30→00:30 must be accepted")
+	}
+	if within(t, w, am(2026, 7, 27, 23, 30), am(2026, 7, 28, 1, 30)) {
+		t.Fatal("23:30→01:30 exceeds the run and must be REJECTED")
+	}
+}
+
+// TestResolveDateHours_BundlesBothSignals checks the combined accessor agrees
+// with the individual ones and never reports a continuation off a non-continuous
+// shape.
+func TestResolveDateHours_BundlesBothSignals(t *testing.T) {
+	monday := am(2026, 7, 27, 0, 0)
+	ceiling := 120 * time.Minute
+	for _, tc := range []struct {
+		name      string
+		windows   []OperatingWindow
+		wantShape HoursShape
+		wantCont  int
+	}{
+		{"24/7", fullWeek("00:00", "00:00"), ShapeContinuous, 120},
+		{"short next day", rows([3]string{"mon", "16:00", "00:00"}, [3]string{"tue", "00:00", "01:00"}), ShapeContinuous, 60},
+		{"spill", fullWeek("16:00", "01:00"), ShapeSpill, 0},
+		{"day bounded", fullWeek("09:00", "17:00"), ShapeDayBounded, 0},
+		{"unconfigured", nil, ShapeContinuous, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ResolveDateHours(tc.windows, monday, ceiling)
+			if err != nil {
+				t.Fatalf("ResolveDateHours: %v", err)
+			}
+			if got.Shape != tc.wantShape || got.ContinuationMinutes != tc.wantCont {
+				t.Fatalf("got {%q, %d}, want {%q, %d}", got.Shape, got.ContinuationMinutes, tc.wantShape, tc.wantCont)
+			}
+		})
+	}
+}
+
 // TestMergedGate_ReadPathsUnmerged is the D-B regression proof at the unit
 // level: ResolveWindowsForDate — the resolver EVERY read path (SearchAvailability,
 // GetOpenWindows, day view, calendar) consumes — must keep returning DAY-shaped

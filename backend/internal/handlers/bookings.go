@@ -38,7 +38,9 @@ const bookingLeadTime = 15 * time.Minute
 // maxBookingDuration is the upper bound on a single player booking's length
 // (WO-CROSS-MIDNIGHT Gate 1A, Q4): previously unbounded above the 1-hour
 // floor. 120 minutes matches the new booking UI's longest duration option.
-const maxBookingDuration = 120 * time.Minute
+// Aliased to the data-layer constant so the validation here, the continuation
+// ceiling, and the booked-slots lookahead cannot drift apart.
+const maxBookingDuration = data.MaxPlayerBookingDuration
 
 // bookingFingerprint hashes the SEMANTIC content of a booking request (pitch +
 // time range) so the same idempotency key reused with a different booking is
@@ -299,13 +301,20 @@ func (h *BookingHandler) GetPitchAvailability(c *gin.Context) {
 		openWindows = []data.ConcreteInterval{} // serialise [] not null
 	}
 
-	// Shape signal (WO-24H-CONTINUITY): open_windows stay DAY-shaped; this tells
-	// the client how the day behaves at midnight — `continuous` (24/7 abutment:
-	// a booking may end past midnight, but the after-midnight slots belong to
-	// the NEXT day's window and must not be rendered as this day's tail),
-	// `spill` (16:00→01:00: past-midnight end allowed AND the tail is this
-	// day's), or `day_bounded` (no past-midnight end).
-	shape, err := h.repo.HoursShape(c.Request.Context(), pitchID, date)
+	// Per-date signals (WO-24H-CONTINUITY): open_windows stay DAY-shaped.
+	// hours_shape tells the client how the day behaves at midnight —
+	// `continuous` (the next day's coverage abuts this one: a booking may end
+	// past midnight, but the after-midnight slots belong to the NEXT day's
+	// window and must not be rendered as this day's tail), `spill`
+	// (16:00→01:00: past-midnight end allowed AND the tail is this day's), or
+	// `day_bounded` (no past-midnight end).
+	//
+	// continuation_minutes states HOW FAR past midnight the coverage actually
+	// runs, capped at the player ceiling. The shape alone is not enough: it
+	// proves abutment but not that the next day's run is long enough for a full
+	// booking (a next-day 00:00→01:00 row abuts, yet allows only 60 minutes).
+	// A client extends ONLY the window reaching midnight, and only by this much.
+	meta, err := h.repo.HoursMeta(c.Request.Context(), pitchID, date, maxBookingDuration)
 	if err != nil {
 		c.Error(err)
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -321,7 +330,10 @@ func (h *BookingHandler) GetPitchAvailability(c *gin.Context) {
 		"count":        len(slots),
 		"open_windows": openWindows,
 		"has_schedule": hasSchedule,
-		"hours_shape":  shape,
+		"hours_shape":  meta.Shape,
+		// Minutes past the next local midnight this date's coverage continues.
+		// 0 unless hours_shape == "continuous".
+		"continuation_minutes": meta.ContinuationMinutes,
 	})
 }
 

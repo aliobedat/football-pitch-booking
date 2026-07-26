@@ -51,6 +51,22 @@ interface SessionRange {
   end:   number;
 }
 
+// HoursShape is the server's classification of this DATE's midnight boundary
+// (WO-24H-CONTINUITY). The payload's open_windows stay day-shaped; this states
+// what the client may not infer from them:
+//   continuous  — coverage reaches midnight AND the next day opens exactly
+//                 there (a 24/7 pitch). A booking may end past midnight, but
+//                 the after-midnight slots belong to the NEXT day's window —
+//                 rendering them as this day's tail would show the same
+//                 concrete slot under two day chips.
+//   spill       — a window of THIS day genuinely ends past midnight
+//                 (16:00→01:00). Past-midnight ends allowed AND the tail is
+//                 this day's, so it renders under بعد منتصف الليل.
+//   day_bounded — nothing continues past midnight.
+// The shape is per-DATE, not per-pitch: a 24/7 pitch whose NEXT day is closed
+// serves day_bounded for that date.
+type HoursShape = 'continuous' | 'spill' | 'day_bounded';
+
 // PitchOption is one selectable pitch inside a multi-pitch venue (WO-VENUES
 // Gate 1c). subline is shown only when format/price differ across the venue.
 export interface PitchOption {
@@ -164,19 +180,32 @@ function overlapsBooked(aStart: number, aEnd: number, booked: BookedSlot[]): boo
 }
 
 // availableStartsFor computes the bookable 30-min start marks for one session
-// day: inside a window, room for ≥60 min before window close, not overlapping a
-// booked slot, and not inside the lead window (absolute-time comparison, so the
-// after-midnight tail of today's session filters correctly too).
+// day. A mark must lie inside a SERVED window (`windows` — which bounds WHICH
+// marks this day may offer at all), have room for the 60-minute minimum
+// booking inside a CONTAINMENT window (`roomWindows` — which may extend past
+// the served close on a `continuous` date), not overlap a booked slot, and not
+// fall inside the lead window (absolute-time comparison, so the after-midnight
+// tail of a spill session filters correctly too).
+//
+// The two window sets are separate on purpose. Using `windows` for the room
+// check would drop 23:30 on a 24/7 pitch — a perfectly bookable start, since
+// 23:30→00:30 is contained by the abutting next-day window — while using
+// `roomWindows` to bound the marks would emit starts ≥1440 and double-render
+// the next day's slots under this day's chip (D-D). Callers pass the same
+// array for both wherever no continuation applies.
 function availableStartsFor(
   dayStr:   string,
   windows:  SessionRange[],
   booked:   BookedSlot[],
   minStartMs: number,
+  roomWindows: SessionRange[] = windows,
 ): number[] {
   const out: number[] = [];
   for (const w of windows) {
     const first = Math.ceil(w.start / 30) * 30;
-    for (let m = first; m <= w.end - 60; m += 30) {
+    for (let m = first; m < w.end; m += 30) {
+      // Room for the 60-minute minimum, measured against the containment set.
+      if (!roomWindows.some(rw => rw.start <= m && m + 60 <= rw.end)) continue;
       const absStart = buildAbs(dayStr, m).getTime();
       if (absStart < minStartMs) continue;
       if (overlapsBooked(absStart, absStart + 30 * 60000, booked)) continue;
@@ -286,6 +315,13 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
   // unconfigured and OPEN 24/7 (the server's fail-open decision).
   const [openWindows,  setOpenWindows]  = useState<OpenWindow[]>([]);
   const [hasSchedule,  setHasSchedule]  = useState(false);
+  // Served per-date shape. Defaults to day_bounded — the most restrictive
+  // value — so a failed/absent payload never unlocks a past-midnight duration.
+  const [hoursShape,   setHoursShape]   = useState<HoursShape>('day_bounded');
+  // Served minutes of coverage past the next local midnight (0 unless the date
+  // is continuous). Defaults to 0 — fail-closed: an absent or unparseable field
+  // grants no continuation at all.
+  const [continuation, setContinuation] = useState(0);
   const [loadingSlots, setLoadingSlots] = useState(false);
   const [submitting,   setSubmitting]   = useState(false);
   const [apiError,     setApiError]     = useState<string | null>(null);
@@ -302,13 +338,22 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
         setBooked(r.data.booked_slots ?? []);
         setOpenWindows(r.data.open_windows ?? []);
         setHasSchedule(!!r.data.has_schedule);
+        setHoursShape((r.data.hours_shape as HoursShape) ?? 'day_bounded');
+        setContinuation(Number(r.data.continuation_minutes) || 0);
       })
-      .catch(() => { setBooked([]); setOpenWindows([]); setHasSchedule(false); })
+      .catch(() => {
+        setBooked([]); setOpenWindows([]); setHasSchedule(false);
+        setHoursShape('day_bounded'); setContinuation(0);
+      })
       .finally(() => setLoadingSlots(false));
   }, [pitchId, selDayStr]);
 
   // ── Session windows for the selected day (UN-clamped, session-anchored) ───
-  // Unconfigured (24/7) → one full civil-day window [0, 1440).
+  // These are the SERVED windows, used for START generation and group
+  // rendering. Unconfigured (has_schedule=false) → one full civil-day window
+  // [0, 1440). That synthesized window is deliberately day-bounded: the server
+  // fails OPEN for an unconfigured pitch, and the client is intentionally more
+  // restrictive there (docs/followups/operating-hours-gate-fail-open.md).
   const sessionWindows = useMemo<SessionRange[]>(() => {
     if (!hasSchedule) return [{ start: 0, end: 1440 }];
     return openWindows
@@ -316,13 +361,64 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
       .filter((r): r is SessionRange => r !== null);
   }, [openWindows, hasSchedule, selDayStr]);
 
+  // ── Duration windows: containment ONLY (never start generation) ───────────
+  // On a `continuous` date the served window ends at 1440 while the next day's
+  // window abuts it, so a booking may validly run past midnight. That
+  // continuation must NOT reach availableStartsFor as a BOUND, or start marks
+  // ≥1440 would be emitted and the same concrete slot would render under both
+  // this day's بعد منتصف الليل group and the next day's own chip. Start
+  // availability and end containment are separate concerns; this is the second
+  // set, consumed only by validDur (and as the room check for marks).
+  //
+  // DELIBERATELY NARROW. Every condition below must hold, and any one failing
+  // means NO extension — the client then simply cannot offer a past-midnight
+  // end, which under-offers but can never over-offer. The server remains the
+  // gate; this only decides what the UI dares show.
+  //
+  //   hasSchedule            — an UNCONFIGURED pitch also serves `continuous`
+  //                            (server fail-open), and its window here is the
+  //                            synthesized [0,1440]. Extending that would undo
+  //                            the deliberate client-side restriction.
+  //   shape === 'continuous' — a `spill` window already ends past 1440 at a
+  //                            REAL closing time; extending it would advertise
+  //                            hours the server rejects. `day_bounded` has
+  //                            nothing to continue into.
+  //   continuation > 0       — the amount comes from the SERVER
+  //                            (continuation_minutes), never a client-side
+  //                            constant. A next day that opens 00:00→01:00
+  //                            abuts but allows only 60 minutes; a hardcoded
+  //                            120 would over-offer by an hour.
+  //   exactly ONE window     — a split-shift day can be classified continuous
+  //                            while also having a morning window that must
+  //                            NOT be extended. Rather than pick the right
+  //                            window, refuse the whole case.
+  //   that window ends 1440  — the continuation belongs to the midnight seam.
+  //                            A date that both spills and abuts has no window
+  //                            ending exactly at 1440, so it is refused too.
+  //
+  // The multi-window and non-1440 shapes do not exist in production (only the
+  // 24/7 and 16:00→01:00 schedules do) and are documented as under-served in
+  // docs/followups/hours-shape-contract-limits.md.
+  const durationWindows = useMemo<SessionRange[]>(() => {
+    if (!hasSchedule)                 return sessionWindows;
+    if (hoursShape !== 'continuous')  return sessionWindows;
+    if (continuation <= 0)            return sessionWindows;
+    if (sessionWindows.length !== 1)  return sessionWindows;
+    const w = sessionWindows[0];
+    if (w.end !== 1440)               return sessionWindows;
+    return [{ ...w, end: w.end + continuation }];
+  }, [sessionWindows, hasSchedule, hoursShape, continuation]);
+
   // Earliest bookable absolute instant (server lead window).
   const minStartMs = serverNow ? serverNow.getTime() + LEAD_MINUTES * 60000 : 0;
 
   // ── Available 30-min start marks for the selected session day ─────────────
+  // Marks are bounded by the SERVED windows (never ≥1440 on a continuous date)
+  // but their 60-minute room is measured against the containment set, so the
+  // last pre-midnight start on a 24/7 pitch (23:30) is offered.
   const starts = useMemo(
-    () => selDayStr ? availableStartsFor(selDayStr, sessionWindows, booked, minStartMs) : [],
-    [selDayStr, sessionWindows, booked, minStartMs],
+    () => selDayStr ? availableStartsFor(selDayStr, sessionWindows, booked, minStartMs, durationWindows) : [],
+    [selDayStr, sessionWindows, booked, minStartMs, durationWindows],
   );
 
   // ── D3-a: still-live previous session ─────────────────────────────────────
@@ -341,6 +437,12 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
     api
       .get(`/pitches/${pitchId}/availability?date=${yStr}`, { _silent: true })
       .then(r => {
+        // D-E: a pitch that never CLOSED has no distinct "previous session" to
+        // still be running — its own today-chip already covers the 00:00+
+        // slots, which belong to today's window. Gated on YESTERDAY's shape
+        // (the date the chip would represent), read from this very response,
+        // not on the selected day's.
+        if (r.data.hours_shape === 'continuous') { setPrevSessionLive(false); return; }
         const yWindows: SessionRange[] = (r.data.has_schedule
           ? (r.data.open_windows ?? [])
               .map((w: OpenWindow) => windowToSessionRange(w, yStr))
@@ -372,10 +474,12 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
 
   // ── Duration validity + derived values ────────────────────────────────────
 
-  // A duration fits iff the whole [start, start+dur) lies inside ONE session
-  // window (containment — mirrors the server gate) and overlaps no booked slot.
+  // A duration fits iff the whole [start, start+dur) lies inside ONE window of
+  // the CONTAINMENT set (mirrors the server's merged gate) and overlaps no
+  // booked slot. durationWindows — not sessionWindows — so a continuous date
+  // can run past midnight without emitting after-midnight start marks.
   function validDur(start: number, dur: number): boolean {
-    if (!sessionWindows.some(w => w.start <= start && start + dur <= w.end)) return false;
+    if (!durationWindows.some(w => w.start <= start && start + dur <= w.end)) return false;
     const a = buildAbs(selDayStr, start).getTime();
     return !overlapsBooked(a, buildAbs(selDayStr, start + dur).getTime(), booked);
   }
@@ -465,7 +569,36 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
       setBooked(freshBooked);
       setOpenWindows(avail.data.open_windows ?? []);
       setHasSchedule(!!avail.data.has_schedule);
-      if (overlapsBooked(absStart.getTime(), absEnd.getTime(), freshBooked)) {
+      // Refresh the shape signals with the windows they describe — leaving a
+      // stale shape beside fresh windows would compute the containment set
+      // from a classification that no longer matches (e.g. an owner edits the
+      // schedule mid-session).
+      setHoursShape((avail.data.hours_shape as HoursShape) ?? 'day_bounded');
+      setContinuation(Number(avail.data.continuation_minutes) || 0);
+      // Re-validate CONTAINMENT against what we just fetched, not only
+      // occupancy. Refreshing the shape signals without re-checking them would
+      // be decorative: the containment decision was made when the slot was
+      // picked, and the schedule (or, under a pitch-switch race, the pitch
+      // itself) may have changed since. Recomputed from the fresh payload
+      // rather than from state, because setState is not yet applied here.
+      const freshWindows: SessionRange[] = (avail.data.has_schedule
+        ? (avail.data.open_windows ?? [])
+            .map((w: OpenWindow) => windowToSessionRange(w, selDayStr))
+            .filter((x: SessionRange | null): x is SessionRange => x !== null)
+        : [{ start: 0, end: 1440 }]);
+      const freshCont = Number(avail.data.continuation_minutes) || 0;
+      const freshContain: SessionRange[] =
+        (avail.data.has_schedule &&
+         avail.data.hours_shape === 'continuous' &&
+         freshCont > 0 &&
+         freshWindows.length === 1 &&
+         freshWindows[0].end === 1440)
+          ? [{ ...freshWindows[0], end: 1440 + freshCont }]
+          : freshWindows;
+      const stillContained = freshContain.some(
+        w => w.start <= selectedStart! && selectedStart! + duration <= w.end,
+      );
+      if (!stillContained || overlapsBooked(absStart.getTime(), absEnd.getTime(), freshBooked)) {
         setApiError('هذا الموعد لم يعد متاحاً');
         setSelectedStart(null);
         setSubmitting(false);
@@ -503,6 +636,9 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
               setBooked(r.data.booked_slots ?? []);
               setOpenWindows(r.data.open_windows ?? []);
               setHasSchedule(!!r.data.has_schedule);
+              // Shape signals travel with the windows they describe.
+              setHoursShape((r.data.hours_shape as HoursShape) ?? 'day_bounded');
+              setContinuation(Number(r.data.continuation_minutes) || 0);
             })
             .catch(() => { /* stale grid is safe — user will retry */ });
         } else if (code === 'outside_operating_hours')
@@ -660,7 +796,24 @@ export default function BookingForm({ pitchId, pricePerHour, pitchOptions, onPit
   }
 
   // ── Grouped slots for render ──────────────────────────────────────────────
+  // The بعد منتصف الليل group renders ONLY on a `spill` date, where the
+  // after-midnight slots genuinely belong to THIS day's window. On a
+  // `continuous` date those same instants are covered by the NEXT day's own
+  // window and are reachable from its chip, so surfacing them here too would
+  // double-render one concrete slot.
+  //
+  // This filter CAN hide marks, and the earlier claim that it could not was
+  // wrong. A date may be classified `continuous` while ALSO having a window
+  // that ends past 1440 (e.g. 16:00→02:00 with the next day opening 00:00):
+  // ResolveHoursShape checks abutment before spill, so `continuous` wins and
+  // the served window still reaches 1560. availableStartsFor then emits marks
+  // ≥1440 that this filter discards. Those instants remain reachable from the
+  // next day's chip whenever that day's own window covers them; where it does
+  // not, they are genuinely lost. That is an accepted, documented limitation —
+  // losing inventory is preferable to double-rendering, and no production
+  // pitch has the shape. See docs/followups/hours-shape-contract-limits.md.
   const groups = GROUP_DEFS
+    .filter(g => g.from < 1440 || hoursShape === 'spill')
     .map(g => ({
       ...g,
       sub: g.from >= 1440 ? `فجر ${nextDayName}` : null,

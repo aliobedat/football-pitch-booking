@@ -209,10 +209,14 @@ func TestContinuity24h_ReadPathsStayDayShaped(t *testing.T) {
 	if len(ivs) != 1 || !ivs[0].Start.Equal(dayStart) || !ivs[0].End.Equal(nextMidnight) {
 		t.Fatalf("GetOpenWindows(24/7) must stay day-shaped [%s,%s), got %+v", dayStart, nextMidnight, ivs)
 	}
-	// Shape signal: continuous for the 24/7 production shape.
-	shape, err := e.repo.HoursShape(ctx, int(e.pitchID), date)
-	if err != nil || shape != data.ShapeContinuous {
-		t.Fatalf("HoursShape(24/7): got %q err=%v, want %q", shape, err, data.ShapeContinuous)
+	// Shape signal: continuous for the 24/7 production shape, with the full
+	// 120-minute continuation (the next day is also a full 24h day).
+	meta, err := e.repo.HoursMeta(ctx, int(e.pitchID), date, 120*time.Minute)
+	if err != nil || meta.Shape != data.ShapeContinuous {
+		t.Fatalf("HoursMeta(24/7): got %q err=%v, want %q", meta.Shape, err, data.ShapeContinuous)
+	}
+	if meta.ContinuationMinutes != 120 {
+		t.Fatalf("HoursMeta(24/7) continuation = %d, want 120", meta.ContinuationMinutes)
 	}
 
 	// SearchAvailability: the closing cap on the 24/7 shape must remain the
@@ -282,17 +286,135 @@ func TestContinuity24h_ReadPathsStayDayShaped(t *testing.T) {
 	if target == nil || len(ivs) != 2 {
 		t.Fatalf("GetOpenWindows(spill) must serve the unmerged 2-window candidate set incl. [16:00,%s), got %+v", spillEnd, ivs)
 	}
-	shape, err = e.repo.HoursShape(ctx, int(e.pitchID), date)
-	if err != nil || shape != data.ShapeSpill {
-		t.Fatalf("HoursShape(spill): got %q err=%v, want %q", shape, err, data.ShapeSpill)
+	meta, err = e.repo.HoursMeta(ctx, int(e.pitchID), date, 120*time.Minute)
+	if err != nil || meta.Shape != data.ShapeSpill {
+		t.Fatalf("HoursMeta(spill): got %q err=%v, want %q", meta.Shape, err, data.ShapeSpill)
+	}
+	if meta.ContinuationMinutes != 0 {
+		t.Fatalf("HoursMeta(spill) continuation = %d, want 0 (tail already in windows)", meta.ContinuationMinutes)
 	}
 
 	// Shape 3: full day followed by a CLOSED day → day_bounded (no abutment).
 	nextWD := int(date.AddDate(0, 0, 1).Weekday())
 	e.weekScheduleExcept(t, "00:00", "00:00", nextWD)
-	shape, err = e.repo.HoursShape(ctx, int(e.pitchID), date)
-	if err != nil || shape != data.ShapeDayBounded {
-		t.Fatalf("HoursShape(full day + closed next): got %q err=%v, want %q", shape, err, data.ShapeDayBounded)
+	meta, err = e.repo.HoursMeta(ctx, int(e.pitchID), date, 120*time.Minute)
+	if err != nil || meta.Shape != data.ShapeDayBounded {
+		t.Fatalf("HoursMeta(full day + closed next): got %q err=%v, want %q", meta.Shape, err, data.ShapeDayBounded)
+	}
+	if meta.ContinuationMinutes != 0 {
+		t.Fatalf("HoursMeta(full day + closed next) continuation = %d, want 0", meta.ContinuationMinutes)
+	}
+}
+
+// ── Booked-slots lookahead past the civil day ────────────────────────────────
+//
+// On a continuously-open pitch a booking STARTING on day D may end after
+// midnight, so D's availability payload must reveal any booking such a start
+// could collide with — including ones that START on D+1. The plain day window
+// [dayStart, dayEnd) excludes a booking beginning exactly at dayEnd, which let
+// the client offer 23:30+120 against an existing 00:30 booking and take a 409
+// from the EXCLUDE constraint. Reproduced live before the fix.
+
+func TestContinuity24h_BookedSlotsLookahead(t *testing.T) {
+	e := newOHGateEnv(t)
+	date := e.futureDate()
+	e.fullWeekSchedule(t, "00:00", "00:00") // 24/7 — production pitches 1 & 2
+	ctx := context.Background()
+
+	// A booking that starts AFTER the next midnight, i.e. outside the civil day.
+	nextDay := date.AddDate(0, 0, 1)
+	bStart := xmAt(nextDay, 0, 30)
+	bEnd := xmAt(nextDay, 1, 30)
+	if _, _, err := e.repo.CreateManualBooking(ctx, ManualBookingParams{
+		PitchID:     e.pitchID,
+		Actor:       auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner},
+		StartTime:   bStart.UTC(),
+		EndTime:     bEnd.UTC(),
+		GuestName:   "Next-day early booking",
+		RepeatWeeks: 1,
+	}); err != nil {
+		t.Fatalf("seed next-day 00:30 booking: %v", err)
+	}
+
+	slots, err := e.repo.GetBookedSlots(ctx, int(e.pitchID), date)
+	if err != nil {
+		t.Fatalf("GetBookedSlots: %v", err)
+	}
+	var found bool
+	for _, s := range slots {
+		if s.StartTime.Equal(bStart.UTC()) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("day %s payload must reveal the next-day 00:30 booking a 23:30 start could collide with; got %d slots: %+v",
+			date.Format("2006-01-02"), len(slots), slots)
+	}
+
+	// And the collision the client would otherwise offer is genuinely a
+	// conflict — proving the lookahead guards a REAL rejection, not a
+	// hypothetical one.
+	if _, err := e.book(xmAt(date, 23, 30), xmAt(nextDay, 1, 30), false); !errors.Is(err, ErrDoubleBooking) {
+		t.Fatalf("23:30→01:30 overlapping the next-day booking: err = %v, want ErrDoubleBooking", err)
+	}
+}
+
+// TestContinuity24h_LookaheadCoversSpillOverhang is the regression test for the
+// reviewed defect in the FIRST version of this lookahead. That version bounded
+// the horizon at dayEnd + the player ceiling, reasoning that no same-day start
+// could reach further. That reasoning holds only on the civil day — the client
+// attributes starts by the SESSION AXIS, and a spill window ends on the next
+// calendar day, so its late marks reach far past dayEnd + 120m.
+//
+// `18:00→04:00` is a legal schedule (ValidateSchedule caps no window's length).
+// Its window ends 04:00 the next day, and the card offers starts up to 03:00.
+// A booking at 03:30 is therefore collidable from this day and MUST appear in
+// this day's payload; under the old bound (02:00) it did not, and the card
+// offered a slot the EXCLUDE constraint rejected.
+func TestContinuity24h_LookaheadCoversSpillOverhang(t *testing.T) {
+	e := newOHGateEnv(t)
+	date := e.futureDate()
+	e.fullWeekSchedule(t, "18:00", "04:00") // spills 4h past midnight
+	ctx := context.Background()
+
+	// 03:00→04:00 fills the window's tail. It starts a full hour past the OLD
+	// bound (dayEnd + 120m = 02:00), so it was invisible to day D's payload
+	// while remaining perfectly collidable from day D. (chk_min_duration
+	// enforces a 60-minute floor, so the seed cannot be shorter.)
+	nextDay := date.AddDate(0, 0, 1)
+	bStart := xmAt(nextDay, 3, 0)
+	bEnd := xmAt(nextDay, 4, 0)
+	if _, _, err := e.repo.CreateManualBooking(ctx, ManualBookingParams{
+		PitchID:     e.pitchID,
+		Actor:       auth.Actor{UserID: int(e.ownerID), Role: auth.RoleOwner},
+		StartTime:   bStart.UTC(),
+		EndTime:     bEnd.UTC(),
+		GuestName:   "Late spill-tail booking",
+		RepeatWeeks: 1,
+	}); err != nil {
+		t.Fatalf("seed next-day 03:00 booking: %v", err)
+	}
+
+	slots, err := e.repo.GetBookedSlots(ctx, int(e.pitchID), date)
+	if err != nil {
+		t.Fatalf("GetBookedSlots: %v", err)
+	}
+	var found bool
+	for _, s := range slots {
+		if s.StartTime.Equal(bStart.UTC()) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("an 18:00→04:00 pitch offers starts past 02:00, so day %s must reveal the 03:00 booking; got %d slots: %+v",
+			date.Format("2006-01-02"), len(slots), slots)
+	}
+
+	// The collision is real: a 02:30 start — comfortably offered by the card on
+	// this schedule — overlaps the seeded booking, so hiding it would have meant
+	// offering a slot the constraint rejects.
+	if _, err := e.book(xmAt(nextDay, 2, 30), xmAt(nextDay, 3, 30), false); !errors.Is(err, ErrDoubleBooking) {
+		t.Fatalf("02:30→03:30 overlapping the 03:00 booking: err = %v, want ErrDoubleBooking", err)
 	}
 }
 

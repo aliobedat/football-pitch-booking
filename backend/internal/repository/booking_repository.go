@@ -112,12 +112,14 @@ type BookingRepository interface {
 	// decision) — callers must NOT read an empty slice as "closed" without it.
 	GetOpenWindows(ctx context.Context, pitchID int, date time.Time) (intervals []data.ConcreteInterval, hasSchedule bool, err error)
 
-	// HoursShape classifies the pitch's midnight-boundary behavior on the Amman
-	// date: continuous | spill | day_bounded. The served open_windows stay
-	// DAY-shaped; this is the signal that tells a client whether a booking may
-	// end past midnight and whose day the after-midnight slots belong to.
-	// Unconfigured (fail-open 24/7) → continuous. See data.ResolveHoursShape.
-	HoursShape(ctx context.Context, pitchID int, date time.Time) (data.HoursShape, error)
+	// HoursMeta returns the per-date availability signals: the midnight-boundary
+	// shape (continuous | spill | day_bounded) and, for a continuous date, how
+	// many minutes past midnight the coverage actually continues (capped at
+	// `ceiling`, the caller's booking ceiling; 0 for every other shape and for an
+	// unconfigured pitch). The served open_windows stay DAY-shaped; these are
+	// the signals a client cannot correctly infer from them. The schedule is
+	// loaded ONCE for both. See data.ResolveDateHours.
+	HoursMeta(ctx context.Context, pitchID int, date time.Time, ceiling time.Duration) (data.DateHours, error)
 	GetUserBookings(ctx context.Context, userID int64) ([]models.Booking, error)
 
 	// GetAllBookings lists bookings scoped to the actor: an admin sees every
@@ -1495,6 +1497,35 @@ func (r *bookingRepo) GetBookedSlots(
 	// compared as instants via ::timestamptz — timezone-independent.
 	dayStart, dayEnd := timeutil.AmmanDayBoundsUTC(date)
 
+	// LOOKAHEAD past the civil day (WO-24H-CONTINUITY). A booking that STARTS
+	// on this day may legitimately END after midnight, so the client must see
+	// every booking it could collide with — including ones that start on the
+	// NEXT day. The plain window [dayStart, dayEnd) excludes a booking starting
+	// exactly at dayEnd, so a 23:30 start offering 120 minutes could not know
+	// about an 00:30 booking and offered a slot the EXCLUDE constraint rejected.
+	//
+	// The bound must cover the furthest instant ANY same-day start can reach,
+	// and "same-day" is the client's SESSION AXIS, not the civil day. Two
+	// separate overhangs stack:
+	//
+	//   - a spill window (close <= open) ends on the NEXT calendar day, up to
+	//     24h past this day's start — `18:00→04:00` is legal, ValidateSchedule
+	//     caps no window's length — and the client offers starts right up to
+	//     that window's end;
+	//   - on a continuous date the containment window is additionally extended
+	//     by at most the player ceiling.
+	//
+	// A ceiling-only bound (dayEnd + MaxPlayerBookingDuration) covers the
+	// second but not the first: on `18:00→04:00` the card offers a 02:30 start
+	// while the horizon stops at 02:00, hiding exactly the bookings it would
+	// collide with. Hence 24h + the ceiling, which dominates both.
+	//
+	// This widens only what is RETURNED. Callers compare absolute instants
+	// (booking_range is a tstzrange), so the extra rows need no special casing —
+	// they simply become visible to the overlap check — and the row count stays
+	// bounded to roughly two days of one pitch's bookings.
+	lookaheadEnd := dayEnd.Add(24*time.Hour + data.MaxPlayerBookingDuration)
+
 	rows, err := r.db.Query(ctx, `
 		SELECT id, lower(booking_range) AS start_time, upper(booking_range) AS end_time, status
 		FROM bookings
@@ -1502,7 +1533,7 @@ func (r *bookingRepo) GetBookedSlots(
 		  AND status <> 'cancelled'
 		  AND booking_range && tstzrange($2::timestamptz, $3::timestamptz, '[)')
 		ORDER BY lower(booking_range)
-	`, pitchID, dayStart, dayEnd)
+	`, pitchID, dayStart, lookaheadEnd)
 
 	if err != nil {
 		return nil, fmt.Errorf("GetBookedSlots: query: %w", err)
@@ -1579,18 +1610,18 @@ func (r *bookingRepo) GetOpenWindows(ctx context.Context, pitchID int, date time
 	return resolved, true, nil
 }
 
-// HoursShape — see the interface doc. Windows are loaded fresh (same loader as
-// GetOpenWindows); the classification math lives in the data layer.
-func (r *bookingRepo) HoursShape(ctx context.Context, pitchID int, date time.Time) (data.HoursShape, error) {
+// HoursMeta — see the interface doc. Windows are loaded ONCE (same loader as
+// GetOpenWindows); all classification math lives in the data layer.
+func (r *bookingRepo) HoursMeta(ctx context.Context, pitchID int, date time.Time, ceiling time.Duration) (data.DateHours, error) {
 	windows, err := loadOperatingWindowsTx(ctx, r.db, int64(pitchID))
 	if err != nil {
-		return "", err
+		return data.DateHours{}, err
 	}
-	shape, err := data.ResolveHoursShape(windows, date)
+	meta, err := data.ResolveDateHours(windows, date, ceiling)
 	if err != nil {
-		return "", fmt.Errorf("HoursShape: %w", err)
+		return data.DateHours{}, fmt.Errorf("HoursMeta: %w", err)
 	}
-	return shape, nil
+	return meta, nil
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
