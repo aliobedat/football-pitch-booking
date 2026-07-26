@@ -123,6 +123,64 @@ production-build verification. Introduced by PR #54.
   public URL (e.g. an owner-provisioning guide with malaebjo.com/venues/{slug}).
 
 ## Merged work log
+2026-07-27 — WO-24H-CONTINUITY SHIPPED to main, owner phone-QA cleared.
+Commits: 6557bfe (Gate 1A backend gate), 3a960d6 (resolver warning comment),
+9ab63fe (Gates 1A-2/1B-2, frontend + lookahead). No schema change.
+
+THE BUG: pitches open 24/7 store the explicit full-day row 00:00→00:00, which
+anchors to a window ending exactly at the next local midnight. Monday's window
+and Tuesday's abut at that instant, but ResolveWindowsForDate never put both in
+one candidate set and SlotContained requires a SINGLE interval to contain a
+slot — so 23:00→00:30 was rejected on a pitch that never closes. TWO of the
+three production pitches (1 and 2, Super Goal, same venue) have that shape;
+pitch 3 is 16:00→01:00. D1's "24-hour venue unrepresentable" limitation from
+WO-CROSS-MIDNIGHT is therefore RESOLVED for booking purposes: 00:00→00:00 is
+representable and is what these pitches use.
+
+THE FIX, in three parts:
+- Containment gate resolves EVERY day a slot touches (ResolveWindowsForRange —
+  not a fixed D+1, because owner/manual/academy paths carry no max-duration
+  cap) and coalesces abutting/overlapping windows (CoalesceIntervals) before
+  testing containment (SlotWithinHours). Merging happens ONLY inside the gate.
+- /availability serves two per-date signals beside the still-DAY-shaped
+  open_windows: hours_shape (continuous|spill|day_bounded) and
+  continuation_minutes (how far past midnight coverage actually runs, capped at
+  the player ceiling, measured with the SAME coalescing the gate uses).
+- The client extends its duration-containment window ONLY when ALL of:
+  configured, continuous, continuation > 0, exactly ONE served window, and that
+  window ends at exactly 1440. Anything else gets no extension.
+
+READ PATHS UNCHANGED BY CONSTRUCTION (the load-bearing property): across both
+backend commits operating_hours_resolve.go is ADDITIONS ONLY — anchorWindow,
+ResolveWindowsForDate and SlotContained are byte-identical, so
+SearchAvailability, GetOpenWindows, the owner day view and the calendar cannot
+have moved. Do not delete from that file without re-establishing the proof.
+day_view_repository.go's per-slot marking is intentionally left unmerged: grid
+cells are 30-min slices strictly inside the civil day, so none straddles the
+abutment seam and merging there is a provable no-op.
+
+GetBookedSlots now looks ahead dayEnd + 24h + MaxPlayerBookingDuration. The
+client attributes starts by the SESSION AXIS, not the civil day: a spill window
+ends on the next calendar day, so an 18:00→04:00 pitch offers starts to 03:00
+whose collidable bookings sat outside the old one-day horizon.
+
+THREE RULES WERE RETRACTED before the shipped one, each for over-offering.
+Recorded because the pattern repeated: (1) extend every window by a flat 120 —
+fabricated a morning window on a split shift and offered 11:30→12:30 across a
+real 12:00–20:00 closure; (2) "extend the window ending at midnight" — a date
+that both spills and abuts has no such window; (3) the hours rule was then
+correct but a NEW over-offer appeared in the OCCUPANCY dimension (the
+booked-slots horizon above). Lesson worth keeping: an invariant proven over one
+dimension does not transfer to another — widening what the UI may offer
+requires re-checking EVERY constraint the server applies.
+
+Locked invariant order for this surface: never over-offer > no double-render >
+no lost inventory. Where they conflict, lose inventory and document it.
+Deliberately under-served shapes, the absent frontend test runner, and the
+booking card's known gaps (lead-time staleness chief among them) are recorded
+in docs/followups/{hours-shape-contract-limits,
+frontend-has-no-test-infrastructure,booking-card-known-gaps}.md.
+
 2026-07-25 — WO-CROSS-MIDNIGHT SHIPPED to main, Gate 2 owner-cleared on a real
 phone. Backend 4c73149 (Gate 1A): player-path hardening — 15-min lead-time gate
 and 120-min max-duration gate added to CreateBooking; operating-window
@@ -160,6 +218,41 @@ dated historical malaebjo.com reference in
 `docs/followups/auth-refresh-replay-wipe.md`.
 
 ## Discipline log
+2026-07-27 — WO-24H-CONTINUITY learnings:
+
+- EXIT CODES LIED THREE TIMES IN ONE SESSION. Twice `go test ./... | tail -N`
+  reported success because the pipeline's exit status is `tail`'s, not
+  `go test`'s — the visible output said FAIL while the harness reported 0.
+  Once a run "passed" in seconds having never executed at all: it was launched
+  from the repo root and died on `go: cannot find main module`, which `tail`
+  duly reported as a clean exit. RULE: never conclude a suite is green from an
+  exit code attached to a pipeline. Redirect to a file and capture the real
+  status — `go test … > out.txt 2>&1; echo "EXIT=$?" >> out.txt` — then READ
+  the file. All three were caught only by reading output; the habit is what
+  found them, and it is the same false-green family as the stale-baseline
+  incident already logged under Testing & migration rules.
+- THE ADVERSARIAL REVIEW SUBAGENT EARNED ITS COST. It caught two wrong
+  ARCHITECTURAL rulings that live browser testing could not: the flat-120
+  extension (fabricated hours across a real midday closure on a split shift)
+  and the civil-day booked-slots horizon (deterministic 409 on the 24/7 pitches
+  at the exact hour the WO unlocks). Neither was reachable by testing the
+  production schedules, because on a single-window 24/7 pitch the wrong rule
+  and the right rule are indistinguishable. Live QA validates the shapes you
+  have; adversarial review finds the shapes you don't. Run BOTH passes before
+  the commit, not after — and treat "looks good" from a reviewer as a failed
+  review.
+- MUTATION-TEST THE TESTS. Two new tests passed while the mutations they
+  supposedly guarded against also passed: a "seam-only" test whose assertions
+  held against a hardcoded return, and a probe-width test whose 48h constant
+  was satisfied by the very mutation it targeted. Both were rewritten (72h;
+  next-day 00:00→01:00 so the correct answer is 60, not the ceiling) and
+  verified by actually applying each mutation and watching the suite go red.
+  A test that cannot fail is documentation, not verification.
+- PORT-3100 ZOMBIE, a third time — survived the shell stop again during final
+  teardown. The existing rule holds and is now three-for-three: after stopping
+  a Next dev shell on Windows, always netstat/taskkill before trusting the port
+  is free.
+
 2026-07-25 — WO-CROSS-MIDNIGHT learnings (gotchas re-encountered):
 - PORT-ZOMBIE, again: a Next dev server survived its shell's termination and
   kept port 3100 with a STALE baked-in NEXT_PUBLIC_API_URL (localhost) — the
