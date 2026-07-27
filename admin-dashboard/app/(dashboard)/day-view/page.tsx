@@ -19,6 +19,7 @@ import { formatDate, formatTime, formatNumber, formatCurrency } from '@/lib/form
 import {
   type CivilDate, ammanCivilDate, ammanInstant, sameCivilDate, addDays, ymd, parseYmd,
 } from '@/lib/amman';
+import { useAmmanToday } from '@/lib/useAmmanToday';
 import DayViewDatePicker from '@/components/DayViewDatePicker';
 import DayViewManualSheet from '@/components/DayViewManualSheet';
 import BookingSheet, { paymentDisplayBadge } from '@/components/BookingSheet';
@@ -86,15 +87,33 @@ const SOURCE_BADGE: Record<string, { label: string; cls: string }> = {
 const hm = (iso: string) => formatTime(iso, { hour: '2-digit', minute: '2-digit', hour12: false });
 
 // One rendered timeline row: a real slot, or a collapsed run of closed slots.
+//
+// A booked/blocked row may span SEVERAL 30-minute cells of the same booking
+// (WO-OWNER-SLOTS). It keeps its FIRST cell — so the React key stays the unique
+// cell start — and carries the label bounds taken from the BOOKING itself.
+// `labelStart`/`labelEnd` are absent on available/closed rows, where the cell's
+// own bounds are the truth.
+//
+// A booking may extend beyond this civil day at EITHER edge. Each bound that
+// falls outside the day is clamped to it and flagged, because the time labels
+// carry no date: an unclamped bound silently names a different day.
 type Row =
-  | { kind: 'slot'; slot: DVSlot }
+  | {
+      kind: 'slot';
+      slot: DVSlot;
+      labelStart?: string;
+      labelEnd?: string;
+      continuesFromPrevDay?: boolean;
+      continuesIntoNextDay?: boolean;
+    }
   | { kind: 'closed'; start: string; end: string };
 
 function DayViewInner() {
   const router = useRouter();
   const sp = useSearchParams();
 
-  const today = useMemo(() => ammanCivilDate(new Date()), []);
+  // Reactive: a dashboard left open across Amman midnight must roll over.
+  const today = useAmmanToday();
   const [date, setDate] = useState<CivilDate>(() => parseYmd(sp.get('date') ?? '') ?? ammanCivilDate(new Date()));
   const [pitchId, setPitchId] = useState<number | null>(() => {
     const p = sp.get('pitch');
@@ -169,39 +188,106 @@ function DayViewInner() {
     router.replace(`/day-view?${params.toString()}`, { scroll: false });
   }, [pitchId, dateStr, router]);
 
-  const counts = useMemo(() => {
-    const s = data?.slots ?? [];
-    return {
-      all: s.length,
-      booked: s.filter(x => x.status === 'booked' || x.status === 'blocked').length,
-      available: s.filter(x => x.status === 'available').length,
-    };
-  }, [data]);
-
-  // Filter client-side, then collapse consecutive closed cells into one row so a
-  // dead night doesn't drown the list. Closed cells only appear under "الكل".
-  const rows = useMemo<Row[]>(() => {
+  // Rows for a given filter. Extracted so the filter CHIP COUNTS can be the
+  // length of the list each filter would actually render — counting raw cells
+  // made the chip read "محجوز ١٤" above four rows, which is the same "why does
+  // it say 3?" confusion this WO set out to remove, just relocated.
+  const rowsFor = useCallback((f: Filter): Row[] => {
     const all = data?.slots ?? [];
-    const vis = filter === 'booked'
+    const vis = f === 'booked'
       ? all.filter(x => x.status === 'booked' || x.status === 'blocked')
-      : filter === 'available'
+      : f === 'available'
         ? all.filter(x => x.status === 'available')
         : all;
+    // Local midnight of the day these SLOTS belong to — the clamp reference for
+    // a booking that spilled in from last night.
+    //
+    // Taken from `data.date` (the payload the rows are built from), NOT the
+    // `date` state. Tapping "next day" re-renders with the new date before the
+    // fetch resolves, so for one paint the OLD day's slots would be measured
+    // against the NEW day's midnight — printing a spurious "مستمر من ليلة أمس"
+    // on a row whose start is then ~23 hours wrong. Sourcing both from the same
+    // payload makes that mismatch structurally impossible instead of a race.
+    // If the payload's own date is missing or unparseable we do NOT fall back to
+    // the `date` state: that is precisely the mismatch this is here to prevent,
+    // and clamping against an unrelated day would print a confidently wrong
+    // time. Skipping the clamp under-explains a spill; clamping wrongly lies.
+    const payloadDate = data?.date ? parseYmd(data.date) : null;
+    const dayStartMs = payloadDate ? ammanInstant(payloadDate, 0).getTime() : null;
+    const dayEndMs = payloadDate ? ammanInstant(payloadDate, 24).getTime() : null; // exclusive end
+
     const out: Row[] = [];
     for (let i = 0; i < vis.length; i++) {
       const slot = vis[i];
+
       if (slot.status === 'closed') {
         let end = slot.end;
         let j = i;
         while (j + 1 < vis.length && vis[j + 1].status === 'closed') { j++; end = vis[j].end; }
         out.push({ kind: 'closed', start: slot.start, end });
         i = j;
-      } else {
-        out.push({ kind: 'slot', slot });
+        continue;
       }
+
+      // Collapse the consecutive cells of ONE booking into a single row: a
+      // 90-minute booking occupies three cells and used to render as three
+      // identical-looking rows.
+      //
+      // The `id != null` guard is LOAD-BEARING, not defensive. available and
+      // closed cells carry no booking at all, so a naive
+      // `next.booking?.id === slot.booking?.id` compares undefined to undefined,
+      // returns TRUE, and silently collapses every run of free cells into one
+      // row — destroying the availability grid and tap-to-book's per-cell
+      // prefill, which is the whole point of this screen. Merge only where a
+      // real booking id exists.
+      const id = slot.booking?.id;
+      if (id != null && (slot.status === 'booked' || slot.status === 'blocked')) {
+        let j = i;
+        // Matches on id alone, never on adjacency: the GIST EXCLUDE constraint
+        // guarantees at most ONE occupancy row per instant, so a booking's cells
+        // can never be interleaved with another's and are always one run.
+        while (j + 1 < vis.length && vis[j + 1].booking?.id === id) j++;
+        const b = slot.booking!;
+        // Label from the BOOKING's own instants, not the cell grid — a booking
+        // that starts at 10:15 must read 10:15, not the 10:00 cell it sits in.
+        //
+        // EXCEPT where it falls outside this day. The payload returns any
+        // booking OVERLAPPING the day, so a 23:30→01:30 booking appears on BOTH
+        // days, and an owner block (no max-duration gate) can span several.
+        // `hm()` prints wall-clock with no date, so an unclamped bound silently
+        // names another day: a Fri 20:00 → Mon 02:00 block read "00:00 – 02:00"
+        // on Saturday — a full-day block looking like a two-hour one.
+        //
+        // Clamp BOTH edges to the day and mark whichever was clamped. A booking
+        // covering the whole day therefore reads "00:00 – 00:00" carrying both
+        // markers, which is the same end-of-day convention an ordinary
+        // 22:00→00:00 block already uses on this screen.
+        const continuesFromPrevDay = dayStartMs != null && new Date(b.start_time).getTime() < dayStartMs;
+        const continuesIntoNextDay = dayEndMs != null && new Date(b.end_time).getTime() > dayEndMs;
+        out.push({
+          kind: 'slot',
+          slot,
+          labelStart: continuesFromPrevDay ? new Date(dayStartMs).toISOString() : b.start_time,
+          labelEnd: continuesIntoNextDay ? new Date(dayEndMs).toISOString() : b.end_time,
+          continuesFromPrevDay,
+          continuesIntoNextDay,
+        });
+        i = j;
+        continue;
+      }
+
+      out.push({ kind: 'slot', slot });
     }
     return out;
-  }, [data, filter]);
+  }, [data, date]);
+
+  const rows = useMemo<Row[]>(() => rowsFor(filter), [rowsFor, filter]);
+
+  const counts = useMemo(() => ({
+    all: rowsFor('all').length,
+    booked: rowsFor('booked').length,
+    available: rowsFor('available').length,
+  }), [rowsFor]);
 
   // Ordered available cells of the loaded day — the manual sheet's start-time set.
   const availableSlots = useMemo(
@@ -359,7 +445,7 @@ function DayViewInner() {
 
           {/* Filter chips */}
           <div className="flex items-center gap-2">
-            {([['all', 'الكل', counts.all], ['booked', 'محجوز', counts.booked], ['available', 'متاح', counts.available]] as [Filter, string, number][]).map(([val, label, n]) => {
+            {([['all', 'الكل', counts.all], ['booked', 'مشغول', counts.booked], ['available', 'متاح', counts.available]] as [Filter, string, number][]).map(([val, label, n]) => {
               const on = filter === val;
               return (
                 <button
@@ -392,6 +478,10 @@ function DayViewInner() {
                 : <SlotRow
                     key={row.slot.start}
                     slot={row.slot}
+                    labelStart={row.labelStart}
+                    labelEnd={row.labelEnd}
+                    continuesFromPrevDay={row.continuesFromPrevDay}
+                    continuesIntoNextDay={row.continuesIntoNextDay}
                     onPick={iso => setManual({ prefill: iso })}
                     onOpen={b => setSheetId(b.id)}
                   />)}
@@ -472,14 +562,33 @@ function DayViewInner() {
 
 // ── Row renderers ────────────────────────────────────────────────────────────
 
-function SlotRow({ slot, onPick, onOpen }: { slot: DVSlot; onPick?: (startIso: string) => void; onOpen?: (booking: DVBooking) => void }) {
+function SlotRow({ slot, labelStart, labelEnd, continuesFromPrevDay, continuesIntoNextDay, onPick, onOpen }: {
+  slot: DVSlot;
+  labelStart?: string;
+  labelEnd?: string;
+  continuesFromPrevDay?: boolean;
+  continuesIntoNextDay?: boolean;
+  onPick?: (startIso: string) => void;
+  onOpen?: (booking: DVBooking) => void;
+}) {
+  // A booking row labels itself with the booking's real bounds; every other row
+  // is exactly its own cell.
+  const fromIso = labelStart ?? slot.start;
+  const toIso   = labelEnd ?? slot.end;
   const range = (
     <span className="font-mono text-[11px] tabular-nums text-white/45 shrink-0" dir="ltr">
-      {hm(slot.start)}<span className="mx-1 text-white/20">–</span>{hm(slot.end)}
+      {hm(fromIso)}<span className="mx-1 text-white/20">–</span>{hm(toIso)}
     </span>
   );
-  // Thin edge indicator for a partially-covered cell (no further treatment in PR-2).
-  const partialEdge = slot.partial ? 'relative before:absolute before:inset-y-0 before:start-0 before:w-[3px] before:rounded-s-xl before:bg-white/40' : '';
+  // One note for whichever edges were clamped. Rendered on BOTH the blocked and
+  // booked branches: an owner block is exactly the row that can span days (no
+  // max-duration gate), so clamping its label without explaining it would leave
+  // a whole-day block reading a bare "00:00 – 00:00".
+  const continuationNote =
+    continuesFromPrevDay && continuesIntoNextDay ? 'مستمر طوال اليوم'
+    : continuesFromPrevDay ? 'مستمر من ليلة أمس'
+    : continuesIntoNextDay ? 'يمتد إلى الغد'
+    : null;
 
   if (slot.status === 'available') {
     // Tap an available cell → open the manual sheet pre-filled to this start.
@@ -487,7 +596,7 @@ function SlotRow({ slot, onPick, onOpen }: { slot: DVSlot; onPick?: (startIso: s
       <button
         type="button"
         onClick={() => onPick?.(slot.start)}
-        className={`w-full min-h-[44px] flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-emerald-500/15 bg-emerald-500/[0.04] hover:bg-emerald-500/[0.09] hover:border-emerald-500/30 transition-all active:scale-[0.99] text-start ${partialEdge}`}
+        className={`w-full min-h-[44px] flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-emerald-500/15 bg-emerald-500/[0.04] hover:bg-emerald-500/[0.09] hover:border-emerald-500/30 transition-all active:scale-[0.99] text-start`}
         aria-label={`متاح ${hm(slot.start)} — اضغط لإضافة حجز`}
       >
         {range}
@@ -501,9 +610,14 @@ function SlotRow({ slot, onPick, onOpen }: { slot: DVSlot; onPick?: (startIso: s
 
   if (slot.status === 'blocked') {
     return (
-      <div className={`flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-amber-500/25 bg-amber-500/[0.08] ${partialEdge}`}>
-        {range}
-        <span className="inline-flex items-center gap-1.5 text-[12px] font-semibold text-amber-300">
+      <div className={`flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-amber-500/25 bg-amber-500/[0.08]`}>
+        <div className="min-w-0 flex flex-col gap-0.5">
+          {range}
+          {continuationNote && (
+            <span className="text-[10px] text-sky-300/80 truncate">{continuationNote}</span>
+          )}
+        </div>
+        <span className="inline-flex shrink-0 items-center gap-1.5 text-[12px] font-semibold text-amber-300">
           <Ban size={12} aria-hidden />
           محجوز يدويًا / صيانة
         </span>
@@ -525,6 +639,9 @@ function SlotRow({ slot, onPick, onOpen }: { slot: DVSlot; onPick?: (startIso: s
         {range}
         <div className="min-w-0">
           <p className="text-[13px] font-semibold text-[#f0efe8] truncate">{b?.title || 'حجز'}</p>
+          {continuationNote && (
+            <p className="text-[10px] text-sky-300/80 truncate">{continuationNote}</p>
+          )}
         </div>
       </div>
       <div className="flex items-center gap-1.5 shrink-0">
@@ -550,15 +667,15 @@ function SlotRow({ slot, onPick, onOpen }: { slot: DVSlot; onPick?: (startIso: s
       <button
         type="button"
         onClick={() => onOpen!(b!)}
-        className={`w-full flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-white/[0.09] bg-white/[0.03] hover:bg-white/[0.055] hover:border-white/20 transition-all active:scale-[0.99] text-start ${partialEdge}`}
-        aria-label={`تفاصيل حجز ${b!.title || ''} ${hm(slot.start)}`}
+        className={`w-full flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-white/[0.09] bg-white/[0.03] hover:bg-white/[0.055] hover:border-white/20 transition-all active:scale-[0.99] text-start`}
+        aria-label={`تفاصيل حجز ${b!.title || ''} ${hm(fromIso)} إلى ${hm(toIso)}${continuationNote ? ` — ${continuationNote}` : ''}`}
       >
         {inner}
       </button>
     );
   }
   return (
-    <div className={`flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-white/[0.09] bg-white/[0.03] ${partialEdge}`}>
+    <div className={`flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-white/[0.09] bg-white/[0.03]`}>
       {inner}
     </div>
   );
