@@ -123,6 +123,47 @@ production-build verification. Introduced by PR #54.
   public URL (e.g. an owner-provisioning guide with malaebjo.com/venues/{slug}).
 
 ## Merged work log
+2026-07-27 — WO-OWNER-SLOTS SHIPPED to main (18093dd), owner phone-QA cleared.
+Admin dashboard only; no backend, schema, or migration.
+
+DEFECT B (fixed) — جدول الملعب iterates 30-minute grid cells and collapsed only
+runs of `closed` cells, so a 90-minute booking rendered as three rows with the
+same customer name. Consecutive cells sharing a booking id now merge into ONE
+row labelled from the booking's own start/end. Booking identity was already in
+the day-view payload, so this was pure rendering. The merge guard on a real
+booking id is LOAD-BEARING: available/closed cells carry no booking, so
+`next.booking?.id === slot.booking?.id` matches undefined to undefined and would
+collapse the whole free grid, destroying tap-to-book. Merging on id alone is
+safe only because the GIST EXCLUDE guarantees ≤1 occupancy row per instant.
+
+Cross-midnight labels are clamped at BOTH edges. The payload returns any booking
+OVERLAPPING the day and the labels print wall-clock with no date, so an
+unclamped bound silently names another day. Markers: مستمر من ليلة أمس /
+يمتد إلى الغد / مستمر طوال اليوم. The partial-cell edge bar was REMOVED (proven
+dead: the backend sets `partial` only on an occupied cell, so every partial cell
+now carries an exactly-labelled row). Filter chips count rendered rows via the
+same function that builds the list; the booked chip is مشغول because it includes
+blocks and would otherwise contradict the summary strip's حجوزات.
+
+جدول اليوم gained prev/next day + اليوم reset, URL-synced. GET /schedule already
+parsed `date`; the frontend never sent it. Sending it also fixed a latent bug —
+the server's no-date default is time.Now() in server-local time while the day
+bounds read the value's own location, so 00:00–02:59 Amman resolved to the
+PREVIOUS day. Staff may navigate: read-only, SQL scoping is date-independent,
+and ?date= was already accepted, so nothing new is reachable.
+
+DEFECT A (NOT fixed, documented) — creating a cross-midnight booking from
+جدول الملعب. It was NEVER the reported buildDateTime trap: all three admin forms
+already do correct absolute-instant arithmetic. The real cause is a model
+mismatch — the admin day is a CIVIL day while the player card became SESSION-day
+aware in WO-24H-CONTINUITY. Day View is structurally incapable in two
+independent ways (civil-day grid AND the manual sheet's duration clamped to that
+grid, so 23:30 is not even offerable). **/calendar (التقويم) is the working path
+for owner cross-midnight bookings today** — its window derives from unclipped
+open_windows plus a buffer, and its duration list is unclamped. Option (i), a
+session-day grid for Day View, is costed in
+docs/followups/day-view-session-day-grid.md and deliberately not built.
+
 2026-07-27 — WO-24H-CONTINUITY SHIPPED to main, owner phone-QA cleared.
 Commits: 6557bfe (Gate 1A backend gate), 3a960d6 (resolver warning comment),
 9ab63fe (Gates 1A-2/1B-2, frontend + lookahead). No schema change.
@@ -218,6 +259,38 @@ dated historical malaebjo.com reference in
 `docs/followups/auth-refresh-replay-wipe.md`.
 
 ## Discipline log
+2026-07-27 — WO-OWNER-SLOTS: the adversarial review earned its cost a THIRD
+time, and again on something live testing had already passed.
+
+PASS 2 caught, BEFORE commit, that `SlotRow` returns early for `blocked` rows,
+so the newly-added continuation markers — defined only in the `booked` branch —
+never rendered on exactly the rows that can span days (owner blocks carry no
+max-duration gate). The three-day block that MOTIVATED the change would have
+shipped reading a bare "00:00 – 00:00" with no explanation: strictly worse than
+the wrong-but-informative label it replaced. Browser QA had already passed,
+because every seeded booking was ≤2h and none exercised the blocked branch.
+
+Running tally of what review caught that testing could not:
+  1. flat-120 extension fabricating hours across a real midday closure
+     (WO-24H-CONTINUITY);
+  2. the civil-day booked-slots horizon — a deterministic 409 on the 24/7
+     pitches at the exact hour that WO unlocked;
+  3. this one — a clamp applied to a branch whose explanation was not.
+All three were invisible to live testing because the production-shaped data
+never exercised the failing case. RULE, now three-for-three: run BOTH passes
+before the commit, and treat "looks good" from a reviewer as a failed review.
+
+Two more from the same review worth keeping: a ruling can be HALF a rule — the
+owner's cross-midnight ruling clamped the start and mandated a wrong-day end,
+and implementing it literally would have shipped a defect; and a `?? fallback`
+can silently reintroduce the very staleness it was added to prevent (the
+payload-date fallback), so prefer skipping an enrichment over computing it
+against possibly-unrelated inputs.
+
+PORT ZOMBIE, fourth and fifth occurrence (now on :3001, the admin dev port —
+the pattern is not port-specific). Unchanged rule: after stopping a Next dev
+shell on Windows, always netstat/taskkill before trusting the port is free.
+
 2026-07-27 — WO-24H-CONTINUITY learnings:
 
 - EXIT CODES LIED THREE TIMES IN ONE SESSION. Twice `go test ./... | tail -N`
