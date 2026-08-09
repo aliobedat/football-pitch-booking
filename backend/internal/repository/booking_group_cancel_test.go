@@ -109,6 +109,60 @@ func TestGroupCancel_CancelsFuturePreservesPast(t *testing.T) {
 	}
 }
 
+// ── Reason: caller-supplied overrides the fixed fallback (WO-OWNER-NOTIFY-CANCEL) ─
+
+func (e *blockEnv) transitionReason(t *testing.T, bookingID int64, to string) string {
+	t.Helper()
+	var reason string
+	if err := e.pool.QueryRow(context.Background(),
+		`SELECT reason FROM status_transitions WHERE booking_id = $1 AND to_status = $2`, bookingID, to).Scan(&reason); err != nil {
+		t.Fatalf("transitionReason: %v", err)
+	}
+	return reason
+}
+
+func TestGroupCancel_CallerReasonOverridesFixedFallback(t *testing.T) {
+	e := newBlockEnv(t)
+	group := uuid.NewString()
+	now := time.Now()
+	fut := e.seedGroupRow(t, group, now.Add(48*time.Hour), time.Hour, "confirmed")
+
+	const reason = "صيانة الملعب"
+	n, err := e.repo.CancelFutureGroup(context.Background(), CancelGroupParams{
+		PitchID: e.pitchID, GroupID: group, Actor: e.ownerActor(), ActorID: e.ownerID, Reason: reason,
+	})
+	if err != nil {
+		t.Fatalf("CancelFutureGroup: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("cancelled_count = %d, want 1", n)
+	}
+	if got := e.transitionReason(t, fut, "cancelled"); got != reason {
+		t.Errorf("audited reason = %q, want caller-supplied %q", got, reason)
+	}
+}
+
+func TestGroupCancel_EmptyReasonFallsBackToFixedConstant(t *testing.T) {
+	e := newBlockEnv(t)
+	group := uuid.NewString()
+	now := time.Now()
+	fut := e.seedGroupRow(t, group, now.Add(48*time.Hour), time.Hour, "confirmed")
+
+	// No Reason field set — mirrors existing callers, which send no body today.
+	n, err := e.repo.CancelFutureGroup(context.Background(), CancelGroupParams{
+		PitchID: e.pitchID, GroupID: group, Actor: e.ownerActor(), ActorID: e.ownerID,
+	})
+	if err != nil {
+		t.Fatalf("CancelFutureGroup: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("cancelled_count = %d, want 1", n)
+	}
+	if got := e.transitionReason(t, fut, "cancelled"); got != reasonGroupCancelled {
+		t.Errorf("audited reason = %q, want fixed fallback %q", got, reasonGroupCancelled)
+	}
+}
+
 // ── Empty match → 0 (NOT an error / 404) ─────────────────────────────────────
 
 func TestGroupCancel_EmptyMatchReturnsZero(t *testing.T) {
