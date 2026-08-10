@@ -117,10 +117,14 @@ func (s *Service) Create(ctx context.Context, req models.CreateBookingRequest) (
 }
 
 // Cancel transitions a confirmed booking to cancelled (releasing the slot),
-// records the audited transition, and notifies the player with a
-// booking_cancelled message. The actor (player or owner/admin) and reason are
-// captured in the audit trail. A missing reason is defaulted from the actor
-// role. As with Create, notification is best-effort.
+// records the audited transition, and — ONLY when an owner/admin performed the
+// cancellation (WO-OWNER-NOTIFY-CANCEL) — notifies the player with a
+// booking_cancelled message. A player cancelling their own booking already
+// knows: no notification fires for self-cancel, so this is additive to the
+// pre-existing (unconditional) dispatch. The actor (player or owner/admin) and
+// reason are captured in the audit trail regardless of who cancelled. A
+// missing reason is defaulted from the actor role. As with Create,
+// notification is best-effort.
 func (s *Service) Cancel(ctx context.Context, params repository.CancelBookingParams) (*models.Booking, error) {
 	if params.Reason == "" {
 		params.Reason = defaultCancelReason(params.ActorRole)
@@ -131,7 +135,9 @@ func (s *Service) Cancel(ctx context.Context, params repository.CancelBookingPar
 		return nil, err
 	}
 
-	s.dispatch(ctx, b, notification.KindBookingCancelled, params.Reason)
+	if isStaffActor(params.ActorRole) {
+		s.dispatch(ctx, b, notification.KindBookingCancelled, params.Reason)
+	}
 	return b, nil
 }
 
@@ -203,10 +209,20 @@ func (s *Service) dispatch(ctx context.Context, b *models.Booking, kind notifica
 // defaultCancelReason picks a human-readable audit reason from the actor role
 // when the caller did not provide one.
 func defaultCancelReason(actorRole string) string {
+	if isStaffActor(actorRole) {
+		return reasonCancelledByStaff
+	}
+	return reasonCancelledByPlayer
+}
+
+// isStaffActor reports whether actorRole is an owner or admin — the WO-OWNER-
+// NOTIFY-CANCEL role gate: the player-cancellation-alert notification fires
+// ONLY for these roles, never on a player's own self-cancel.
+func isStaffActor(actorRole string) bool {
 	switch actorRole {
 	case repository.ActorOwner, repository.ActorAdmin:
-		return reasonCancelledByStaff
+		return true
 	default:
-		return reasonCancelledByPlayer
+		return false
 	}
 }

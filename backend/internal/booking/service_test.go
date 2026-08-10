@@ -484,11 +484,14 @@ func TestCancel_DispatchesBookingCancelledWithReason(t *testing.T) {
 	notifier := &fakeNotifier{}
 	svc := newService(store, notifier)
 
-	const reason = "player can no longer attend"
+	// Owner/admin cancellation is the only case that dispatches
+	// KindBookingCancelled (WO-OWNER-NOTIFY-CANCEL role gate) — see
+	// TestCancel_PlayerSelfCancelDoesNotDispatch for the self-cancel case.
+	const reason = "owner needs the slot for maintenance"
 	params := repository.CancelBookingParams{
 		BookingID: b.ID,
 		ActorID:   int64Ptr(3),
-		ActorRole: repository.ActorPlayer,
+		ActorRole: repository.ActorOwner,
 		Reason:    reason,
 	}
 	got, err := svc.Cancel(context.Background(), params)
@@ -503,8 +506,8 @@ func TestCancel_DispatchesBookingCancelledWithReason(t *testing.T) {
 	if store.lastCancelParams.Reason != reason {
 		t.Errorf("store recorded reason %q, want %q", store.lastCancelParams.Reason, reason)
 	}
-	if store.lastCancelParams.ActorRole != repository.ActorPlayer {
-		t.Errorf("store recorded actor role %q, want %q", store.lastCancelParams.ActorRole, repository.ActorPlayer)
+	if store.lastCancelParams.ActorRole != repository.ActorOwner {
+		t.Errorf("store recorded actor role %q, want %q", store.lastCancelParams.ActorRole, repository.ActorOwner)
 	}
 
 	if len(notifier.sent) != 1 {
@@ -528,13 +531,14 @@ func TestCancel_DispatchesBookingCancelledWithReason(t *testing.T) {
 
 func TestCancel_DefaultsReasonFromActorRole(t *testing.T) {
 	cases := []struct {
-		name       string
-		actorRole  string
-		wantReason string
+		name         string
+		actorRole    string
+		wantReason   string
+		wantDispatch bool // WO-OWNER-NOTIFY-CANCEL: only owner/admin dispatch
 	}{
-		{"player default", repository.ActorPlayer, reasonCancelledByPlayer},
-		{"owner default", repository.ActorOwner, reasonCancelledByStaff},
-		{"admin default", repository.ActorAdmin, reasonCancelledByStaff},
+		{"player default", repository.ActorPlayer, reasonCancelledByPlayer, false},
+		{"owner default", repository.ActorOwner, reasonCancelledByStaff, true},
+		{"admin default", repository.ActorAdmin, reasonCancelledByStaff, true},
 	}
 
 	for _, c := range cases {
@@ -557,11 +561,73 @@ func TestCancel_DefaultsReasonFromActorRole(t *testing.T) {
 			if store.lastCancelParams.Reason != c.wantReason {
 				t.Errorf("defaulted reason = %q, want %q", store.lastCancelParams.Reason, c.wantReason)
 			}
-			payload := notifier.sent[0].Payload.(notification.BookingCancelledPayload)
-			if payload.Reason != c.wantReason {
-				t.Errorf("payload reason = %q, want %q", payload.Reason, c.wantReason)
+			if c.wantDispatch {
+				if len(notifier.sent) != 1 {
+					t.Fatalf("notifier received %d messages, want exactly 1 for role %q", len(notifier.sent), c.actorRole)
+				}
+				payload := notifier.sent[0].Payload.(notification.BookingCancelledPayload)
+				if payload.Reason != c.wantReason {
+					t.Errorf("payload reason = %q, want %q", payload.Reason, c.wantReason)
+				}
+			} else if len(notifier.sent) != 0 {
+				t.Errorf("notifier received %d messages, want 0 for player self-cancel", len(notifier.sent))
 			}
 		})
+	}
+}
+
+// TestCancel_PlayerSelfCancelDoesNotDispatch is the explicit negative case for
+// the WO-OWNER-NOTIFY-CANCEL role gate: a player cancelling their OWN booking
+// (an explicit reason supplied, not just the defaulted-reason path above) must
+// never trigger the booking_cancelled notification — only owner/admin
+// cancellations do, since the player already knows they cancelled it.
+func TestCancel_PlayerSelfCancelDoesNotDispatch(t *testing.T) {
+	store := &fakeStore{
+		booking: sampleBooking(),
+		contact: fullContact(),
+	}
+	notifier := &fakeNotifier{}
+	svc := newService(store, notifier)
+
+	_, err := svc.Cancel(context.Background(), repository.CancelBookingParams{
+		BookingID: 42,
+		ActorID:   int64Ptr(3),
+		ActorRole: repository.ActorPlayer,
+		Reason:    "can no longer attend",
+	})
+	if err != nil {
+		t.Fatalf("Cancel returned error: %v", err)
+	}
+	if len(notifier.sent) != 0 {
+		t.Errorf("notifier received %d messages, want 0 for player self-cancel", len(notifier.sent))
+	}
+}
+
+// TestCancel_AdminCancelDispatches confirms the admin role (distinct from
+// owner) also passes the gate — role-conditional logic requires explicit
+// coverage of both privileged roles, not just owner.
+func TestCancel_AdminCancelDispatches(t *testing.T) {
+	store := &fakeStore{
+		booking: sampleBooking(),
+		contact: fullContact(),
+	}
+	notifier := &fakeNotifier{}
+	svc := newService(store, notifier)
+
+	_, err := svc.Cancel(context.Background(), repository.CancelBookingParams{
+		BookingID: 42,
+		ActorID:   int64Ptr(9),
+		ActorRole: repository.ActorAdmin,
+		Reason:    "policy violation",
+	})
+	if err != nil {
+		t.Fatalf("Cancel returned error: %v", err)
+	}
+	if len(notifier.sent) != 1 {
+		t.Fatalf("notifier received %d messages, want exactly 1 for admin cancel", len(notifier.sent))
+	}
+	if notifier.sent[0].Kind != notification.KindBookingCancelled {
+		t.Errorf("message kind = %q, want %q", notifier.sent[0].Kind, notification.KindBookingCancelled)
 	}
 }
 

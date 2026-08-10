@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -186,13 +187,17 @@ type BookingRepository interface {
 	GroupUpcoming(ctx context.Context, params CancelGroupParams) (upcomingCount int64, hasTrackedMoney bool, err error)
 }
 
-// CancelGroupParams scopes a bulk future-occurrence cancellation. The audit reason
-// is fixed (reasonGroupCancelled); ActorID/Actor attribute and scope the action.
+// CancelGroupParams scopes a bulk future-occurrence cancellation. Reason is
+// optional — when empty, CancelFutureGroup falls back to the fixed
+// reasonGroupCancelled constant (WO-OWNER-NOTIFY-CANCEL: backward-compatible
+// with existing callers, which send no body). ActorID/Actor attribute and
+// scope the action.
 type CancelGroupParams struct {
 	PitchID int64
 	GroupID string
 	Actor   auth.Actor
 	ActorID int64
+	Reason  string
 }
 
 // CreateBlockParams carries the inputs for an owner/admin block creation.
@@ -1054,7 +1059,11 @@ func (r *bookingRepo) CancelFutureGroup(ctx context.Context, p CancelGroupParams
 	// Ownership predicate applied via an EXISTS on the pitch, so an owner acting on a
 	// foreign pitch's group simply cancels nothing (0) rather than leaking existence.
 	ownsPredicate := "TRUE"
-	args := []any{p.GroupID, p.PitchID, p.ActorID, p.Actor.Role, reasonGroupCancelled}
+	reason := reasonGroupCancelled
+	if strings.TrimSpace(p.Reason) != "" {
+		reason = p.Reason
+	}
+	args := []any{p.GroupID, p.PitchID, p.ActorID, p.Actor.Role, reason}
 	if !p.Actor.IsAdmin() {
 		ownsPredicate = `EXISTS (SELECT 1 FROM pitches pt WHERE pt.id = $2 AND pt.owner_id = $3 AND pt.deleted_at IS NULL)`
 	}
@@ -1338,7 +1347,7 @@ func insertConfirmedBookingTx(ctx context.Context, tx pgx.Tx, req models.CreateB
 }
 
 // nilIfEmpty returns a *string that is nil for an empty input, so an absent
-// snapshot value is stored as SQL NULL rather than '' (the latter trips the
+// snapshot value is stored as SQL NULL rather than ” (the latter trips the
 // E.164 CHECK on contact_phone and muddies the snapshot semantics).
 func nilIfEmpty(s string) *string {
 	if s == "" {

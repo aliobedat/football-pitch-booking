@@ -789,11 +789,21 @@ func (h *BookingHandler) CancelGroup(c *gin.Context) {
 		return
 	}
 
+	// The body is optional — a bare DELETE with no reason is valid (matches the
+	// single-booking PATCH .../cancel contract). Existing callers send no body
+	// today, so this is additive: an absent/empty reason falls back to the
+	// repository's fixed reasonGroupCancelled constant.
+	var body struct {
+		Reason string `json:"reason"`
+	}
+	_ = c.ShouldBindJSON(&body)
+
 	n, err := h.repo.CancelFutureGroup(c.Request.Context(), repository.CancelGroupParams{
 		PitchID: int64(pitchID),
 		GroupID: groupID,
 		Actor:   middleware.GetActor(c),
 		ActorID: int64(middleware.GetUserID(c)),
+		Reason:  strings.TrimSpace(body.Reason),
 	})
 	if err != nil {
 		c.Error(err)
