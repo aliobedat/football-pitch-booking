@@ -123,6 +123,9 @@ func (h *BookingHandler) CreateBooking(c *gin.Context) {
 
 	// إضافة رقم اللاعب للطلب قبل ما نبعثه للداتا بيس
 	req.PlayerID = userID
+	// The authenticated caller's role, server-derived (never from the JSON body) —
+	// gates the owner-new-booking notification in Service.Create.
+	req.ActorRole = middleware.GetUserRole(c)
 
 	// Idempotency: when the client supplies an Idempotency-Key, attach it so a
 	// double-tap / retry replays the original booking instead of creating a second

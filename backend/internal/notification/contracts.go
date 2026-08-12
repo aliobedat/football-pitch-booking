@@ -31,6 +31,11 @@ const (
 	// template, not an AUTHENTICATION message, so it is NOT subject to the
 	// opt-in gate (only the opt-out gate blocks it).
 	KindBookingReminder MessageKind = "booking_reminder"
+	// KindOwnerNewBooking notifies the pitch owner when a PLAYER creates a new
+	// booking on their pitch (WO-OWNER-NOTIFY-CREATE). It never fires when the
+	// owner/admin created the booking themselves — see booking.Service.Create's
+	// actor-role gate. UTILITY-category, like the other booking-event kinds.
+	KindOwnerNewBooking MessageKind = "owner_new_booking"
 )
 
 // DeliveryStatus is the outcome a channel reports for a single send attempt.
@@ -119,6 +124,23 @@ type BookingReminderPayload struct {
 
 // Kind reports the message kind this payload belongs to.
 func (BookingReminderPayload) Kind() MessageKind { return KindBookingReminder }
+
+// OwnerNewBookingPayload describes a new player-created booking for the
+// notified pitch owner. Amount is the booking TOTAL price (b.TotalPrice) —
+// the same source the player-facing confirmation uses, not amount_paid.
+type OwnerNewBookingPayload struct {
+	BookingID   int64
+	OwnerName   string
+	PitchName   string
+	PlayerName  string
+	PlayerPhone string
+	StartTime   time.Time
+	EndTime     time.Time
+	Amount      float64
+}
+
+// Kind reports the message kind this payload belongs to.
+func (OwnerNewBookingPayload) Kind() MessageKind { return KindOwnerNewBooking }
 
 // OutboundMessage is a single channel-agnostic message handed to a channel for
 // delivery. Recipient is always an E.164 phone number (e.g. +9627XXXXXXXX);

@@ -269,6 +269,32 @@ func (i *InfobipWhatsAppChannel) buildRequest(msg OutboundMessage) (infobipTempl
 			}}},
 		}), nil
 
+	case OwnerNewBookingPayload:
+		// Config-driven (INFOBIP_OWNER_NEW_BOOKING_TEMPLATE), not a pinned contract
+		// like booking_confirmation_ar — mirrors the BookingCancelled/Reminder
+		// pattern. Placeholder ORDER matches the approved owner_new_booking_ar
+		// template (9 vars): {{1}} owner {{2}} pitch {{3}} player {{4}} player
+		// phone {{5}} date {{6}} start {{7}} end {{8}} amount {{9}} reference.
+		name := i.cfg.Templates.OwnerNewBooking
+		if name == "" {
+			return infobipTemplateRequest{}, fmt.Errorf("%w: %s", ErrInfobipNoTemplate, KindOwnerNewBooking)
+		}
+		return i.wrap(to, infobipTemplateContent{
+			TemplateName: name,
+			Language:     lang,
+			TemplateData: infobipTemplateData{Body: infobipTemplateBody{Placeholders: []string{
+				p.OwnerName,
+				p.PitchName,
+				p.PlayerName,
+				p.PlayerPhone,
+				fmtAmmanDate(p.StartTime),
+				fmtAmmanClock(p.StartTime),
+				fmtAmmanClock(p.EndTime),
+				fmtAmountNumber(p.Amount),
+				bookingReference(p.BookingID),
+			}}},
+		}), nil
+
 	default:
 		return infobipTemplateRequest{}, fmt.Errorf("%w: %s", ErrInfobipUnsupportedKind, msg.Kind)
 	}

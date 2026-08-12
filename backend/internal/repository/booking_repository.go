@@ -83,6 +83,12 @@ type BookingContact struct {
 	PlayerName string
 	PitchName  string
 	Location   string
+	// OwnerPhone/OwnerName resolve the pitch's owning user (pitches.owner_id →
+	// users.id), joined in the SAME query as the player contact fields — no
+	// second round trip. Empty when the pitch's owner row has no phone/name on
+	// file (the caller decides whether a notification can be dispatched).
+	OwnerPhone string
+	OwnerName  string
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1983,17 +1989,23 @@ func (r *bookingRepo) GetBookingContact(
 	// PlayerName is snapshot-first too (COALESCE(contact_name, full_name)), mirroring
 	// the phone snapshot precedent. Location is the venue neighbourhood; venue_id is
 	// NOT NULL post-034, so the LEFT JOIN resolves for every live pitch.
+	// OwnerPhone/OwnerName join pitches.owner_id (scalar, 1:1) → users.id in the
+	// SAME query (WO-OWNER-NOTIFY-CREATE) — a pitch with no owner_id set (legacy
+	// row) resolves both to '' via the LEFT JOIN + COALESCE, never an error.
 	err := r.db.QueryRow(ctx, `
 		SELECT COALESCE(b.contact_phone, u.phone, ''),
 		       COALESCE(b.contact_name, u.full_name, ''),
 		       COALESCE(`+pitchDisplayNameExpr+`, ''),
-		       COALESCE(v.neighborhood, '')
+		       COALESCE(v.neighborhood, ''),
+		       COALESCE(ou.phone, ''),
+		       COALESCE(ou.full_name, '')
 		FROM bookings b
 		JOIN pitches p ON p.id = b.pitch_id
 		LEFT JOIN venues v ON v.id = p.venue_id
 		LEFT JOIN users u ON u.id = b.player_id
+		LEFT JOIN users ou ON ou.id = p.owner_id
 		WHERE b.id = $1
-	`, bookingID).Scan(&c.Phone, &c.PlayerName, &c.PitchName, &c.Location)
+	`, bookingID).Scan(&c.Phone, &c.PlayerName, &c.PitchName, &c.Location, &c.OwnerPhone, &c.OwnerName)
 
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

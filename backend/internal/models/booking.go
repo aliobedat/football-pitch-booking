@@ -75,6 +75,15 @@ type CreateBookingRequest struct {
 	// bookings are always gated. It is the seam for the future owner/academy/block
 	// write-paths (which do not exist yet); never bound from the JSON body.
 	BypassHoursGate bool `json:"-"`
+
+	// ActorRole is the authenticated caller's role (repository.ActorPlayer/Owner/
+	// Admin), set by the handler from the session/auth context — same source
+	// Cancel()'s ActorRole already uses. Never bound from the JSON body. It gates
+	// the owner-new-booking notification (WO-OWNER-NOTIFY-CREATE): the owner is
+	// notified only when a player created the booking, never on their own
+	// owner/admin-created booking. Empty (unset, e.g. in tests) is treated as
+	// player — the pre-existing default for the public POST /bookings path.
+	ActorRole string `json:"-"`
 }
 
 // IdempotencyParams carries everything the idempotent create path needs to claim,
