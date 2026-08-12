@@ -65,6 +65,11 @@ const ERROR_COPY: Record<string, string> = {
 const GENERIC_ERROR = 'صار خطأ — جرّب مرة ثانية';
 const copyFor = (code?: string) => (code && ERROR_COPY[code]) || GENERIC_ERROR;
 
+// WO-OWNER-NOTIFY-CANCEL-REASON-UI: fixed cancellation-reason options, verbatim
+// (not placeholders — these are the exact strings sent to the backend and, from
+// there, into the booking_cancelled_ar WhatsApp template).
+const CANCEL_REASON_OPTIONS = ['صيانة الملعب', 'ظروف جوية', 'تعارض بالحجز'] as const;
+
 // Sanitise a money keystroke: digits + a single dot, max 3 decimals.
 function sanitizeMoney(raw: string): string {
   let s = raw.replace(/[^\d.]/g, '');
@@ -119,6 +124,16 @@ export default function BookingSheet({
   const [loadingUpcoming, setLoadingUpcoming] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
 
+  // Cancellation reason (WO-OWNER-NOTIFY-CANCEL-REASON-UI): one fixed option OR
+  // free text, mutually exclusive — picking one clears the other. Shared by both
+  // the single and series confirm panels.
+  const [reasonOption, setReasonOption] = useState<string | null>(null);
+  const [reasonText, setReasonText] = useState('');
+  const selectReasonOption = (opt: string) => { setReasonOption(opt); setReasonText(''); };
+  const onReasonTextChange = (v: string) => { setReasonText(v); if (v) setReasonOption(null); };
+  const effectiveReason = reasonOption ?? (reasonText.trim() || null);
+  const reasonValid = !!effectiveReason;
+
   const isSeries = booking.recurrence_group_id != null;
 
   const ended = useMemo(() => new Date(booking.end_time).getTime() < Date.now(), [booking.end_time]);
@@ -170,6 +185,8 @@ export default function BookingSheet({
   const openCancel = () => {
     setCancelError(null);
     setUpcoming(null);
+    setReasonOption(null);
+    setReasonText('');
     setCancelStage(isSeries ? 'choose' : 'single');
   };
 
@@ -206,10 +223,11 @@ export default function BookingSheet({
   };
 
   const cancelSingle = async () => {
+    if (!reasonValid) return;
     setSubmitting(true);
     setCancelError(null);
     try {
-      await api.patch(`/bookings/${booking.id}/cancel`);
+      await api.patch(`/bookings/${booking.id}/cancel`, { reason: effectiveReason });
       await afterCancel();
     } catch (err: any) {
       setCancelError(copyFor(err?.response?.data?.error));
@@ -219,11 +237,13 @@ export default function BookingSheet({
   };
 
   const cancelSeries = async () => {
-    if (pitchId == null || booking.recurrence_group_id == null) return;
+    if (pitchId == null || booking.recurrence_group_id == null || !reasonValid) return;
     setSubmitting(true);
     setCancelError(null);
     try {
-      await api.delete(`/pitches/${pitchId}/bookings/group/${booking.recurrence_group_id}`);
+      await api.delete(`/pitches/${pitchId}/bookings/group/${booking.recurrence_group_id}`, {
+        data: { reason: effectiveReason },
+      });
       await afterCancel();
     } catch (err: any) {
       setCancelError(copyFor(err?.response?.data?.error));
@@ -253,6 +273,41 @@ export default function BookingSheet({
   };
 
   const projectedTotal = (minutes: 30 | 60) => booking.total_price + (pricePerHour * minutes) / 60;
+
+  // Reason selector shared by the single and series confirm panels: three fixed
+  // buttons + one free-text box, mutually exclusive (WO-OWNER-NOTIFY-CANCEL-REASON-UI).
+  const renderReasonSelector = () => (
+    <div className="mb-1">
+      <span className="block text-[11.5px] font-semibold text-white/45 mb-2">سبب الإلغاء</span>
+      <div className="flex flex-wrap gap-2 mb-2">
+        {CANCEL_REASON_OPTIONS.map(opt => (
+          <button
+            key={opt}
+            type="button"
+            onClick={() => selectReasonOption(opt)}
+            disabled={submitting}
+            aria-pressed={reasonOption === opt}
+            className={[
+              'min-h-[40px] px-3 rounded-xl text-[12px] font-bold border transition-all disabled:opacity-50',
+              reasonOption === opt
+                ? 'bg-emerald-500 text-[#08130d] border-emerald-400'
+                : 'bg-white/[0.03] border-white/[0.1] text-white/70 hover:text-white hover:border-white/25',
+            ].join(' ')}
+          >
+            {opt}
+          </button>
+        ))}
+      </div>
+      <input
+        value={reasonText}
+        onChange={e => onReasonTextChange(e.target.value)}
+        dir="rtl"
+        placeholder="سبب آخر…"
+        disabled={submitting}
+        className="w-full bg-white/[0.05] border border-white/[0.15] rounded-lg px-3 py-2 text-[13px] text-[#f0efe8] text-right placeholder:text-white/25 placeholder:text-[12px] focus:outline-none focus:border-emerald-500/50 disabled:opacity-50"
+      />
+    </div>
+  );
 
   const badgeEl = badge && (
     <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[10px] font-bold border ${badge.cls}`}>
@@ -533,12 +588,13 @@ export default function BookingSheet({
                     <AlertTriangle size={13} aria-hidden className="shrink-0" /> هذا الحجز عليه مبلغ مدفوع مسجّل
                   </div>
                 )}
+                {renderReasonSelector()}
                 {cancelError && (
-                  <div className="flex items-center gap-2 mb-3 px-3 py-2 rounded-lg bg-red-500/[0.07] border border-red-500/20 text-[12px] text-red-300">
+                  <div className="flex items-center gap-2 mb-3 mt-3 px-3 py-2 rounded-lg bg-red-500/[0.07] border border-red-500/20 text-[12px] text-red-300">
                     <AlertTriangle size={13} aria-hidden className="shrink-0" /> {cancelError}
                   </div>
                 )}
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 mt-4">
                   <button
                     type="button"
                     onClick={() => setCancelStage(null)}
@@ -550,8 +606,8 @@ export default function BookingSheet({
                   <button
                     type="button"
                     onClick={cancelSingle}
-                    disabled={submitting}
-                    className="flex-1 min-h-[48px] inline-flex items-center justify-center gap-2 rounded-xl border border-red-500/30 text-[12.5px] font-bold text-red-400 hover:bg-red-500/[0.08] disabled:opacity-50 transition-all"
+                    disabled={submitting || !reasonValid}
+                    className="flex-1 min-h-[48px] inline-flex items-center justify-center gap-2 rounded-xl border border-red-500/30 text-[12.5px] font-bold text-red-400 hover:bg-red-500/[0.08] disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                   >
                     {submitting ? <Loader2 size={14} className="animate-spin" aria-hidden /> : <Trash2 size={14} aria-hidden />}
                     إلغاء الحجز
@@ -578,12 +634,13 @@ export default function BookingSheet({
                     <AlertTriangle size={13} aria-hidden className="shrink-0" /> بعض هذه الحجوزات عليها مبالغ مدفوعة مسجّلة
                   </div>
                 )}
+                {upcoming.count > 0 && renderReasonSelector()}
                 {cancelError && (
-                  <div className="flex items-center gap-2 mb-3 px-3 py-2 rounded-lg bg-red-500/[0.07] border border-red-500/20 text-[12px] text-red-300">
+                  <div className="flex items-center gap-2 mb-3 mt-3 px-3 py-2 rounded-lg bg-red-500/[0.07] border border-red-500/20 text-[12px] text-red-300">
                     <AlertTriangle size={13} aria-hidden className="shrink-0" /> {cancelError}
                   </div>
                 )}
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 mt-4">
                   <button
                     type="button"
                     onClick={() => setCancelStage(null)}
@@ -595,7 +652,7 @@ export default function BookingSheet({
                   <button
                     type="button"
                     onClick={cancelSeries}
-                    disabled={submitting || upcoming.count === 0}
+                    disabled={submitting || upcoming.count === 0 || !reasonValid}
                     className="flex-1 min-h-[48px] inline-flex items-center justify-center gap-2 rounded-xl border border-red-500/30 text-[12.5px] font-bold text-red-400 hover:bg-red-500/[0.08] disabled:opacity-40 disabled:cursor-not-allowed transition-all"
                   >
                     {submitting ? <Loader2 size={14} className="animate-spin" aria-hidden /> : <Trash2 size={14} aria-hidden />}
