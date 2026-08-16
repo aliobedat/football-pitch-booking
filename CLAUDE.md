@@ -383,3 +383,42 @@ pitch in the same transaction (WO-HOTFIX-STANDALONE-CREATE).
   VENUE's own id (v-<venue id>); rows from the 033/034 backfills key to the
   pitch id (v-<pitch id>). Both match ^v-[0-9]+$ — no functional difference;
   nothing may parse the number back to an entity id.
+
+## Tiering — mandatory first line of every WO
+TIER: T1 | T2 | T3
+T1 — no booking_range / pricing / amount_paid / status / permission change.
+     No recon. 2 tests. Stop before push only.
+T2 — touches permissions, owner-scoped queries, or response payload shape.
+     Targeted recon (max 3 questions). 5 tests. Gate 2 required.
+T3 — touches booking_range, pricing, conflict resolution, or schema.
+     Full recon. Full coverage + concurrency. Gate 2. Migration owner-executed only.
+
+NEVER RELAXED AT ANY TIER:
+GIST EXCLUDE sole conflict referee · zero pre-check SELECT on the conflict path ·
+404 not 403 across tenants · single atomic UPDATE, never SELECT-then-UPDATE ·
+minimum one cross-tenant test even at T1 · PR only · production writes by owner ·
+a silently-skipped DB test is a failed test.
+
+## Deletion rule (2026-08-16)
+CC never deletes files — tracked or untracked, empty or not, including files CC
+itself created. It reports the path and waits. Deletion is owner-executed.
+Ledger: 2026-08-16 — CC self-deleted `120` and `backend/,+` without asking.
+
+## Evidence standard (2026-08-16)
+When raw bytes are requested, return raw bytes. A re-rendered string is not
+evidence about a rendering artifact.
+Ledger: 2026-08-16 — CC answered a hex-dump request with rendered text twice,
+then drew a conclusion from it.
+
+## Discipline lives in the repo, not in memory (2026-08-16)
+Engineering rules go in CLAUDE.md, which is tracked, diffable, and reviewable in a
+PR. Memory stores serve the session; the repo serves the project. Writing rules to
+memory instead of CLAUDE.md is not a substitute.
+
+## Booking identity model (settled)
+Four parallel identity columns, not one:
+- guest_name / guest_phone — manual/academy. EDITABLE via PATCH /bookings/:id/contact.
+- contact_name / contact_phone — frozen snapshot from users at player-booking
+  creation. IMMUTABLE — editing desyncs it from the users table.
+- player_id — FK, player bookings only.
+- customer_id — CRM FK, populated post-commit, fail-open.

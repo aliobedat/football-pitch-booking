@@ -29,3 +29,15 @@ ehthumbs.db
 
 # Read-only design handoff reference (WO-CROSS-MIDNIGHT Gate 1B) — never commit
 .design-ref/
+
+# Ruflo local secrets and runtime data
+.env.local
+.env.*.local
+.claude-flow/data/
+.claude-flow/logs/
+.claude-flow/sessions/
+
+# Stray artifacts
+*.png
+.playwright-mcp/
+.claude-flow/
