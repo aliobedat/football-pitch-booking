@@ -13,6 +13,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
@@ -34,6 +36,11 @@ import (
 	"github.com/ali/football-pitch-api/internal/repository"
 	"github.com/ali/football-pitch-api/internal/timeutil"
 )
+
+// pgExclusionViolation mirrors repository/booking_sheet.go's sentinel — this
+// file is a separate binary (package main, not importable), so the constant
+// is intentionally re-declared here rather than shared.
+const pgUniqueViolation = "23505"
 
 func main() {
 	execSQL := flag.String("exec-sql", "", "path to a .sql file to execute, then exit")
@@ -52,6 +59,10 @@ func main() {
 	setPassword := flag.Bool("set-password", false, "set a dashboard user's password by phone (owner/admin/staff)")
 	pwPhone := flag.String("phone", "", "with -set-password: target user's phone (any accepted format; normalised)")
 	pwValue := flag.String("password", "", "with -set-password: the new password (or set env DBADMIN_PASSWORD to avoid the process list)")
+	createOwner := flag.Bool("create-owner", false, "provision exactly one new owner user (phone+password); fails if the phone already exists")
+	ownerPhone := flag.String("owner-phone", "", "with -create-owner: the new owner's phone (any accepted format; normalised)")
+	ownerName := flag.String("owner-name", "", "with -create-owner: the new owner's full_name")
+	skipConfirm := flag.Bool("yes", false, "with -create-owner: skip the typed target-database confirmation (non-interactive use)")
 	flag.Parse()
 
 	_ = godotenv.Load()
@@ -103,6 +114,8 @@ func main() {
 		verifyExpenseTenant(ctx, pool)
 	case *setPassword:
 		runSetPassword(ctx, pool, *pwPhone, *pwValue)
+	case *createOwner:
+		runCreateOwner(ctx, pool, cfg, *ownerPhone, *ownerName, *skipConfirm)
 	default:
 		flag.Usage()
 		os.Exit(2)
@@ -176,6 +189,99 @@ func runSetPassword(ctx context.Context, pool *pgxpool.Pool, rawPhone, rawPasswo
 		log.Fatalf("no owner/admin/staff user found for phone %s (player rows are not eligible)", normPhone)
 	}
 	fmt.Printf("✓ password set for %s (bcrypt cost %d)\n", normPhone, cost)
+}
+
+// runCreateOwner provisions exactly one brand-new owner user (phone, full_name,
+// role=owner, bcrypt password_hash) via a real INSERT — never an UPDATE. It
+// refuses if the phone already has a row of ANY role, so it can never silently
+// re-role or overwrite an existing account.
+//
+// Before writing, it prints the resolved target (host/port/database ONLY — never
+// the user or password, never the full DSN) and the phone+name about to be
+// created, then requires the operator to type the database name back exactly.
+// -yes skips this and must be passed explicitly; the default is always to
+// prompt, because a stale DATABASE_URL left in the shell silently wins over
+// backend/.env (godotenv.Load does not override an already-set var) and this
+// tool has no undo.
+//
+//	go run ./cmd/dbadmin -create-owner -owner-phone +962795303606 -owner-name "..."
+//	DBADMIN_PASSWORD='...' go run ./cmd/dbadmin -create-owner -owner-phone ... -owner-name ...
+func runCreateOwner(ctx context.Context, pool *pgxpool.Pool, cfg *pgxpool.Config, rawPhone, fullName string, skipConfirm bool) {
+	if strings.TrimSpace(rawPhone) == "" {
+		log.Fatal("-owner-phone is required with -create-owner")
+	}
+	if strings.TrimSpace(fullName) == "" {
+		log.Fatal("-owner-name is required with -create-owner")
+	}
+	pw := os.Getenv("DBADMIN_PASSWORD")
+	if pw == "" {
+		log.Fatal("provide the initial password via the DBADMIN_PASSWORD env var")
+	}
+	if len(pw) < 8 {
+		log.Fatal("password must be at least 8 characters")
+	}
+
+	normPhone, err := phone.Normalize(rawPhone)
+	if err != nil {
+		log.Fatalf("invalid phone: %v", err)
+	}
+
+	dbName := cfg.ConnConfig.Database
+	fmt.Printf("target database: host=%s port=%d database=%s\n",
+		cfg.ConnConfig.Host, cfg.ConnConfig.Port, dbName)
+	fmt.Printf("about to create: phone=%s full_name=%q role=owner\n", normPhone, fullName)
+	if !skipConfirm {
+		fmt.Printf("type the database name (%q) to proceed: ", dbName)
+		reader := bufio.NewReader(os.Stdin)
+		input, _ := reader.ReadString('\n')
+		if strings.TrimSpace(input) != dbName {
+			log.Fatal("confirmation did not match — aborting, no write performed")
+		}
+	}
+
+	var existing int
+	must(pool.QueryRow(ctx, `SELECT count(*) FROM users WHERE phone = $1`, normPhone).Scan(&existing))
+	if existing > 0 {
+		log.Fatalf("refusing: a user already exists for phone %s", normPhone)
+	}
+
+	cost := 12
+	if v := os.Getenv("BCRYPT_COST"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 10 && n <= 31 {
+			cost = n
+		}
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(pw), cost)
+	if err != nil {
+		log.Fatalf("hash password: %v", err)
+	}
+
+	var newID int64
+	err = pool.QueryRow(ctx, `
+		INSERT INTO users (phone, full_name, role, password_hash, opt_in, phone_verified)
+		VALUES ($1, $2, 'owner', $3, TRUE, TRUE)
+		RETURNING id
+	`, normPhone, fullName, string(hash)).Scan(&newID)
+	if err != nil {
+		if msg, ok := createOwnerFriendlyError(err, normPhone); ok {
+			log.Fatal(msg)
+		}
+		log.Fatalf("create owner: %v", err)
+	}
+	fmt.Printf("✓ owner created: id=%d phone=%s (bcrypt cost %d)\n", newID, normPhone, cost)
+}
+
+// createOwnerFriendlyError maps a unique-violation on users.phone (23505) — the
+// TOCTOU losing side of the count-check race, since idx_users_phone_unique is
+// the real referee, not the count-check — to the SAME clean message the
+// count-check path produces, instead of surfacing the raw pg driver error.
+// Mirrors the pgExclusionViolation pattern in repository/booking_sheet.go.
+func createOwnerFriendlyError(err error, normPhone string) (string, bool) {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == pgUniqueViolation {
+		return fmt.Sprintf("refusing: a user already exists for phone %s", normPhone), true
+	}
+	return "", false
 }
 
 func runBackfill(ctx context.Context, pool *pgxpool.Pool, apply bool) {
