@@ -422,3 +422,15 @@ Four parallel identity columns, not one:
   creation. IMMUTABLE — editing desyncs it from the users table.
 - player_id — FK, player bookings only.
 - customer_id — CRM FK, populated post-commit, fail-open.
+
+## Series edits — scope by field (2026-08-16)
+Whether an edit may apply to a whole recurrence_group_id series depends on the field:
+- guest_name / guest_phone — SERIES ALLOWED via `apply_to_series`. These touch no
+  range and no pitch, so GIST EXCLUDE cannot fire and a partial-failure state is
+  impossible. Single atomic UPDATE across the group, no loop, no transaction.
+- booking_range / pitch_id — SINGLE OCCURRENCE ONLY. Series rescheduling is deferred
+  to a separate T3, because each row clears GIST EXCLUDE independently and a partial
+  move would leave a series split across two times or pitches. The all-or-nothing
+  vs best-effort decision is unmade.
+This supersedes the original contact-edit G1 ("edits ONE booking row"), which
+predates the field-level distinction.
