@@ -184,6 +184,7 @@ func (e *bsEnv) router(actorID int64, role string, boundPitch int64) *gin.Engine
 	r.PATCH("/bookings/:id/extend", middleware.RequireRole("owner", "admin"), sheet.ExtendBooking)
 	r.GET("/bookings/:id/contact", middleware.RequireRole("owner", "admin"), sheet.GetContact)
 	r.PATCH("/bookings/:id/contact", middleware.RequireRole("owner", "admin"), sheet.PatchContact)
+	r.PATCH("/bookings/:id/reschedule", middleware.RequireRole("owner", "admin"), sheet.RescheduleBooking)
 	r.GET("/schedule", middleware.RequireRole("staff", "owner", "admin"), sched.GetDailySchedule)
 	return r
 }

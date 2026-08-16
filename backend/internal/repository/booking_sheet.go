@@ -130,6 +130,40 @@ type BookingSheetRepository interface {
 	// be nil (COALESCE keeps the existing value). No range, price, status, or
 	// attendance is touched. pgx.ErrNoRows → ErrSheetNotFound.
 	ApplyContact(ctx context.Context, actor auth.Actor, bookingID int64, guestName, guestPhone *string) (*BookingContactFields, error)
+
+	// LoadRescheduleTarget resolves the booking under OWNER scope for the
+	// reschedule pre-checks (recurrence; the candidate range for the hours gate).
+	// Unknown / not-owned / soft-deleted pitch → ErrSheetNotFound.
+	LoadRescheduleTarget(ctx context.Context, actor auth.Actor, bookingID int64) (*rescheduleTarget, error)
+
+	// ResolveOwnedPitch confirms pitchID is an active, non-deleted pitch in the
+	// actor's scope — used to validate the RESCHEDULE TARGET pitch before it is
+	// handed to the operating-hours resolver (never let an unscoped pitch id
+	// become an hours-configuration oracle). Not found / not owned → ErrSheetNotFound.
+	ResolveOwnedPitch(ctx context.Context, actor auth.Actor, pitchID int64) error
+
+	// ApplyReschedule moves booking_range to start at newStart (duration
+	// preserved) and/or moves pitch_id to newPitchID, in one atomic owner-scoped
+	// UPDATE. The guards (source<>block, status<>cancelled, recurrence_group_id
+	// IS NULL, not-yet-started, new start not in the past, target pitch shares
+	// the current owner and is active, owner scope) all live in the WHERE — a
+	// raced state change yields no row → ErrSheetNotFound. The recurrence guard
+	// is query-layer here (not just the handler's pre-read 422): a caller that
+	// somehow reaches this method directly on a recurring row still gets a
+	// hard ErrSheetNotFound, never a silent move. A GIST EXCLUDE violation
+	// (23P01) → ErrSheetConflict. total_price / amount_paid untouched
+	// (WO-BOOKING-RESCHEDULE: same duration only — a price differs-by-pitch
+	// delta is explicitly out of scope, unlike ApplyExtend's additive delta).
+	ApplyReschedule(ctx context.Context, actor auth.Actor, bookingID int64, newStart time.Time, newPitchID int64) (*BookingSheet, error)
+}
+
+// rescheduleTarget is the pre-write snapshot the handler validates (recurrence;
+// the candidate range for the operating-hours gate) before the atomic UPDATE.
+type rescheduleTarget struct {
+	PitchID           int64
+	Start             time.Time // lower(booking_range)
+	End               time.Time // upper(booking_range)
+	RecurrenceGroupID *string
 }
 
 // BookingContactFields is the read shape for GET /bookings/:id/contact.
@@ -272,4 +306,98 @@ func (r *bookingSheetRepo) ApplyContact(ctx context.Context, actor auth.Actor, b
 		return nil, fmt.Errorf("ApplyContact: %w", err)
 	}
 	return &ct, nil
+}
+
+// ── Reschedule repository (WO-BOOKING-RESCHEDULE) ────────────────────────────
+
+func (r *bookingSheetRepo) LoadRescheduleTarget(ctx context.Context, actor auth.Actor, bookingID int64) (*rescheduleTarget, error) {
+	ownerClause, ownerArgs := actor.OwnerScopeFilter("p.owner_id", 2) // $1 = bookingID
+	args := append([]any{bookingID}, ownerArgs...)
+
+	var t rescheduleTarget
+	err := r.db.QueryRow(ctx, fmt.Sprintf(`
+		SELECT b.pitch_id, lower(b.booking_range), upper(b.booking_range), b.recurrence_group_id
+		FROM bookings b
+		JOIN pitches p ON p.id = b.pitch_id
+		WHERE b.id = $1
+		  AND p.deleted_at IS NULL
+		  AND %s
+	`, ownerClause), args...).Scan(&t.PitchID, &t.Start, &t.End, &t.RecurrenceGroupID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrSheetNotFound
+		}
+		return nil, fmt.Errorf("LoadRescheduleTarget: %w", err)
+	}
+	return &t, nil
+}
+
+func (r *bookingSheetRepo) ResolveOwnedPitch(ctx context.Context, actor auth.Actor, pitchID int64) error {
+	ownerClause, ownerArgs := actor.OwnerScopeFilter("owner_id", 2) // $1 = pitchID
+	args := append([]any{pitchID}, ownerArgs...)
+
+	var id int64
+	err := r.db.QueryRow(ctx, fmt.Sprintf(`
+		SELECT id FROM pitches
+		WHERE id = $1 AND is_active AND deleted_at IS NULL AND %s
+	`, ownerClause), args...).Scan(&id)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrSheetNotFound
+		}
+		return fmt.Errorf("ResolveOwnedPitch: %w", err)
+	}
+	return nil
+}
+
+func (r *bookingSheetRepo) ApplyReschedule(ctx context.Context, actor auth.Actor, bookingID int64, newStart time.Time, newPitchID int64) (*BookingSheet, error) {
+	// $1 = bookingID, $2 = newStart, $3 = newPitchID; owner predicate starts at $4.
+	ownerClause, ownerArgs := actor.OwnerScopeFilter("p.owner_id", 4)
+	args := append([]any{bookingID, newStart, newPitchID}, ownerArgs...)
+
+	var s BookingSheet
+	err := r.db.QueryRow(ctx, fmt.Sprintf(`
+		UPDATE bookings b
+		SET booking_range = tstzrange($2, $2 + (upper(b.booking_range) - lower(b.booking_range)), '[)'),
+		    pitch_id      = $3,
+		    updated_at    = now()
+		FROM pitches p, pitches np
+		WHERE b.id = $1
+		  AND p.id = b.pitch_id
+		  AND np.id = $3
+		  AND np.owner_id = p.owner_id
+		  AND np.is_active AND np.deleted_at IS NULL
+		  AND b.source <> 'block'
+		  AND b.status <> 'cancelled'
+		  AND b.recurrence_group_id IS NULL
+		  AND lower(b.booking_range) >= now()
+		  AND $2 >= now()
+		  AND %s
+		RETURNING b.id, b.pitch_id, np.name,
+		          lower(b.booking_range), upper(b.booking_range),
+		          b.source, b.status,
+		          b.total_price::float8, b.amount_paid::float8, b.payment_status
+	`, ownerClause), args...).Scan(
+		&s.ID, &s.PitchID, &s.PitchName, &s.StartTime, &s.EndTime,
+		&s.Source, &s.Status, &s.TotalPrice, &s.AmountPaid, &s.PaymentStatus,
+	)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgExclusionViolation {
+			return nil, ErrSheetConflict
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			// Guards in the WHERE matched no row — a state raced between load and
+			// apply (cancelled / started / target pitch scope). Fail closed as
+			// not-found, same as ApplyExtend.
+			return nil, ErrSheetNotFound
+		}
+		return nil, fmt.Errorf("ApplyReschedule: %w", err)
+	}
+	s.TotalPrice = round3(s.TotalPrice)
+	if s.AmountPaid != nil {
+		v := round3(*s.AmountPaid)
+		s.AmountPaid = &v
+	}
+	return s.withDerived(), nil
 }

@@ -421,6 +421,13 @@ func Register(
 			middleware.RequireRole("owner", "admin"),
 			bookingSheetHandler.PatchContact,
 		)
+		// WO-BOOKING-RESCHEDULE: move an existing booking to a new start time
+		// and/or pitch, same duration only. Owner/admin only — staff barred here
+		// at the route (re-asserted in-handler, mirroring extend/contact).
+		protected.PATCH("/bookings/:id/reschedule",
+			middleware.RequireRole("owner", "admin"),
+			bookingSheetHandler.RescheduleBooking,
+		)
 
 		// Owner/admin BLOCKS: create held time (source='block'), or remove it.
 		// Not bound by operating hours (owner bypass); blocks still conflict with
