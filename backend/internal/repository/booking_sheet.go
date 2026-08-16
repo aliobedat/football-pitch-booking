@@ -118,6 +118,26 @@ type BookingSheetRepository interface {
 	// so a raced state change yields no row → ErrSheetNotFound. A GIST EXCLUDE
 	// violation (23P01) → ErrSheetConflict. amount_paid / payment_status untouched.
 	ApplyExtend(ctx context.Context, actor auth.Actor, bookingID int64, minutes int) (*BookingSheet, error)
+
+	// LoadContact reads the editable-contact fields (WO-BOOKING-EDIT-CONTACT). The
+	// WHERE clause is byte-identical in shape to ApplyContact's so read and write
+	// scope can never drift apart. source not in (manual, academy), cancelled, or
+	// out of owner scope → ErrSheetNotFound (existence not leaked).
+	LoadContact(ctx context.Context, actor auth.Actor, bookingID int64) (*BookingContactFields, error)
+
+	// ApplyContact corrects guest_name and/or guest_phone on an existing
+	// manual/academy booking, in one atomic owner-scoped UPDATE. Either field may
+	// be nil (COALESCE keeps the existing value). No range, price, status, or
+	// attendance is touched. pgx.ErrNoRows → ErrSheetNotFound.
+	ApplyContact(ctx context.Context, actor auth.Actor, bookingID int64, guestName, guestPhone *string) (*BookingContactFields, error)
+}
+
+// BookingContactFields is the read shape for GET /bookings/:id/contact.
+type BookingContactFields struct {
+	GuestName          string  `json:"guest_name"`
+	GuestPhone         string  `json:"guest_phone"`
+	Source             string  `json:"source"`
+	RecurrenceGroupID  *string `json:"recurrence_group_id"`
 }
 
 type bookingSheetRepo struct {
@@ -199,4 +219,57 @@ func (r *bookingSheetRepo) ApplyExtend(ctx context.Context, actor auth.Actor, bo
 		s.AmountPaid = &v
 	}
 	return s.withDerived(), nil
+}
+
+// ── Contact repository (WO-BOOKING-EDIT-CONTACT) ─────────────────────────────
+
+func (r *bookingSheetRepo) LoadContact(ctx context.Context, actor auth.Actor, bookingID int64) (*BookingContactFields, error) {
+	ownerClause, ownerArgs := actor.OwnerScopeFilter("p.owner_id", 2) // $1 = bookingID
+	args := append([]any{bookingID}, ownerArgs...)
+
+	var ct BookingContactFields
+	err := r.db.QueryRow(ctx, fmt.Sprintf(`
+		SELECT COALESCE(b.guest_name,''), COALESCE(b.guest_phone,''), b.source, b.recurrence_group_id
+		FROM bookings b
+		JOIN pitches p ON p.id = b.pitch_id
+		WHERE b.id = $1
+		  AND b.source IN ('manual','academy')
+		  AND b.status <> 'cancelled'
+		  AND %s
+	`, ownerClause), args...).Scan(&ct.GuestName, &ct.GuestPhone, &ct.Source, &ct.RecurrenceGroupID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrSheetNotFound
+		}
+		return nil, fmt.Errorf("LoadContact: %w", err)
+	}
+	return &ct, nil
+}
+
+func (r *bookingSheetRepo) ApplyContact(ctx context.Context, actor auth.Actor, bookingID int64, guestName, guestPhone *string) (*BookingContactFields, error) {
+	// $1 = bookingID, $2 = guestName, $3 = guestPhone; owner predicate starts at $4.
+	ownerClause, ownerArgs := actor.OwnerScopeFilter("p.owner_id", 4)
+	args := append([]any{bookingID, guestName, guestPhone}, ownerArgs...)
+
+	var ct BookingContactFields
+	err := r.db.QueryRow(ctx, fmt.Sprintf(`
+		UPDATE bookings b
+		SET guest_name  = COALESCE($2, b.guest_name),
+		    guest_phone = COALESCE($3, b.guest_phone),
+		    updated_at  = now()
+		FROM pitches p
+		WHERE b.id = $1
+		  AND p.id = b.pitch_id
+		  AND b.source IN ('manual','academy')
+		  AND b.status <> 'cancelled'
+		  AND %s
+		RETURNING COALESCE(b.guest_name,''), COALESCE(b.guest_phone,''), b.source, b.recurrence_group_id
+	`, ownerClause), args...).Scan(&ct.GuestName, &ct.GuestPhone, &ct.Source, &ct.RecurrenceGroupID)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrSheetNotFound
+		}
+		return nil, fmt.Errorf("ApplyContact: %w", err)
+	}
+	return &ct, nil
 }

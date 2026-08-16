@@ -11,12 +11,14 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/ali/football-pitch-api/internal/auth"
 	"github.com/ali/football-pitch-api/internal/middleware"
+	"github.com/ali/football-pitch-api/internal/phone"
 	"github.com/ali/football-pitch-api/internal/repository"
 )
 
@@ -29,13 +31,22 @@ type operatingHoursResolver interface {
 
 // BookingSheetHandler serves the owner/admin booking-extension endpoint.
 type BookingSheetHandler struct {
-	repo  repository.BookingSheetRepository
-	hours operatingHoursResolver
+	repo      repository.BookingSheetRepository
+	hours     operatingHoursResolver
+	customers customerAssociator // WO-BOOKING-EDIT-CONTACT: fail-open CRM re-link on phone edit
 }
 
 // NewBookingSheetHandler constructs a BookingSheetHandler.
 func NewBookingSheetHandler(repo repository.BookingSheetRepository, hours operatingHoursResolver) *BookingSheetHandler {
 	return &BookingSheetHandler{repo: repo, hours: hours}
+}
+
+// WithCustomers enables go-forward CRM re-association after a contact edit.
+// Mirrors BookingHandler.WithCustomers — kept separate from the constructor so
+// existing call sites/tests are unaffected.
+func (h *BookingSheetHandler) WithCustomers(c customerAssociator) *BookingSheetHandler {
+	h.customers = c
+	return h
 }
 
 type extendRequest struct {
@@ -125,4 +136,121 @@ func (h *BookingSheetHandler) ExtendBooking(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": sheet})
+}
+
+// ── Contact (WO-BOOKING-EDIT-CONTACT) ────────────────────────────────────────
+//
+// Owner/admin correct the guest name/phone on an existing manual/academy
+// booking. Scope, source, and status are enforced entirely in the repository's
+// WHERE clause (single atomic statement, no pre-check SELECT); pgx.ErrNoRows
+// deliberately conflates nonexistent / cross-tenant / source='player' /
+// source='block' / cancelled into one 404 (existence not leaked). No
+// notification, no status_transitions row — this is not a status change.
+
+type contactRequest struct {
+	GuestName  *string `json:"guest_name"`
+	GuestPhone *string `json:"guest_phone"`
+}
+
+// requireOwnerOrAdmin re-asserts the route guard in-handler, mirroring
+// ExtendBooking's bar (staff cannot touch contact fields).
+func (h *BookingSheetHandler) requireOwnerOrAdmin(c *gin.Context) (auth.Actor, bool) {
+	actor := middleware.GetActor(c)
+	if actor.Role != auth.RoleOwner && actor.Role != auth.RoleAdmin {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"error": "forbidden", "message": "تعديل بيانات الزبون متاح فقط لمالك أو مدير الملعب",
+		})
+		return auth.Actor{}, false
+	}
+	return actor, true
+}
+
+// GetContact — GET /bookings/:id/contact.
+func (h *BookingSheetHandler) GetContact(c *gin.Context) {
+	actor, ok := h.requireOwnerOrAdmin(c)
+	if !ok {
+		return
+	}
+
+	bookingID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || bookingID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_booking_id", "message": "invalid booking id"})
+		return
+	}
+
+	ct, err := h.repo.LoadContact(c.Request.Context(), actor, bookingID)
+	if err != nil {
+		if errors.Is(err, repository.ErrSheetNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "الحجز غير موجود أو لا تملك صلاحية تعديله"})
+			return
+		}
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "could not load booking contact"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": ct})
+}
+
+// PatchContact — PATCH /bookings/:id/contact  body { guest_name?, guest_phone? }.
+func (h *BookingSheetHandler) PatchContact(c *gin.Context) {
+	actor, ok := h.requireOwnerOrAdmin(c)
+	if !ok {
+		return
+	}
+
+	bookingID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || bookingID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_booking_id", "message": "invalid booking id"})
+		return
+	}
+
+	var req contactRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": "malformed JSON body"})
+		return
+	}
+	if req.GuestName == nil && req.GuestPhone == nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "no_fields", "message": "لم يتم إرسال أي حقل للتعديل"})
+		return
+	}
+
+	var namePtr *string
+	if req.GuestName != nil {
+		trimmed := strings.TrimSpace(*req.GuestName)
+		if trimmed == "" || len([]rune(trimmed)) > 120 {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_name", "message": "اسم الزبون غير صالح"})
+			return
+		}
+		namePtr = &trimmed
+	}
+
+	var phonePtr *string
+	if req.GuestPhone != nil {
+		normalized, err := phone.Normalize(*req.GuestPhone)
+		if err != nil {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_phone", "message": "رقم الهاتف غير صالح"})
+			return
+		}
+		phonePtr = &normalized
+	}
+
+	ct, err := h.repo.ApplyContact(c.Request.Context(), actor, bookingID, namePtr, phonePtr)
+	if err != nil {
+		if errors.Is(err, repository.ErrSheetNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "الحجز غير موجود أو لا تملك صلاحية تعديله"})
+			return
+		}
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "could not update booking contact"})
+		return
+	}
+
+	// Fail-open CRM re-association: never lets a linkage hiccup fail the edit.
+	if phonePtr != nil && h.customers != nil {
+		if err := h.customers.AssociateBookingCustomer(c.Request.Context(), bookingID); err != nil {
+			c.Error(err)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": ct})
 }

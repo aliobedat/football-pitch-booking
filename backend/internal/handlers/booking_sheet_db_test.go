@@ -178,9 +178,13 @@ func (e *bsEnv) router(actorID int64, role string, boundPitch int64) *gin.Engine
 		c.Next()
 	})
 	sched := NewScheduleHandler(repository.NewScheduleRepository(e.pool))
-	sheet := NewBookingSheetHandler(repository.NewBookingSheetRepository(e.pool), &data.PitchModel{DB: e.pool})
+	sheet := NewBookingSheetHandler(repository.NewBookingSheetRepository(e.pool), &data.PitchModel{DB: e.pool}).
+		WithCustomers(repository.NewCustomerRepository(e.pool))
 	r.PATCH("/bookings/:id/payment", middleware.RequireRole("staff", "owner", "admin"), sched.PatchPayment)
 	r.PATCH("/bookings/:id/extend", middleware.RequireRole("owner", "admin"), sheet.ExtendBooking)
+	r.GET("/bookings/:id/contact", middleware.RequireRole("owner", "admin"), sheet.GetContact)
+	r.PATCH("/bookings/:id/contact", middleware.RequireRole("owner", "admin"), sheet.PatchContact)
+	r.GET("/schedule", middleware.RequireRole("staff", "owner", "admin"), sched.GetDailySchedule)
 	return r
 }
 
