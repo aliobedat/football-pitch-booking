@@ -253,14 +253,14 @@ func pgIdent(table string) string {
 // ── Seed data ───────────────────────────────────────────────────────────────
 
 const (
-	ownerFullName    = "أحمد الدمو"
-	venueName        = "ملعب الدمو الرياضي"
-	venueSlug        = "demo-sports-venue"
+	ownerFullName     = "إدارة ملاعب سما عمان"
+	venueName         = "ملاعب سما عمان"
+	venueSlug         = "sama-amman"
 	venueNeighborhood = "عبدون"
-	pitch1Name       = "الملعب الرئيسي"
-	pitch2Name       = "الملعب الثانوي"
-	pitch1PricePerHr = 15
-	pitch2PricePerHr = 20
+	pitch1Name        = "ملعب سما عمان 1"
+	pitch2Name        = "ملعب سما عمان 2"
+	pitch1PricePerHr  = 15
+	pitch2PricePerHr  = 20
 )
 
 var demoCustomerNames = []string{
