@@ -131,6 +131,18 @@ type BookingSheetRepository interface {
 	// attendance is touched. pgx.ErrNoRows → ErrSheetNotFound.
 	ApplyContact(ctx context.Context, actor auth.Actor, bookingID int64, guestName, guestPhone *string) (*BookingContactFields, error)
 
+	// ApplySeriesContact corrects guest_name and/or guest_phone across every
+	// active manual/academy member of bookingID's recurrence_group_id, in one
+	// atomic owner-scoped UPDATE (WO-CONTACT-SERIES). bookingID's own group id
+	// is resolved in a subquery — bookingID itself is NOT re-validated for
+	// scope/source/status here beyond that subquery (the handler's pre-read via
+	// LoadContact already did that, and remains the source of the 422
+	// not_recurring distinction: this method's WHERE clause cannot tell "no
+	// such booking" apart from "booking has no group," both yield zero rows).
+	// Cancelled/foreign-owner/non-manual-academy members are silently excluded
+	// from the update, not erred. Returns the ids actually touched.
+	ApplySeriesContact(ctx context.Context, actor auth.Actor, bookingID int64, guestName, guestPhone *string) ([]int64, error)
+
 	// LoadRescheduleTarget resolves the booking under OWNER scope for the
 	// reschedule pre-checks (recurrence; the candidate range for the hours gate).
 	// Unknown / not-owned / soft-deleted pitch → ErrSheetNotFound.
@@ -306,6 +318,46 @@ func (r *bookingSheetRepo) ApplyContact(ctx context.Context, actor auth.Actor, b
 		return nil, fmt.Errorf("ApplyContact: %w", err)
 	}
 	return &ct, nil
+}
+
+func (r *bookingSheetRepo) ApplySeriesContact(ctx context.Context, actor auth.Actor, bookingID int64, guestName, guestPhone *string) ([]int64, error) {
+	// $1 = bookingID, $2 = guestName, $3 = guestPhone; owner predicate starts at $4.
+	ownerClause, ownerArgs := actor.OwnerScopeFilter("p.owner_id", 4)
+	args := append([]any{bookingID, guestName, guestPhone}, ownerArgs...)
+
+	rows, err := r.db.Query(ctx, fmt.Sprintf(`
+		UPDATE bookings b
+		SET guest_name  = COALESCE($2, b.guest_name),
+		    guest_phone = COALESCE($3, b.guest_phone),
+		    updated_at  = now()
+		FROM pitches p
+		WHERE b.recurrence_group_id = (
+		        SELECT recurrence_group_id FROM bookings WHERE id = $1
+		      )
+		  AND b.recurrence_group_id IS NOT NULL
+		  AND p.id = b.pitch_id
+		  AND b.source IN ('manual','academy')
+		  AND b.status <> 'cancelled'
+		  AND %s
+		RETURNING b.id
+	`, ownerClause), args...)
+	if err != nil {
+		return nil, fmt.Errorf("ApplySeriesContact: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("ApplySeriesContact: scan: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ApplySeriesContact: %w", err)
+	}
+	return ids, nil
 }
 
 // ── Reschedule repository (WO-BOOKING-RESCHEDULE) ────────────────────────────

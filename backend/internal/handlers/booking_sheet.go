@@ -138,7 +138,7 @@ func (h *BookingSheetHandler) ExtendBooking(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": sheet})
 }
 
-// ── Contact (WO-BOOKING-EDIT-CONTACT) ────────────────────────────────────────
+// ── Contact (WO-BOOKING-EDIT-CONTACT, WO-CONTACT-SERIES) ─────────────────────
 //
 // Owner/admin correct the guest name/phone on an existing manual/academy
 // booking. Scope, source, and status are enforced entirely in the repository's
@@ -146,10 +146,16 @@ func (h *BookingSheetHandler) ExtendBooking(c *gin.Context) {
 // deliberately conflates nonexistent / cross-tenant / source='player' /
 // source='block' / cancelled into one 404 (existence not leaked). No
 // notification, no status_transitions row — this is not a status change.
+//
+// apply_to_series (WO-CONTACT-SERIES) extends the same edit to every active
+// manual/academy member of the booking's recurrence_group_id, still name/phone
+// only — booking_range and pitch_id remain untouched; series rescheduling is a
+// separate, out-of-scope WO.
 
 type contactRequest struct {
-	GuestName  *string `json:"guest_name"`
-	GuestPhone *string `json:"guest_phone"`
+	GuestName     *string `json:"guest_name"`
+	GuestPhone    *string `json:"guest_phone"`
+	ApplyToSeries bool    `json:"apply_to_series"` // WO-CONTACT-SERIES: default false = single booking, unchanged
 }
 
 // requireOwnerOrAdmin re-asserts the route guard in-handler, mirroring
@@ -232,6 +238,55 @@ func (h *BookingSheetHandler) PatchContact(c *gin.Context) {
 			return
 		}
 		phonePtr = &normalized
+	}
+
+	// WO-CONTACT-SERIES: apply_to_series branches to the group-wide write. The
+	// distinction between "not found" (404) and "not recurring" (422) can only
+	// be made from a pre-read (the atomic UPDATE's WHERE can't tell "no such
+	// booking" apart from "booking has no group" — both yield zero rows), so
+	// this reuses the existing LoadContact pre-read rather than adding a
+	// second one.
+	if req.ApplyToSeries {
+		target, err := h.repo.LoadContact(c.Request.Context(), actor, bookingID)
+		if err != nil {
+			if errors.Is(err, repository.ErrSheetNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "الحجز غير موجود أو لا تملك صلاحية تعديله"})
+				return
+			}
+			c.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "could not load booking contact"})
+			return
+		}
+		if target.RecurrenceGroupID == nil {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "not_recurring", "message": "هذا الحجز ليس جزءًا من سلسلة متكررة"})
+			return
+		}
+
+		ids, err := h.repo.ApplySeriesContact(c.Request.Context(), actor, bookingID, namePtr, phonePtr)
+		if err != nil {
+			c.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "could not update the series"})
+			return
+		}
+		if len(ids) == 0 {
+			// Guards matched no row — a state raced between the pre-read and the
+			// atomic UPDATE. Fail closed as not-found, same as the single-booking path.
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "الحجز غير موجود أو لا تملك صلاحية تعديله"})
+			return
+		}
+
+		// Fail-open CRM re-association per updated row: never lets a linkage
+		// hiccup fail the edit.
+		if phonePtr != nil && h.customers != nil {
+			for _, id := range ids {
+				if err := h.customers.AssociateBookingCustomer(c.Request.Context(), id); err != nil {
+					c.Error(err)
+				}
+			}
+		}
+
+		c.JSON(http.StatusOK, gin.H{"updated_count": len(ids), "updated_ids": ids})
+		return
 	}
 
 	ct, err := h.repo.ApplyContact(c.Request.Context(), actor, bookingID, namePtr, phonePtr)

@@ -161,6 +161,10 @@ export default function BookingSheet({
   const [contactPhoneInput, setContactPhoneInput] = useState('');
   const [contactNameError, setContactNameError] = useState<string | null>(null);
   const [contactPhoneError, setContactPhoneError] = useState<string | null>(null);
+  // WO-CONTACT-SERIES: visible only when the booking has a recurrence_group_id.
+  // Default UNCHECKED — a series-wide edit is an explicit opt-in, never the default.
+  const [applyToSeries, setApplyToSeries] = useState(false);
+  const [seriesUpdatedCount, setSeriesUpdatedCount] = useState<number | null>(null);
 
   useEffect(() => {
     if (!canEditContact) { setContact(null); return; }
@@ -178,6 +182,8 @@ export default function BookingSheet({
     setContactPhoneInput(contact.guest_phone);
     setContactNameError(null);
     setContactPhoneError(null);
+    setApplyToSeries(false);
+    setSeriesUpdatedCount(null);
     setEditingContact(true);
   };
 
@@ -185,20 +191,27 @@ export default function BookingSheet({
     if (!contact) return;
     setContactNameError(null);
     setContactPhoneError(null);
-    const body: { guest_name?: string; guest_phone?: string } = {};
+    const body: { guest_name?: string; guest_phone?: string; apply_to_series?: boolean } = {};
     if (contactNameInput.trim() !== contact.guest_name) body.guest_name = contactNameInput.trim();
     if (contactPhoneInput.trim() !== contact.guest_phone) body.guest_phone = contactPhoneInput.trim();
     if (Object.keys(body).length === 0) { setEditingContact(false); return; }
+    if (applyToSeries) body.apply_to_series = true;
 
     setSubmitting(true);
     try {
       const { data } = await api.patch(`/bookings/${booking.id}/contact`, body);
-      setContact(data.data);
+      if (applyToSeries) {
+        setSeriesUpdatedCount(data.updated_count ?? null);
+        setContact(prev => (prev ? { ...prev, guest_name: contactNameInput.trim() || prev.guest_name, guest_phone: contactPhoneInput.trim() || prev.guest_phone } : prev));
+      } else {
+        setContact(data.data);
+      }
       setEditingContact(false);
     } catch (err: any) {
       const code = err?.response?.data?.error;
       if (code === 'invalid_phone') setContactPhoneError('رقم الهاتف غير صالح');
       else if (code === 'invalid_name') setContactNameError('اسم الزبون غير صالح');
+      else if (code === 'not_recurring') setContactPhoneError('هذا الحجز ليس جزءًا من سلسلة متكررة');
       else setContactPhoneError(GENERIC_ERROR);
     } finally {
       setSubmitting(false);
@@ -483,8 +496,11 @@ export default function BookingSheet({
         {/* ── Contact (name/phone) — owner/admin, manual/academy only ── */}
         {canEditContact && contact && (
           <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-4 flex flex-col gap-3 mb-4">
-            {contact.recurrence_group_id != null && (
+            {contact.recurrence_group_id != null && !editingContact && (
               <p className="text-[11px] text-white/40" dir="rtl">التعديل يخص هذا الموعد فقط، وليس السلسلة كاملة</p>
+            )}
+            {seriesUpdatedCount != null && (
+              <p className="text-[11px] text-emerald-300" dir="rtl">تم تحديث {seriesUpdatedCount} حجز في السلسلة</p>
             )}
             {!editingContact ? (
               <>
@@ -530,6 +546,18 @@ export default function BookingSheet({
                   />
                   {contactPhoneError && <p className="text-[11px] text-red-400" dir="rtl">{contactPhoneError}</p>}
                 </div>
+                {contact.recurrence_group_id != null && (
+                  <label className="flex items-center gap-2 text-[12px] text-white/60 select-none" dir="rtl">
+                    <input
+                      type="checkbox"
+                      checked={applyToSeries}
+                      onChange={e => setApplyToSeries(e.target.checked)}
+                      disabled={submitting}
+                      className="w-4 h-4 accent-emerald-500 disabled:opacity-50"
+                    />
+                    تطبيق على السلسلة كاملة
+                  </label>
+                )}
                 <div className="flex items-center gap-2 justify-end">
                   <button
                     type="button"
