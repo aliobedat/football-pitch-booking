@@ -65,6 +65,18 @@ const ERROR_COPY: Record<string, string> = {
 const GENERIC_ERROR = 'صار خطأ — جرّب مرة ثانية';
 const copyFor = (code?: string) => (code && ERROR_COPY[code]) || GENERIC_ERROR;
 
+// WO-BOOKING-RESCHEDULE: reschedule-specific error copy (separate map — its
+// codes overlap slot_conflict with extend but the rest are reschedule-only).
+const RESCHEDULE_ERROR_COPY: Record<string, string> = {
+  slot_conflict:            'لا يمكن نقل الحجز — الموعد الجديد محجوز',
+  outside_operating_hours:  'الموعد الجديد خارج ساعات دوام الملعب',
+  recurring_not_supported:  'لا يمكن نقل حجز متكرر',
+  not_found:                'الحجز غير موجود أو لا تملك صلاحية نقله',
+};
+const rescheduleCopyFor = (code?: string) => (code && RESCHEDULE_ERROR_COPY[code]) || GENERIC_ERROR;
+
+interface OwnerPitch { id: number; name: string; isActive: boolean }
+
 // WO-OWNER-NOTIFY-CANCEL-REASON-UI: fixed cancellation-reason options, verbatim
 // (not placeholders — these are the exact strings sent to the backend and, from
 // there, into the booking_cancelled_ar WhatsApp template).
@@ -188,6 +200,60 @@ export default function BookingSheet({
       if (code === 'invalid_phone') setContactPhoneError('رقم الهاتف غير صالح');
       else if (code === 'invalid_name') setContactNameError('اسم الزبون غير صالح');
       else setContactPhoneError(GENERIC_ERROR);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // ── Reschedule (WO-BOOKING-RESCHEDULE) ─────────────────────────────────────
+  // Same gate as contact-edit: owner/admin (via canExtend) and manual/academy
+  // source only. SAME DURATION ONLY — no duration field here; extend/shorten
+  // stays the extend endpoint's job.
+  const canReschedule = canExtend && (booking.source === 'manual' || booking.source === 'academy');
+  const [reschedulePitches, setReschedulePitches] = useState<OwnerPitch[]>([]);
+  const [editingReschedule, setEditingReschedule] = useState(false);
+  const [rescheduleDateInput, setRescheduleDateInput] = useState('');
+  const [rescheduleTimeInput, setRescheduleTimeInput] = useState('');
+  const [reschedulePitchInput, setReschedulePitchInput] = useState<number | null>(null);
+  const [rescheduleError, setRescheduleError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!canReschedule) { setReschedulePitches([]); return; }
+    let cancelled = false;
+    api.get('/owner/pitches')
+      .then(({ data }) => { if (!cancelled) setReschedulePitches(((data.data ?? []) as OwnerPitch[]).filter(p => p.isActive)); })
+      .catch(() => { /* fail silent — dropdown just stays empty */ });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [canReschedule]);
+
+  const openReschedule = () => {
+    const start = new Date(booking.start_time);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    setRescheduleDateInput(`${start.getFullYear()}-${pad(start.getMonth() + 1)}-${pad(start.getDate())}`);
+    setRescheduleTimeInput(`${pad(start.getHours())}:${pad(start.getMinutes())}`);
+    setReschedulePitchInput(null); // null = keep current pitch (COALESCE on the server)
+    setRescheduleError(null);
+    setEditingReschedule(true);
+  };
+
+  const saveReschedule = async () => {
+    setRescheduleError(null);
+    const body: { start_time?: string; pitch_id?: number } = {};
+    if (rescheduleDateInput && rescheduleTimeInput) {
+      const combined = new Date(`${rescheduleDateInput}T${rescheduleTimeInput}:00`);
+      if (!Number.isNaN(combined.getTime())) body.start_time = combined.toISOString();
+    }
+    if (reschedulePitchInput != null) body.pitch_id = reschedulePitchInput;
+    if (Object.keys(body).length === 0) { setEditingReschedule(false); return; }
+
+    setSubmitting(true);
+    try {
+      await api.patch(`/bookings/${booking.id}/reschedule`, body);
+      setEditingReschedule(false);
+      await afterSuccess();
+    } catch (err: any) {
+      setRescheduleError(rescheduleCopyFor(err?.response?.data?.error));
     } finally {
       setSubmitting(false);
     }
@@ -388,8 +454,20 @@ export default function BookingSheet({
               <h2 className="text-[15px] font-bold text-[#f0efe8] truncate">{title || 'حجز'}</h2>
               {badgeEl}
             </div>
-            <p className="text-[12px] text-white/40 mt-1" dir="rtl">
-              {dateLabel}، <span dir="ltr" className="font-mono tabular-nums">{hm(booking.start_time)}–{hm(booking.end_time)}</span>
+            <p className="text-[12px] text-white/40 mt-1 flex items-center gap-1.5" dir="rtl">
+              <span>{dateLabel}،</span>
+              <span dir="ltr" className="font-mono tabular-nums">{hm(booking.start_time)}–{hm(booking.end_time)}</span>
+              {canReschedule && !ended && (
+                <button
+                  type="button"
+                  onClick={openReschedule}
+                  disabled={submitting}
+                  aria-label="نقل الحجز"
+                  className="text-white/30 hover:text-white/60 transition-colors disabled:opacity-50"
+                >
+                  <Pencil size={11} aria-hidden />
+                </button>
+              )}
             </p>
             {isSeries && (
               <p className="mt-1 inline-flex items-center gap-1 text-[11px] font-semibold text-sky-300/80">
@@ -474,6 +552,71 @@ export default function BookingSheet({
                 </div>
               </div>
             )}
+          </div>
+        )}
+
+        {/* ── Reschedule (date/time + pitch) — owner/admin, manual/academy only ── */}
+        {canReschedule && editingReschedule && (
+          <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-4 flex flex-col gap-3 mb-4">
+            <span className="text-[12px] text-white/45">نقل الحجز — المدة تبقى كما هي</span>
+            <div className="flex items-center gap-2">
+              <input
+                type="date"
+                value={rescheduleDateInput}
+                onChange={e => setRescheduleDateInput(e.target.value)}
+                dir="ltr"
+                disabled={submitting}
+                className="flex-1 bg-white/[0.05] border border-white/[0.15] rounded-lg px-3 py-1.5 text-[13px] text-[#f0efe8] focus:outline-none focus:border-emerald-500/50 disabled:opacity-50"
+              />
+              <input
+                type="time"
+                value={rescheduleTimeInput}
+                onChange={e => setRescheduleTimeInput(e.target.value)}
+                dir="ltr"
+                disabled={submitting}
+                className="w-28 bg-white/[0.05] border border-white/[0.15] rounded-lg px-3 py-1.5 text-[13px] text-[#f0efe8] tabular-nums focus:outline-none focus:border-emerald-500/50 disabled:opacity-50"
+              />
+            </div>
+            {reschedulePitches.length > 0 && (
+              <select
+                value={reschedulePitchInput ?? ''}
+                onChange={e => setReschedulePitchInput(e.target.value === '' ? null : Number(e.target.value))}
+                dir="rtl"
+                disabled={submitting}
+                className="w-full bg-white/[0.05] border border-white/[0.15] rounded-lg px-3 py-1.5 text-[13px] text-[#f0efe8] focus:outline-none focus:border-emerald-500/50 disabled:opacity-50"
+              >
+                <option value="">نفس الملعب الحالي</option>
+                {reschedulePitches.map(p => (
+                  <option key={p.id} value={p.id}>{p.name}</option>
+                ))}
+              </select>
+            )}
+            {rescheduleError && (
+              <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-red-500/[0.07] border border-red-500/20 text-[12px] text-red-300">
+                <AlertTriangle size={13} aria-hidden className="shrink-0" />
+                {rescheduleError}
+              </div>
+            )}
+            <div className="flex items-center gap-2 justify-end">
+              <button
+                type="button"
+                onClick={saveReschedule}
+                disabled={submitting}
+                aria-label="حفظ النقل"
+                className="w-9 h-9 inline-flex items-center justify-center rounded-lg bg-emerald-500/15 border border-emerald-500/35 text-emerald-300 disabled:opacity-50"
+              >
+                <Check size={15} aria-hidden />
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditingReschedule(false)}
+                disabled={submitting}
+                aria-label="إلغاء"
+                className="w-9 h-9 inline-flex items-center justify-center rounded-lg border border-white/[0.1] text-white/50 disabled:opacity-50"
+              >
+                <X size={15} aria-hidden />
+              </button>
+            </div>
           </div>
         )}
 

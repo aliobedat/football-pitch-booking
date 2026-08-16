@@ -254,3 +254,112 @@ func (h *BookingSheetHandler) PatchContact(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"data": ct})
 }
+
+// ── Reschedule (WO-BOOKING-RESCHEDULE) ───────────────────────────────────────
+//
+// Owner/admin move an existing manual/academy/player booking to a new start
+// time and/or a new pitch owned by the same owner, SAME DURATION ONLY (a
+// duration change stays with /extend). The atomic UPDATE is the sole conflict
+// referee (GIST EXCLUDE, 23P01 → 409 slot_conflict); recurrence and operating
+// hours are checked from a pre-read snapshot, mirroring ExtendBooking's
+// pre-check/apply split — NOT an availability pre-check (that stays banned).
+// total_price / amount_paid are never recomputed, even across a price_per_hour
+// difference between pitches.
+
+type rescheduleRequest struct {
+	StartTime *time.Time `json:"start_time"`
+	PitchID   *int64     `json:"pitch_id"`
+}
+
+// RescheduleBooking — PATCH /bookings/:id/reschedule  body { start_time?, pitch_id? }.
+func (h *BookingSheetHandler) RescheduleBooking(c *gin.Context) {
+	actor, ok := h.requireOwnerOrAdmin(c)
+	if !ok {
+		return
+	}
+
+	bookingID, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil || bookingID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_booking_id", "message": "invalid booking id"})
+		return
+	}
+
+	var req rescheduleRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": "malformed JSON body"})
+		return
+	}
+	if req.StartTime == nil && req.PitchID == nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "no_fields", "message": "لم يتم إرسال أي حقل للتعديل"})
+		return
+	}
+
+	target, err := h.repo.LoadRescheduleTarget(c.Request.Context(), actor, bookingID)
+	if err != nil {
+		if errors.Is(err, repository.ErrSheetNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "الحجز غير موجود أو لا تملك صلاحية تعديله"})
+			return
+		}
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "could not load the booking"})
+		return
+	}
+	if target.RecurrenceGroupID != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "recurring_not_supported", "message": "لا يمكن نقل حجز متكرر — عدّل هذا الموعد يدويًا"})
+		return
+	}
+
+	newPitchID := target.PitchID
+	if req.PitchID != nil {
+		newPitchID = *req.PitchID
+	}
+	newStart := target.Start
+	if req.StartTime != nil {
+		newStart = *req.StartTime
+	}
+	newEnd := newStart.Add(target.End.Sub(target.Start))
+
+	// The target pitch must resolve inside the caller's own scope BEFORE it is
+	// handed to the hours resolver — otherwise an attacker-supplied pitch_id for
+	// a pitch they don't own becomes an hours-configuration oracle. Not the
+	// booking's own pitch scope (already proven by LoadRescheduleTarget) when
+	// pitch_id is unset, but cheap to re-check unconditionally for uniformity.
+	if err := h.repo.ResolveOwnedPitch(c.Request.Context(), actor, newPitchID); err != nil {
+		if errors.Is(err, repository.ErrSheetNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "الحجز غير موجود أو لا تملك صلاحية تعديله"})
+			return
+		}
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "could not resolve target pitch"})
+		return
+	}
+
+	// Operating-hours gate on the candidate range, against the TARGET pitch —
+	// reuses the same resolver ExtendBooking uses (fail-open when unconfigured).
+	contained, _, err := h.hours.SlotWithinOpenHours(c.Request.Context(), int(newPitchID), newStart, newEnd)
+	if err != nil {
+		c.Error(err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "could not resolve operating hours"})
+		return
+	}
+	if !contained {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "outside_operating_hours", "message": "الموعد الجديد خارج ساعات عمل الملعب"})
+		return
+	}
+
+	// Single atomic UPDATE. EXCLUDE (23P01) is the sole conflict referee → 409.
+	sheet, err := h.repo.ApplyReschedule(c.Request.Context(), actor, bookingID, newStart, newPitchID)
+	if err != nil {
+		switch {
+		case errors.Is(err, repository.ErrSheetConflict):
+			c.JSON(http.StatusConflict, gin.H{"error": "slot_conflict", "message": "الموعد الجديد يتعارض مع حجز آخر"})
+		case errors.Is(err, repository.ErrSheetNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "الحجز غير موجود أو لا تملك صلاحية تعديله"})
+		default:
+			c.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "could not reschedule the booking"})
+		}
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": sheet})
+}
