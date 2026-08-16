@@ -95,14 +95,18 @@ func (s *Service) Create(ctx context.Context, req models.CreateBookingRequest) (
 	// Idempotent path: when the handler attached an Idempotency-Key, route through
 	// the store's idempotent create so a double-tap / retry replays the original
 	// booking. On a replay no new booking was created, so the confirmation
-	// notification MUST be suppressed — otherwise a retry would re-notify.
+	// notification MUST be suppressed — otherwise a retry would re-notify. The
+	// same replay guard protects the owner-new-booking alert added below: both
+	// notifications live behind the identical `if !replayed` gate, so a retried
+	// request can no more double-notify the owner than it can double-notify the
+	// player.
 	if req.Idempotency != nil {
 		b, replayed, err := s.store.CreateBookingIdempotent(ctx, req, *req.Idempotency)
 		if err != nil {
 			return nil, err
 		}
 		if !replayed {
-			s.dispatch(ctx, b, notification.KindBookingConfirmed, "")
+			s.notifyCreate(ctx, b, req.ActorRole)
 		}
 		return b, nil
 	}
@@ -112,8 +116,31 @@ func (s *Service) Create(ctx context.Context, req models.CreateBookingRequest) (
 		return nil, err
 	}
 
-	s.dispatch(ctx, b, notification.KindBookingConfirmed, "")
+	s.notifyCreate(ctx, b, req.ActorRole)
 	return b, nil
+}
+
+// notifyCreate sends the player confirmation and — ONLY when the booking was
+// player-initiated (WO-OWNER-NOTIFY-CREATE) — the owner new-booking alert. The
+// contact (which now also carries the owner's phone/name, joined in the same
+// GetBookingContact query) is resolved ONCE and reused for both sends, so a
+// single Create() never costs two round trips to fetch contact data.
+func (s *Service) notifyCreate(ctx context.Context, b *models.Booking, actorRole string) {
+	contact, ok := s.resolveContact(ctx, b)
+	if !ok {
+		return
+	}
+	s.send(ctx, b, notification.KindBookingConfirmed, "", contact)
+
+	// The owner must never be notified about a booking they created themselves
+	// via the admin panel — only player-initiated bookings notify. An unset
+	// ActorRole (e.g. in tests, or any caller that predates this field) is
+	// treated as player, preserving the pre-existing unconditional-notify
+	// behaviour of this path.
+	if isStaffActor(actorRole) {
+		return
+	}
+	s.dispatchOwnerNewBooking(ctx, b, contact)
 }
 
 // Cancel transitions a confirmed booking to cancelled (releasing the slot),
@@ -145,20 +172,40 @@ func (s *Service) Cancel(ctx context.Context, params repository.CancelBookingPar
 // It is best-effort: any failure (contact lookup, missing phone, delivery) is
 // logged and swallowed so the persisted, audited transition stands on its own.
 func (s *Service) dispatch(ctx context.Context, b *models.Booking, kind notification.MessageKind, reason string) {
+	contact, ok := s.resolveContact(ctx, b)
+	if !ok {
+		return
+	}
+	s.send(ctx, b, kind, reason, contact)
+}
+
+// resolveContact applies the source guard and fetches the booking's contact
+// row (player + owner fields in one query). ok is false when there is no
+// recipient to notify at all (non-player source) or the lookup failed —
+// callers must not attempt any send in either case.
+func (s *Service) resolveContact(ctx context.Context, b *models.Booking) (*repository.BookingContact, bool) {
 	// Notify guard (PR 2): only PLAYER bookings have a recipient. A block (and, in
 	// PR 3, an academy session) has no player_id, so it has no one to notify — and
 	// GetBookingContact's INNER JOIN on player_id would not resolve. The audited
 	// state transition (written by the Store, in-tx) stands regardless; we only
 	// skip the side-effect here, keeping one create/cancel path for every source.
 	if b.Source != "" && b.Source != models.SourcePlayer {
-		return
+		return nil, false
 	}
 
 	contact, err := s.store.GetBookingContact(ctx, b.ID)
 	if err != nil {
 		s.logger.Printf("[booking] notify: contact lookup failed for booking %d: %v", b.ID, err)
-		return
+		return nil, false
 	}
+	return contact, true
+}
+
+// send renders and delivers a player-facing booking event from an already
+// resolved contact. It is best-effort: any failure (missing phone, delivery)
+// is logged and swallowed so the persisted, audited transition stands on its
+// own.
+func (s *Service) send(ctx context.Context, b *models.Booking, kind notification.MessageKind, reason string, contact *repository.BookingContact) {
 	if contact.Phone == "" {
 		s.logger.Printf("[booking] notify: booking %d has no phone on file, skipping %s", b.ID, kind)
 		return
@@ -203,6 +250,36 @@ func (s *Service) dispatch(ctx context.Context, b *models.Booking, kind notifica
 	}
 	if _, err := s.notifier.Send(ctx, msg); err != nil {
 		s.logger.Printf("[booking] notify: sending %s for booking %d failed: %v", kind, b.ID, err)
+	}
+}
+
+// dispatchOwnerNewBooking notifies the pitch owner of a new player-created
+// booking (WO-OWNER-NOTIFY-CREATE). It is best-effort, mirroring send: a
+// missing owner phone or a delivery failure is logged and swallowed. Recipient
+// is the OWNER's phone, never the player's — this is the one send in the
+// Service that does not address contact.Phone.
+func (s *Service) dispatchOwnerNewBooking(ctx context.Context, b *models.Booking, contact *repository.BookingContact) {
+	if contact.OwnerPhone == "" {
+		s.logger.Printf("[booking] notify: booking %d's pitch owner has no phone on file, skipping %s", b.ID, notification.KindOwnerNewBooking)
+		return
+	}
+
+	msg := notification.OutboundMessage{
+		Recipient: contact.OwnerPhone,
+		Kind:      notification.KindOwnerNewBooking,
+		Payload: notification.OwnerNewBookingPayload{
+			BookingID:   b.ID,
+			OwnerName:   contact.OwnerName,
+			PitchName:   contact.PitchName,
+			PlayerName:  contact.PlayerName,
+			PlayerPhone: contact.Phone,
+			StartTime:   b.StartTime,
+			EndTime:     b.EndTime,
+			Amount:      b.TotalPrice,
+		},
+	}
+	if _, err := s.notifier.Send(ctx, msg); err != nil {
+		s.logger.Printf("[booking] notify: sending %s for booking %d failed: %v", notification.KindOwnerNewBooking, b.ID, err)
 	}
 }
 

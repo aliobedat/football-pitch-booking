@@ -66,6 +66,8 @@ func renderLogBody(msg OutboundMessage) string {
 		return "booking cancelled: " + p.PitchName
 	case BookingRejectedPayload:
 		return "booking rejected: " + p.PitchName
+	case OwnerNewBookingPayload:
+		return "owner new booking: " + p.PitchName
 	default:
 		return string(msg.Kind)
 	}

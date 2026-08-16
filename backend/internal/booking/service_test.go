@@ -109,6 +109,8 @@ const (
 	testPlayerName = "Sami"
 	testPitchName  = "Pitch A"
 	testLocation   = "Amman"
+	testOwnerPhone = "+962791111111"
+	testOwnerName  = "Owner Khaled"
 )
 
 // fullContact is the resolved contact for a player booking with every field the
@@ -120,6 +122,15 @@ func fullContact() *repository.BookingContact {
 		PitchName:  testPitchName,
 		Location:   testLocation,
 	}
+}
+
+// fullContactWithOwner is fullContact plus the pitch owner's phone/name — the
+// contact shape a real GetBookingContact row returns post WO-OWNER-NOTIFY-CREATE.
+func fullContactWithOwner() *repository.BookingContact {
+	c := fullContact()
+	c.OwnerPhone = testOwnerPhone
+	c.OwnerName = testOwnerName
+	return c
 }
 
 func sampleBooking() *models.Booking {
@@ -467,6 +478,167 @@ func TestCreate_PitchNotBookableYieldsNoSideEffect(t *testing.T) {
 	}
 	if len(notifier.sent) != 0 {
 		t.Errorf("notifier received %d messages, want 0 for a non-bookable pitch", len(notifier.sent))
+	}
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Create — owner new-booking notification (WO-OWNER-NOTIFY-CREATE)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// TestCreate_PlayerBooking_NotifiesOwner: a player-initiated booking (ActorRole
+// unset, the public POST /bookings default) dispatches BOTH the player
+// confirmation and the owner new-booking alert, addressed to the OWNER's phone
+// — not the player's.
+func TestCreate_PlayerBooking_NotifiesOwner(t *testing.T) {
+	b := sampleBooking()
+	store := &fakeStore{booking: b, contact: fullContactWithOwner()}
+	notifier := &fakeNotifier{}
+	svc := newService(store, notifier)
+
+	if _, err := svc.Create(context.Background(), models.CreateBookingRequest{
+		PitchID: 7, PlayerID: 3, ActorRole: repository.ActorPlayer,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(notifier.sent) != 2 {
+		t.Fatalf("notifier received %d messages, want 2 (confirmation + owner alert)", len(notifier.sent))
+	}
+
+	var ownerMsg *notification.OutboundMessage
+	for i := range notifier.sent {
+		if notifier.sent[i].Kind == notification.KindOwnerNewBooking {
+			ownerMsg = &notifier.sent[i]
+		}
+	}
+	if ownerMsg == nil {
+		t.Fatalf("no %s message dispatched; sent = %+v", notification.KindOwnerNewBooking, notifier.sent)
+	}
+	if ownerMsg.Recipient != testOwnerPhone {
+		t.Errorf("owner alert recipient = %q, want owner phone %q (not the player's)", ownerMsg.Recipient, testOwnerPhone)
+	}
+	payload, ok := ownerMsg.Payload.(notification.OwnerNewBookingPayload)
+	if !ok {
+		t.Fatalf("payload type = %T, want OwnerNewBookingPayload", ownerMsg.Payload)
+	}
+	if payload.BookingID != b.ID ||
+		payload.OwnerName != testOwnerName ||
+		payload.PitchName != testPitchName ||
+		payload.PlayerName != testPlayerName ||
+		payload.PlayerPhone != testPhone ||
+		!payload.StartTime.Equal(b.StartTime) || !payload.EndTime.Equal(b.EndTime) ||
+		payload.Amount != b.TotalPrice {
+		t.Errorf("owner payload = %+v, does not match booking %+v / contact %+v", payload, b, fullContactWithOwner())
+	}
+	// Amount must be the booking TOTAL price, never amount_paid — TotalPrice is
+	// the only price field on models.Booking, so this also proves no other field
+	// could have been substituted.
+	if payload.Amount != 30 {
+		t.Errorf("owner payload amount = %v, want b.TotalPrice (30)", payload.Amount)
+	}
+}
+
+// TestCreate_PlayerBookingEmptyActorRole_NotifiesOwner: an unset ActorRole (the
+// zero value — every caller that predates this field, and any request that
+// somehow reaches Create without it) is treated as player, so the owner alert
+// still fires. This preserves the pre-WO unconditional-notify behaviour of this
+// path for any caller that does not yet set ActorRole.
+func TestCreate_PlayerBookingEmptyActorRole_NotifiesOwner(t *testing.T) {
+	b := sampleBooking()
+	store := &fakeStore{booking: b, contact: fullContactWithOwner()}
+	notifier := &fakeNotifier{}
+	svc := newService(store, notifier)
+
+	if _, err := svc.Create(context.Background(), models.CreateBookingRequest{PitchID: 7, PlayerID: 3}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(notifier.sent) != 2 {
+		t.Fatalf("notifier received %d messages, want 2 (confirmation + owner alert)", len(notifier.sent))
+	}
+}
+
+// TestCreate_OwnerCreatedBooking_DoesNotNotifyOwner: an owner who creates a
+// booking for themselves (ActorRole = owner) must NEVER receive the owner
+// new-booking alert about their own action — only the player confirmation
+// fires (the owner IS the actor here, so even that leg is moot in practice,
+// but this test isolates the owner-alert gate specifically).
+func TestCreate_OwnerCreatedBooking_DoesNotNotifyOwner(t *testing.T) {
+	b := sampleBooking()
+	store := &fakeStore{booking: b, contact: fullContactWithOwner()}
+	notifier := &fakeNotifier{}
+	svc := newService(store, notifier)
+
+	if _, err := svc.Create(context.Background(), models.CreateBookingRequest{
+		PitchID: 7, PlayerID: 3, ActorRole: repository.ActorOwner,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for _, msg := range notifier.sent {
+		if msg.Kind == notification.KindOwnerNewBooking {
+			t.Fatalf("owner/admin-created booking must never dispatch %s; got %+v", notification.KindOwnerNewBooking, msg)
+		}
+	}
+	if len(notifier.sent) != 1 || notifier.sent[0].Kind != notification.KindBookingConfirmed {
+		t.Errorf("sent = %+v, want exactly the player confirmation", notifier.sent)
+	}
+}
+
+// TestCreate_AdminCreatedBooking_DoesNotNotifyOwner: same gate, ActorRole = admin.
+func TestCreate_AdminCreatedBooking_DoesNotNotifyOwner(t *testing.T) {
+	b := sampleBooking()
+	store := &fakeStore{booking: b, contact: fullContactWithOwner()}
+	notifier := &fakeNotifier{}
+	svc := newService(store, notifier)
+
+	if _, err := svc.Create(context.Background(), models.CreateBookingRequest{
+		PitchID: 7, PlayerID: 3, ActorRole: repository.ActorAdmin,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for _, msg := range notifier.sent {
+		if msg.Kind == notification.KindOwnerNewBooking {
+			t.Fatalf("owner/admin-created booking must never dispatch %s; got %+v", notification.KindOwnerNewBooking, msg)
+		}
+	}
+	if len(notifier.sent) != 1 || notifier.sent[0].Kind != notification.KindBookingConfirmed {
+		t.Errorf("sent = %+v, want exactly the player confirmation", notifier.sent)
+	}
+}
+
+// TestCreate_NoOwnerPhone_SkipsOwnerAlertOnly: when the pitch's owner row has no
+// phone on file, the owner alert is silently skipped but the player
+// confirmation still fires — the two sends are independent.
+func TestCreate_NoOwnerPhone_SkipsOwnerAlertOnly(t *testing.T) {
+	b := sampleBooking()
+	store := &fakeStore{booking: b, contact: fullContact()} // no OwnerPhone set
+	notifier := &fakeNotifier{}
+	svc := newService(store, notifier)
+
+	if _, err := svc.Create(context.Background(), models.CreateBookingRequest{
+		PitchID: 7, PlayerID: 3, ActorRole: repository.ActorPlayer,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if len(notifier.sent) != 1 || notifier.sent[0].Kind != notification.KindBookingConfirmed {
+		t.Errorf("sent = %+v, want exactly the player confirmation (owner has no phone)", notifier.sent)
+	}
+}
+
+// TestCreate_ContactFetchedOnce_ForBothNotifications proves the single-round-trip
+// contract (recon #1 / WO item 1): notifying both the player and the owner from
+// one Create() call must resolve GetBookingContact exactly once, not twice.
+func TestCreate_ContactFetchedOnce_ForBothNotifications(t *testing.T) {
+	b := sampleBooking()
+	store := &fakeStore{booking: b, contact: fullContactWithOwner()}
+	notifier := &fakeNotifier{}
+	svc := newService(store, notifier)
+
+	if _, err := svc.Create(context.Background(), models.CreateBookingRequest{
+		PitchID: 7, PlayerID: 3, ActorRole: repository.ActorPlayer,
+	}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if store.contactCalls != 1 {
+		t.Errorf("GetBookingContact called %d times, want exactly 1 (single round trip for both sends)", store.contactCalls)
 	}
 }
 

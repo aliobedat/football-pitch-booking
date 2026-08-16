@@ -15,7 +15,7 @@
 // modal on desktop). PaymentStatusPill is deliberately NOT reused — it only
 // knows paid_cash/unpaid; this surface needs the four payment_display states.
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   X, Loader2, AlertTriangle, BanknoteArrowUp, Pencil, Check, Clock, Plus, Repeat, Trash2,
 } from 'lucide-react';
@@ -135,6 +135,63 @@ export default function BookingSheet({
   const reasonValid = !!effectiveReason;
 
   const isSeries = booking.recurrence_group_id != null;
+
+  // ── Contact edit (WO-BOOKING-EDIT-CONTACT) ─────────────────────────────────
+  // Owner/admin only (canExtend already encodes that — extend and contact-edit
+  // share the same role gate), and only for source rows that actually carry a
+  // guest_name/guest_phone. Fetched lazily via a dedicated detail read (never
+  // widened into the list payload staff also see); fails SILENT on 403/404 —
+  // no toast, no empty form, matching R4.
+  const canEditContact = canExtend && (booking.source === 'manual' || booking.source === 'academy');
+  const [contact, setContact] = useState<{ guest_name: string; guest_phone: string; recurrence_group_id: string | null } | null>(null);
+  const [editingContact, setEditingContact] = useState(false);
+  const [contactNameInput, setContactNameInput] = useState('');
+  const [contactPhoneInput, setContactPhoneInput] = useState('');
+  const [contactNameError, setContactNameError] = useState<string | null>(null);
+  const [contactPhoneError, setContactPhoneError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!canEditContact) { setContact(null); return; }
+    let cancelled = false;
+    api.get(`/bookings/${booking.id}/contact`)
+      .then(({ data }) => { if (!cancelled) setContact(data.data); })
+      .catch(() => { /* fail silent — 403/404 render nothing */ });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [booking.id, canEditContact]);
+
+  const openContactEdit = () => {
+    if (!contact) return;
+    setContactNameInput(contact.guest_name);
+    setContactPhoneInput(contact.guest_phone);
+    setContactNameError(null);
+    setContactPhoneError(null);
+    setEditingContact(true);
+  };
+
+  const saveContact = async () => {
+    if (!contact) return;
+    setContactNameError(null);
+    setContactPhoneError(null);
+    const body: { guest_name?: string; guest_phone?: string } = {};
+    if (contactNameInput.trim() !== contact.guest_name) body.guest_name = contactNameInput.trim();
+    if (contactPhoneInput.trim() !== contact.guest_phone) body.guest_phone = contactPhoneInput.trim();
+    if (Object.keys(body).length === 0) { setEditingContact(false); return; }
+
+    setSubmitting(true);
+    try {
+      const { data } = await api.patch(`/bookings/${booking.id}/contact`, body);
+      setContact(data.data);
+      setEditingContact(false);
+    } catch (err: any) {
+      const code = err?.response?.data?.error;
+      if (code === 'invalid_phone') setContactPhoneError('رقم الهاتف غير صالح');
+      else if (code === 'invalid_name') setContactNameError('اسم الزبون غير صالح');
+      else setContactPhoneError(GENERIC_ERROR);
+    } finally {
+      setSubmitting(false);
+    }
+  };
 
   const ended = useMemo(() => new Date(booking.end_time).getTime() < Date.now(), [booking.end_time]);
   const badge = paymentDisplayBadge(booking.payment_display);
@@ -344,6 +401,81 @@ export default function BookingSheet({
             <X size={18} aria-hidden />
           </button>
         </div>
+
+        {/* ── Contact (name/phone) — owner/admin, manual/academy only ── */}
+        {canEditContact && contact && (
+          <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-4 flex flex-col gap-3 mb-4">
+            {contact.recurrence_group_id != null && (
+              <p className="text-[11px] text-white/40" dir="rtl">التعديل يخص هذا الموعد فقط، وليس السلسلة كاملة</p>
+            )}
+            {!editingContact ? (
+              <>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[12px] text-white/45">اسم الزبون</span>
+                  <button
+                    type="button"
+                    onClick={openContactEdit}
+                    disabled={submitting}
+                    className="inline-flex items-center gap-1.5 text-[14px] font-bold text-[#f0efe8] disabled:opacity-50 group"
+                  >
+                    <span dir="rtl">{contact.guest_name}</span>
+                    <Pencil size={13} className="text-white/30 group-hover:text-white/60 transition-colors" aria-hidden />
+                  </button>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[12px] text-white/45">رقم الهاتف</span>
+                  <span className="text-[14px] font-bold text-[#f0efe8] tabular-nums" dir="ltr">{contact.guest_phone}</span>
+                </div>
+              </>
+            ) : (
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-[12px] text-white/45">اسم الزبون</span>
+                  <input
+                    value={contactNameInput}
+                    onChange={e => setContactNameInput(e.target.value)}
+                    dir="rtl"
+                    autoFocus
+                    disabled={submitting}
+                    className="w-full bg-white/[0.05] border border-white/[0.15] rounded-lg px-3 py-1.5 text-[13px] text-[#f0efe8] text-right focus:outline-none focus:border-emerald-500/50 disabled:opacity-50"
+                  />
+                  {contactNameError && <p className="text-[11px] text-red-400" dir="rtl">{contactNameError}</p>}
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-[12px] text-white/45">رقم الهاتف</span>
+                  <input
+                    value={contactPhoneInput}
+                    onChange={e => setContactPhoneInput(e.target.value)}
+                    dir="ltr"
+                    disabled={submitting}
+                    className="w-full bg-white/[0.05] border border-white/[0.15] rounded-lg px-3 py-1.5 text-[13px] text-[#f0efe8] text-right tabular-nums focus:outline-none focus:border-emerald-500/50 disabled:opacity-50"
+                  />
+                  {contactPhoneError && <p className="text-[11px] text-red-400" dir="rtl">{contactPhoneError}</p>}
+                </div>
+                <div className="flex items-center gap-2 justify-end">
+                  <button
+                    type="button"
+                    onClick={saveContact}
+                    disabled={submitting}
+                    aria-label="حفظ بيانات الزبون"
+                    className="w-9 h-9 inline-flex items-center justify-center rounded-lg bg-emerald-500/15 border border-emerald-500/35 text-emerald-300 disabled:opacity-50"
+                  >
+                    <Check size={15} aria-hidden />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingContact(false)}
+                    disabled={submitting}
+                    aria-label="إلغاء"
+                    className="w-9 h-9 inline-flex items-center justify-center rounded-lg border border-white/[0.1] text-white/50 disabled:opacity-50"
+                  >
+                    <X size={15} aria-hidden />
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* ── Money block ── */}
         <div className="rounded-2xl border border-white/[0.08] bg-white/[0.02] p-4 flex flex-col gap-4">

@@ -85,7 +85,7 @@ func Register(
 	// WO-BOOKING-SHEET / PR-A: owner/admin booking extension (payment lives on the
 	// existing schedule PatchPayment handler). Hours resolved via the shared PitchModel.
 	bookingSheetHandler := handlers.NewBookingSheetHandler(
-		repository.NewBookingSheetRepository(db), &data.PitchModel{DB: db})
+		repository.NewBookingSheetRepository(db), &data.PitchModel{DB: db}).WithCustomers(customerRepo)
 	// WO-VENUES: venue CRUD + public reads.
 	venueHandler := handlers.NewVenueHandler(&data.VenueModel{DB: db})
 	v1 := r.Group("/api/v1")
@@ -409,6 +409,17 @@ func Register(
 		protected.PATCH("/bookings/:id/extend",
 			middleware.RequireRole("owner", "admin"),
 			bookingSheetHandler.ExtendBooking,
+		)
+		// WO-BOOKING-EDIT-CONTACT: correct guest name/phone on an existing
+		// manual/academy booking. Owner/admin only — staff barred here at the
+		// route (re-asserted in-handler, mirroring extend).
+		protected.GET("/bookings/:id/contact",
+			middleware.RequireRole("owner", "admin"),
+			bookingSheetHandler.GetContact,
+		)
+		protected.PATCH("/bookings/:id/contact",
+			middleware.RequireRole("owner", "admin"),
+			bookingSheetHandler.PatchContact,
 		)
 
 		// Owner/admin BLOCKS: create held time (source='block'), or remove it.

@@ -138,7 +138,7 @@ func WhatsAppQuotaWarnThreshold() int { return quotaWarnThreshold }
 // WhatsApp adapters) and any future kind are exempt.
 func isQuotaGated(k MessageKind) bool {
 	switch k {
-	case KindOTP, KindBookingConfirmed, KindBookingCancelled, KindBookingReminder:
+	case KindOTP, KindBookingConfirmed, KindBookingCancelled, KindBookingReminder, KindOwnerNewBooking:
 		return true
 	default:
 		return false

@@ -215,6 +215,7 @@ type InfobipTemplates struct {
 	BookingConfirmed string // INFOBIP_BOOKING_CONFIRMED_TEMPLATE — UTILITY-category template
 	BookingCancelled string // INFOBIP_BOOKING_CANCELLED_TEMPLATE — UTILITY-category template
 	BookingReminder  string // INFOBIP_BOOKING_REMINDER_TEMPLATE — UTILITY-category template
+	OwnerNewBooking  string // INFOBIP_OWNER_NEW_BOOKING_TEMPLATE — UTILITY-category template (WO-OWNER-NOTIFY-CREATE)
 }
 
 // OTPConfig holds the configuration for the phone-first OTP flow.
@@ -465,6 +466,7 @@ func loadInfobipConfig() InfobipConfig {
 			BookingConfirmed: getEnv("INFOBIP_BOOKING_CONFIRMED_TEMPLATE", ""),
 			BookingCancelled: getEnv("INFOBIP_BOOKING_CANCELLED_TEMPLATE", ""),
 			BookingReminder:  getEnv("INFOBIP_BOOKING_REMINDER_TEMPLATE", ""),
+			OwnerNewBooking:  getEnv("INFOBIP_OWNER_NEW_BOOKING_TEMPLATE", ""),
 		},
 	}
 }
