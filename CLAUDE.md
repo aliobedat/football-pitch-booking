@@ -441,3 +441,10 @@ single statement — best-effort partial success requires it. What is preserved:
 zero pre-check SELECT before any individual row's UPDATE; GIST EXCLUDE referees
 each row independently. The date is never touched in series mode — only
 time-of-day and pitch, applied uniformly, each occurrence keeping its own date.
+
+## Neon pooled endpoint — search_path flakiness (2026-08-16)
+The pooled Neon host (`-pooler` in the hostname) intermittently returns
+`relation "bookings" does not exist` even with `&search_path=public` in the DSN,
+across multiple sessions now. Workaround: use the unpooled host (same connection
+string, drop `-pooler`) for local dev/Gate-2 scratch work. Not yet root-caused;
+treat as a known workaround, not a permanent fix.
