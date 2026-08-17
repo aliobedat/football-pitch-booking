@@ -20,6 +20,7 @@ import (
 	"github.com/ali/football-pitch-api/internal/middleware"
 	"github.com/ali/football-pitch-api/internal/phone"
 	"github.com/ali/football-pitch-api/internal/repository"
+	"github.com/ali/football-pitch-api/internal/timeutil"
 )
 
 // operatingHoursResolver is the slice of *data.PitchModel the extend handler
@@ -322,8 +323,10 @@ func (h *BookingSheetHandler) PatchContact(c *gin.Context) {
 // difference between pitches.
 
 type rescheduleRequest struct {
-	StartTime *time.Time `json:"start_time"`
-	PitchID   *int64     `json:"pitch_id"`
+	StartTime     *time.Time `json:"start_time"`
+	PitchID       *int64     `json:"pitch_id"`
+	ApplyToSeries bool       `json:"apply_to_series"` // WO-SERIES-RESCHEDULE
+	TimeOfDay     *string    `json:"time_of_day"`     // WO-SERIES-RESCHEDULE: "HH:MM", series mode only
 }
 
 // RescheduleBooking — PATCH /bookings/:id/reschedule  body { start_time?, pitch_id? }.
@@ -344,6 +347,12 @@ func (h *BookingSheetHandler) RescheduleBooking(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request", "message": "malformed JSON body"})
 		return
 	}
+
+	if req.ApplyToSeries {
+		h.rescheduleSeries(c, actor, bookingID, req)
+		return
+	}
+
 	if req.StartTime == nil && req.PitchID == nil {
 		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "no_fields", "message": "لم يتم إرسال أي حقل للتعديل"})
 		return
@@ -417,4 +426,154 @@ func (h *BookingSheetHandler) RescheduleBooking(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": sheet})
+}
+
+// ── Series reschedule (WO-SERIES-RESCHEDULE) ─────────────────────────────────
+//
+// apply_to_series shifts TIME-OF-DAY and/or PITCH uniformly across every active
+// future occurrence of the group; each occurrence KEEPS ITS OWN DATE. This is a
+// documented deviation from "single atomic UPDATE": best-effort partial success
+// requires a per-row loop. What is NOT relaxed — zero pre-check SELECT before
+// any individual row's UPDATE attempt; GIST EXCLUDE referees each row
+// independently (see CLAUDE.md, "Series reschedule — documented deviation").
+
+// parseTimeOfDay validates "HH:MM" and returns hour/minute. time.Parse with
+// layout "15:04" already rejects an out-of-range hour/minute.
+func parseTimeOfDay(raw string) (hour, minute int, err error) {
+	t, err := time.Parse("15:04", raw)
+	if err != nil {
+		return 0, 0, err
+	}
+	return t.Hour(), t.Minute(), nil
+}
+
+func rescheduleRowDate(t time.Time) string { return timeutil.InAmman(t).Format("2006-01-02") }
+func rescheduleRowTime(t time.Time) string { return timeutil.InAmman(t).Format("15:04") }
+
+// rescheduleSeries handles apply_to_series=true — a distinct code path from the
+// single-booking reschedule above, kept separate rather than interleaved so
+// neither reader has to hold both response shapes in mind at once.
+func (h *BookingSheetHandler) rescheduleSeries(c *gin.Context, actor auth.Actor, bookingID int64, req rescheduleRequest) {
+	if req.StartTime != nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{
+			"error": "date_not_allowed_in_series_mode", "message": "لا يمكن تحديد تاريخ عند التطبيق على السلسلة — كل موعد يحتفظ بتاريخه",
+		})
+		return
+	}
+	if req.TimeOfDay == nil && req.PitchID == nil {
+		c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "no_fields", "message": "لم يتم إرسال أي حقل للتعديل"})
+		return
+	}
+
+	var hour, minute int
+	haveTimeOfDay := req.TimeOfDay != nil
+	if haveTimeOfDay {
+		h_, m_, err := parseTimeOfDay(*req.TimeOfDay)
+		if err != nil {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "invalid_time_of_day", "message": "صيغة الوقت غير صالحة (HH:MM)"})
+			return
+		}
+		hour, minute = h_, m_
+	}
+
+	ctx := c.Request.Context()
+
+	group, err := h.repo.LoadSeriesRescheduleGroup(ctx, actor, bookingID)
+	if err != nil {
+		switch {
+		case errors.Is(err, repository.ErrSheetNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "الحجز غير موجود أو لا تملك صلاحية تعديله"})
+		case errors.Is(err, repository.ErrNotRecurring):
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "not_recurring", "message": "هذا الحجز ليس جزءًا من سلسلة متكررة"})
+		default:
+			c.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "could not load the series"})
+		}
+		return
+	}
+
+	// Target pitch resolved ONCE (not per-row) — it's the same explicit target
+	// for the whole series, or each row keeps its own. Resolving under scope
+	// here (not just trusting the request) prevents an attacker-supplied
+	// pitch_id from becoming a cross-tenant hours-configuration oracle, same
+	// reasoning as the single-booking path.
+	var explicitPitch *int64
+	if req.PitchID != nil {
+		if err := h.repo.ResolveOwnedPitch(ctx, actor, *req.PitchID); err != nil {
+			if errors.Is(err, repository.ErrSheetNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"error": "not_found", "message": "الحجز غير موجود أو لا تملك صلاحية تعديله"})
+				return
+			}
+			c.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "could not resolve target pitch"})
+			return
+		}
+		explicitPitch = req.PitchID
+	}
+
+	now := time.Now()
+	moved := []gin.H{}
+	conflicts := []gin.H{}
+	skipped := []gin.H{}
+
+	for _, row := range group {
+		if row.Start.Before(now) {
+			skipped = append(skipped, gin.H{"id": row.ID, "date": rescheduleRowDate(row.Start), "reason": "already_started"})
+			continue
+		}
+
+		targetPitch := row.PitchID
+		if explicitPitch != nil {
+			targetPitch = *explicitPitch
+		}
+		newStart := row.Start
+		if haveTimeOfDay {
+			ammanDate := timeutil.InAmman(row.Start)
+			newStart = time.Date(ammanDate.Year(), ammanDate.Month(), ammanDate.Day(), hour, minute, 0, 0, timeutil.Amman())
+		}
+		newEnd := newStart.Add(row.End.Sub(row.Start))
+
+		// Hours check is a business-rule call against the resolver, not a raw
+		// SQL pre-check SELECT on bookings — same distinction the single-row
+		// path relies on. A resolver ERROR is infrastructural, not a
+		// business-logic conflict, so it aborts the whole operation.
+		contained, _, err := h.hours.SlotWithinOpenHours(ctx, int(targetPitch), newStart, newEnd)
+		if err != nil {
+			c.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "could not resolve operating hours"})
+			return
+		}
+		if !contained {
+			conflicts = append(conflicts, gin.H{"id": row.ID, "date": rescheduleRowDate(row.Start), "reason": "outside_hours"})
+			continue
+		}
+
+		// ONE atomic UPDATE per row. No pre-check SELECT. GIST EXCLUDE is the
+		// sole conflict referee for this row.
+		if err := h.repo.ApplySeriesRescheduleRow(ctx, actor, row.ID, newStart, targetPitch); err != nil {
+			if errors.Is(err, repository.ErrSheetConflict) || errors.Is(err, repository.ErrSheetNotFound) {
+				conflicts = append(conflicts, gin.H{"id": row.ID, "date": rescheduleRowDate(row.Start), "reason": "slot_conflict"})
+				continue
+			}
+			// A real bug, not a business-logic conflict — abort the whole
+			// operation. Rows already moved in earlier loop iterations stay
+			// moved (each was its own committed statement); this response
+			// carries no partial report, matching the WO's "return 500" call.
+			c.Error(err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error", "message": "could not reschedule the series"})
+			return
+		}
+
+		moved = append(moved, gin.H{
+			"id": row.ID, "date": rescheduleRowDate(row.Start),
+			"old_time": rescheduleRowTime(row.Start), "new_time": rescheduleRowTime(newStart),
+		})
+	}
+
+	status := http.StatusOK
+	if len(moved) == 0 && len(conflicts) > 0 {
+		// Nothing happened at all — every attempted row failed.
+		status = http.StatusConflict
+	}
+	c.JSON(status, gin.H{"moved": moved, "conflicts": conflicts, "skipped": skipped})
 }

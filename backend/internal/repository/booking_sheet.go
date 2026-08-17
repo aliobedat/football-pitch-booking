@@ -167,7 +167,40 @@ type BookingSheetRepository interface {
 	// (WO-BOOKING-RESCHEDULE: same duration only — a price differs-by-pitch
 	// delta is explicitly out of scope, unlike ApplyExtend's additive delta).
 	ApplyReschedule(ctx context.Context, actor auth.Actor, bookingID int64, newStart time.Time, newPitchID int64) (*BookingSheet, error)
+
+	// LoadSeriesRescheduleGroup resolves bookingID's recurrence_group_id under
+	// OWNER scope (404 if bookingID itself is unknown/foreign), then lists every
+	// active manual/academy member of that group, oldest-first (WO-SERIES-RESCHEDULE).
+	// ErrNotRecurring if bookingID has no group. This is enumeration, not a
+	// conflict pre-check — occupancy of each candidate's NEW slot is decided
+	// solely by that row's own atomic UPDATE (ApplySeriesRescheduleRow).
+	LoadSeriesRescheduleGroup(ctx context.Context, actor auth.Actor, bookingID int64) ([]seriesRescheduleRow, error)
+
+	// ApplySeriesRescheduleRow moves ONE series member (rowID) to [newStart,
+	// newStart+duration) on newPitchID, in one atomic owner-scoped UPDATE — the
+	// per-row analogue of ApplyReschedule, deliberately WITHOUT the
+	// recurrence_group_id IS NULL guard (series rows ARE recurring by
+	// definition here). No pre-check SELECT; GIST EXCLUDE (23P01) is the sole
+	// conflict referee for this row. ErrSheetConflict on 23P01; ErrSheetNotFound
+	// if the WHERE guards match no row (race between enumeration and apply,
+	// including a since-changed status/scope) — both map to the caller's
+	// "conflicts" bucket, never abort the whole series operation. Any other
+	// error is a real bug and propagates unwrapped so the caller aborts.
+	ApplySeriesRescheduleRow(ctx context.Context, actor auth.Actor, rowID int64, newStart time.Time, newPitchID int64) error
 }
+
+// seriesRescheduleRow is one enumerated candidate for a series reschedule.
+type seriesRescheduleRow struct {
+	ID      int64
+	PitchID int64
+	Start   time.Time // lower(booking_range)
+	End     time.Time // upper(booking_range)
+	Status  string
+}
+
+// ErrNotRecurring — the booking has no recurrence_group_id; apply_to_series
+// cannot apply. → 422 not_recurring.
+var ErrNotRecurring = errors.New("sheet: booking is not part of a recurrence series")
 
 // rescheduleTarget is the pre-write snapshot the handler validates (recurrence;
 // the candidate range for the operating-hours gate) before the atomic UPDATE.
@@ -452,4 +485,88 @@ func (r *bookingSheetRepo) ApplyReschedule(ctx context.Context, actor auth.Actor
 		s.AmountPaid = &v
 	}
 	return s.withDerived(), nil
+}
+
+// ── Series reschedule repository (WO-SERIES-RESCHEDULE) ──────────────────────
+
+func (r *bookingSheetRepo) LoadSeriesRescheduleGroup(ctx context.Context, actor auth.Actor, bookingID int64) ([]seriesRescheduleRow, error) {
+	// Reuses LoadRescheduleTarget for the owner-scoped existence + recurrence
+	// check on bookingID itself — the same 404 concealment as every other
+	// pre-read on this file.
+	target, err := r.LoadRescheduleTarget(ctx, actor, bookingID)
+	if err != nil {
+		return nil, err
+	}
+	if target.RecurrenceGroupID == nil {
+		return nil, ErrNotRecurring
+	}
+
+	// No owner-scope predicate here: recurrence_group_id is generated once per
+	// owner batch (manual/academy recurring create) and never spans owners —
+	// bookingID's own group id was already proven in-scope above.
+	rows, err := r.db.Query(ctx, `
+		SELECT id, pitch_id, lower(booking_range), upper(booking_range), status
+		FROM bookings
+		WHERE recurrence_group_id = $1
+		  AND source IN ('manual','academy')
+		  AND status <> 'cancelled'
+		ORDER BY lower(booking_range)
+	`, *target.RecurrenceGroupID)
+	if err != nil {
+		return nil, fmt.Errorf("LoadSeriesRescheduleGroup: %w", err)
+	}
+	defer rows.Close()
+
+	var group []seriesRescheduleRow
+	for rows.Next() {
+		var row seriesRescheduleRow
+		if err := rows.Scan(&row.ID, &row.PitchID, &row.Start, &row.End, &row.Status); err != nil {
+			return nil, fmt.Errorf("LoadSeriesRescheduleGroup: scan: %w", err)
+		}
+		group = append(group, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("LoadSeriesRescheduleGroup: %w", err)
+	}
+	return group, nil
+}
+
+func (r *bookingSheetRepo) ApplySeriesRescheduleRow(ctx context.Context, actor auth.Actor, rowID int64, newStart time.Time, newPitchID int64) error {
+	// $1 = rowID, $2 = newStart, $3 = newPitchID; owner predicate starts at $4.
+	// Deliberately NO "b.recurrence_group_id IS NULL" guard (unlike
+	// ApplyReschedule) — these rows ARE recurring by construction, that's the
+	// entire point of this method.
+	ownerClause, ownerArgs := actor.OwnerScopeFilter("p.owner_id", 4)
+	args := append([]any{rowID, newStart, newPitchID}, ownerArgs...)
+
+	var id int64
+	err := r.db.QueryRow(ctx, fmt.Sprintf(`
+		UPDATE bookings b
+		SET booking_range = tstzrange($2, $2 + (upper(b.booking_range) - lower(b.booking_range)), '[)'),
+		    pitch_id      = $3,
+		    updated_at    = now()
+		FROM pitches p, pitches np
+		WHERE b.id = $1
+		  AND p.id = b.pitch_id
+		  AND np.id = $3
+		  AND np.owner_id = p.owner_id
+		  AND np.is_active AND np.deleted_at IS NULL
+		  AND b.source IN ('manual','academy')
+		  AND b.status <> 'cancelled'
+		  AND lower(b.booking_range) >= now()
+		  AND $2 >= now()
+		  AND %s
+		RETURNING b.id
+	`, ownerClause), args...).Scan(&id)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == pgExclusionViolation {
+			return ErrSheetConflict
+		}
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrSheetNotFound
+		}
+		return fmt.Errorf("ApplySeriesRescheduleRow: %w", err)
+	}
+	return nil
 }
