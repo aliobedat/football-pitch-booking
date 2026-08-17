@@ -434,3 +434,10 @@ Whether an edit may apply to a whole recurrence_group_id series depends on the f
   vs best-effort decision is unmade.
 This supersedes the original contact-edit G1 ("edits ONE booking row"), which
 predates the field-level distinction.
+
+## Series reschedule — documented deviation from single-atomic-UPDATE (2026-08-16)
+Applying a time/pitch shift across a recurrence series is a per-row loop, not a
+single statement — best-effort partial success requires it. What is preserved:
+zero pre-check SELECT before any individual row's UPDATE; GIST EXCLUDE referees
+each row independently. The date is never touched in series mode — only
+time-of-day and pitch, applied uniformly, each occurrence keeping its own date.
